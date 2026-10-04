@@ -1,0 +1,20 @@
+{
+  "name": "gcn-zkit",
+  "version": "0.4.0",
+  "description": "For agents decompiling GameCube games with decomp-toolkit and porting them to PC with matching behavior: session brief, lookup with callers across DOL and RELs, original asm/data, port planning, behavior-drift checks, test impact, handoffs.",
+  "author": {
+    "name": "zeroz",
+    "url": "https://github.com/zeroz41"
+  },
+  "mcpServers": {
+    "gcn-zkit": {
+      "command": "gcn-zkit",
+      "args": [
+        "serve"
+      ]
+    }
+  },
+  "homepage": "https://github.com/zeroz41/gcn-zkit",
+  "repository": "https://github.com/zeroz41/gcn-zkit",
+  "license": "GPL-3.0"
+}

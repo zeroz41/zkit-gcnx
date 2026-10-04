@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "status": "design-example-not-verified",
+  "milestone": "Replace with a user-visible outcome and its ordinary entry route",
+  "intent_source": "Current request or tracked owner decision",
+  "baseline": {"game": "", "revision": "", "module": "", "sha256": ""},
+  "authority": {"repository_commit": "", "addresses": [], "assets": []},
+  "dependencies": {"callers": [], "initialization": [], "update_order": [], "rng": [], "retirement": []},
+  "owners": {"definitions": "", "mutable_state": "", "behavior": "", "presentation": ""},
+  "shared_consumers": [],
+  "oracle": {"command": [], "inputs": "", "observations": "", "tolerances": "", "replaced_hosts": [], "excluded_decisions": []},
+  "integration": {"entry_route": "", "tests": [], "pause": "", "travel": "", "reload": "", "failure": ""},
+  "intentional_differences": [],
+  "unsupported": []
+}

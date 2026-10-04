@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gcn-zkit"
+version = "0.4.0"
+description = "Fast local evidence for AI agents decompiling GameCube games and porting them with matching behavior"
+requires-python = ">=3.11"
+readme = "README.md"
+license = "GPL-3.0-only"
+keywords = ["gamecube", "decompilation", "decomp-toolkit", "mcp", "claude-code", "codex"]
+dependencies = [
+  "mcp>=1.30,<2",
+  "psutil>=5.9; sys_platform != 'linux'",
+]
+
+[project.optional-dependencies]
+mcp = []  # kept so `pip install gcn-zkit[mcp]` from 0.3 still works
+
+[project.urls]
+Homepage = "https://github.com/zeroz41/gcn-zkit"
+
+[project.scripts]
+gcn-zkit = "gcn_zkit.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
