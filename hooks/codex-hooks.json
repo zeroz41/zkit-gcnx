@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 30,
+            "command": "gcn-zkit hook session-start"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "gcn-zkit",
+  "owner": {
+    "name": "zeroz"
+  },
+  "plugins": [
+    {
+      "name": "gcn-zkit",
+      "source": "./",
+      "description": "GameCube decomp and port toolkit"
+    }
+  ],
+  "description": "gcn-zkit: GameCube decomp and port toolkit for Claude Code and Codex"
+}
