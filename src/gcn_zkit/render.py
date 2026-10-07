@@ -101,6 +101,14 @@ def brief(data: dict, compact: bool = False) -> str:
                        for d in repo['required_reading'])
         if repo.get("start"):
             out.append("- start: " + " ; ".join(f"`{c}`" for c in repo["start"]))
+        if repo.get("audits"):
+            audits = repo['audits']
+            if audits['architecture_rules']:
+                out.append(f"- include audit: `gcn-zkit architecture {name} <paths>` ({audits['architecture_rules']} rules)")
+            for inventory in audits['coverage_inventories']:
+                out.append(f"- inventory audit: `gcn-zkit coverage {name} {inventory['name']}` — {inventory['boundary']}")
+        if repo.get("port_guidance"):
+            out.append('- native-port architecture and completion: ' + repo['port_guidance'])
         if repo.get("rules"):
             out.append("- rules:")
             out.extend(f"  {i}. {rule}" for i, rule in enumerate(repo["rules"], 1))
@@ -162,6 +170,10 @@ def _brief_compact(data: dict) -> str:
         if repo.get("required_reading"):
             out.append("- required reading: " + "; ".join(
                 d['reference'] + (" [MISSING]" if not d['exists'] else "") for d in repo['required_reading']))
+        if repo.get('port_guidance'):
+            out.append('- native port: shared owners and interfaces; composed behavior; automated import/dependency '
+                       'discovery; authored data rather than identity/shape guesses. Complete the requested live '
+                       'system and verify its boundary. Matching decomp keeps original layout/compiler constraints.')
         out.append(f"- rules, finish gate, status, lessons: `zkit_brief {name}` (MCP) or `gcn-zkit brief {name}`")
     demand = data.get("port_demand")
     if demand:
@@ -508,6 +520,35 @@ def impact(data: dict) -> str:
     out.append(f"broad: {data['totals']['broad']['tests']} tests reach these files only through hub headers.")
     out.append(f"limits: {data['limits']}")
     return "\n".join(out)
+
+
+def architecture(data: dict) -> str:
+    out = [f"architecture {data['repo']}: {data['files_checked']} files, {data['includes_checked']} includes, "
+           f"{len(data['findings'])} boundary violations, {len(data['allowed_exceptions'])} allowed exceptions"]
+    out.extend(f"{f['reference']} [{f['rule']}] {f['include']} -> {f['resolved'] or 'unresolved'}: {f['reason']}"
+               for f in data['findings'][:80])
+    if len(data['findings']) > 80:
+        out.append('More findings available as JSON; narrow paths for a system-level review.')
+    out.extend(f"ERROR {e['reference']}: {e['error']}" for e in data['errors'])
+    out.append(f"unresolved/external includes: {len(data['unresolved_includes'])}; macro includes: {data['macro_includes']}")
+    out.append('contracts: ' + ', '.join(data['documents']))
+    out.append('limits: ' + data['limits'])
+    return '\n'.join(out)
+
+
+def coverage(data: dict) -> str:
+    out = [f"coverage {data['repo']}/{data['name']}: {data['expected']} reference identities", data['boundary']]
+    for stage in data['stages']:
+        out.append(f"{stage['id']}: {stage['covered']}/{data['expected']} present, "
+                   f"{len(stage['extra'])} outside reference, {len(stage['inventory']['duplicates'])} duplicated identities")
+        if stage['missing']:
+            out.append('  missing: ' + ', '.join(stage['missing'][:80]) + (' ... use JSON' if len(stage['missing']) > 80 else ''))
+        for dependency, missing in stage['without_prerequisite'].items():
+            out.append(f"  present without {dependency}: " + ', '.join(missing[:80]))
+    out.extend('ERROR ' + e for e in data['errors'])
+    out.append('inventory covered: ' + str(data['inventory_covered']).lower() + '; system completion: not established')
+    out.append('limits: ' + data['limits'])
+    return '\n'.join(out)
 
 
 def test_plan(data: dict) -> str:

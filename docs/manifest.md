@@ -56,6 +56,8 @@ disassembly (`build/<GAMEID>/<module>/asm/`). DOL lookups therefore list REL cal
 | `index_paths`, `index_exclude` | What `search` covers (folders or files; exclude takes regexes). |
 | `cite_paths`, `code_paths` | Where original addresses (`8xxxxxxx`) count as citations, and which of those are code. |
 | `address_pattern` | Regex with one hex group for citations (default: GameCube RAM `8[01]xxxxxx`). |
+| `architecture` | Optional native-port include policy: `scan`, `include_roots`, `documents`, and `rules` (`id`, `sources`, `forbidden_includes`, optional `allow_includes`, `reason`). Patterns are regexes; include rules test both spelling and resolved repository-relative paths. |
+| `coverage` | Named, project-owned inventory comparisons; see below. Populations and game-format selectors belong here, never in toolkit code. |
 | `required_docs` | Repository-relative paths to current architecture/design guides, source layout, engineering/performance standards and contracts. Both brief formats list them and mark missing files. Keep game policy in these documents, not toolkit code. |
 | `rules` | Short rules shown in every brief. Keep them short; the repo's `AGENTS.md` stays the contract. |
 | `start`, `finish` | Commands shown in the brief. `finish` is the gate `zkit-finish` runs. |
@@ -129,3 +131,53 @@ disassembly (`build/<GAMEID>/<module>/asm/`). DOL lookups therefore list REL cal
 Keep a project file with your own rules, lessons and evals outside this repo (for example next to your decomp), and
 point `knowledge` at your lessons folder. `gcn-zkit setup <file>` registers it, indexes, and connects Claude Code and
 Codex (`gcn-zkit use <file>` only registers it).
+
+## Native-port architecture and inventory audits
+
+`gcn-zkit architecture native src/simulation` checks a selected system; omit paths to check changed source
+files or use `--all` for configured roots. It checks literal C/C++ includes, including conditional branches,
+and reports explicit exceptions, unresolved headers and macro includes. It is not a compiler or semantic
+architecture proof. It does not apply native design refactors to matching decomp.
+
+```json
+"architecture": {
+  "scan": ["engine"],
+  "include_roots": ["engine"],
+  "documents": ["native:docs/architecture.md"],
+  "rules": [{
+    "id": "simulation-device-boundary",
+    "sources": "^engine/simulation/",
+    "forbidden_includes": "(^|/)device/|^GraphicsAPI/",
+    "allow_includes": ["(^|/)device/Events.hpp$"],
+    "reason": "Simulation consumes native events; device ownership stays in the backend."
+  }]
+}
+```
+
+`gcn-zkit coverage native effects` compares identities read from current project files at every call.
+Reference and stage inventories support `regex` with a named `id` capture, or `json` selecting an array
+with `pointer` and each identity with `id_pointer` (empty pointers select the whole value). Files may be
+repository-relative paths or globs; optional `repo` selects another configured repository. String and
+integer identities are accepted. Duplicate identities and empty inventories are errors unless explicitly
+permitted with `unique: false` or `allow_empty: true`; unmatched file globs remain errors. Source hashes and
+per-identity locations are returned in JSON. Stages must follow their prerequisites; no converter is executed.
+
+```json
+"coverage": {
+  "effects": {
+    "boundary": "Original-derived effect inventory through conversion and runtime registration; execution excluded.",
+    "reference": {"files": ["evidence/effects.json"], "format": "json", "pointer": "/effects", "id_pointer": "/id"},
+    "stages": [
+      {"id": "converted", "inventory": {"files": ["data/effects/*.json"], "format": "json", "pointer": "/ids"}},
+      {"id": "registered", "requires": ["converted"], "inventory": {"files": ["build/registered-effects.json"], "format": "json"}}
+    ]
+  }
+}
+```
+
+Each stage defaults to requiring `reference`; list prior stage ids in `requires` to expose identities that
+appear downstream without their prerequisite. Additional identities are listed separately. Declare the real
+population and exclusions: do not choose selectors or allow-empty settings just to make a report green.
+`inventory_covered` means the declared identities are present without extraction errors or prerequisite gaps.
+It never sets `system_complete` true. Valid decoding, resource lifetime, live admission, original behavior and
+successful verification need their own independent evidence and the project's existing import/test tools.

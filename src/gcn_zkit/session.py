@@ -223,6 +223,15 @@ def brief(project: Project, repo: str | None = None, demand_rows: int = 5) -> di
             "finish": config.get("finish", []), "handoffs": handoffs(project, name, limit=2),
             "lessons": [{"id": l["id"], "title": l["title"]} for l in lessons(project, role)],
         }
+        if config.get("architecture") or config.get("coverage"):
+            entry["audits"] = {
+                "architecture_rules": len(config.get("architecture", {}).get("rules", [])),
+                "coverage_inventories": [{"name": key, "boundary": value["boundary"]}
+                                         for key, value in config.get("coverage", {}).items()],
+            }
+        if role == "native":
+            from .guidance import PORT_GUIDANCE
+            entry['port_guidance'] = PORT_GUIDANCE
         if role == "decomp":
             entry["next"] = _decomp_next(project, name)
             entry["lane_yield_last3"] = _lane_yield(project, name)

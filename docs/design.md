@@ -51,6 +51,8 @@ paths.
 | `reuse` | Identical normalized bodies of free functions (≤40 lines) across files, plus files that name several sibling variants | Whether sharing is correct. These are candidates |
 | `activity` | Processes whose cwd is inside a repo (Linux: /proc; macOS/Windows: psutil); lock holders from `/proc/locks` on Linux only (the lock is never taken); dirty files with ages; unmerged branches; worktrees | Who owns a dirty file (age is the hint) |
 | `gate` | The manifest's canonical finish list, and which repo copies lack or add commands | Whether the gate passes. Run it |
+| `architecture` | Project-configured C/C++ include boundary checks, exact source lines, resolved headers and explicit exceptions | Semantic coupling, ownership, preprocessor evaluation or a complete architecture proof |
+| `coverage` | Dynamic reference/stage inventory joins, duplicates, missing identities, prerequisite gaps and source hashes | Import validity, runtime admission, successful tests or system completion |
 | `test-plan` | Exact CTest names, recursive setup/cleanup fixture closure, historical costs and optional consolidated CMake prebuild commands | Test execution, coverage, rebuild cost or speedup. Complex/environment-dependent fixtures remain under CTest; required fixtures are never disabled |
 | `impact` (native) | Files that directly `#include` the change (the consumers to re-test); CTest names whose test sources include it at distance 1 (direct) or 2 (near), or whose commands name an edited script/file; exact `ctest -R` commands, build targets and fixture names | Behavior reached only through linked libraries or hub headers (counted as "broad"); script imports and dynamically formed paths; build-fixture time |
 | `lookup` data refs | Every pointer to the function's start inside the original's data sections, named by holder symbol and offset. The same slot in many `__vt__*` tables means an inherited base-class virtual | Virtual calls made through registers (`bctrl`) at runtime |
@@ -77,6 +79,20 @@ See [manifest.md](manifest.md) for every field. How `impact` maps tests:
   Build targets are discovered from compiler output paths; wrappers/renamed executable targets may be absent.
 - Recorded durations exclude build fixtures; missing costs are counted, not represented as measured zero.
   Optional parallel prebuilds use the selected targets. Repository finish requirements remain authoritative.
+
+## Native-port design and completion
+
+MCP initialization and session guidance explicitly scope native architecture to porting. Shared owners,
+interfaces at real service boundaries, composition, original-format/protocol adapters and automated import
+dependency handling are expected; behavior must come from authored commands/data and original evidence,
+not content identity or shape. Matching decomp preserves original layout, translation units and compiler
+constraints. The generic toolkit supplies checks; each project supplies its policy and format selectors.
+
+The architecture audit reads selected current source files and resolves literal include paths. Comments and
+raw strings cannot create fake directives. It considers all conditional branches and reports macro/external
+limits. The inventory audit compares current extracted identities across declared stages, with provenance,
+missing inputs, duplicates and dependency gaps visible. Both are read-only and available through CLI and MCP.
+Neither substitutes for native live-path verification or the project's own importer.
 
 ## Architecture and test planning
 

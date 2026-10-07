@@ -6,6 +6,9 @@ description: Recover GameCube functions or classes into a matching decomp (decom
 # Recover a function into the decomp
 
 The repo's own build and objdiff decide what matches. zkit supplies evidence and keeps sessions consistent.
+Native-port architecture guidance does not restructure matching decomp: preserve original ownership/layout,
+translation-unit placement and compiler constraints. Composition/interface refactors belong in the native port
+unless the matching project itself requires a compatible structural correction.
 
 1. **Evidence.** Start with `zkit_lookup <address|name>`. It shows match, link and name state, the owning unit and `file:line`, every direct caller (including callers in REL modules) with a per-class count, the callees, vtable slots holding the function, and any native-port files that cite it.
    - `zkit_asm` shows the original instructions with references resolved to symbols and float constants shown as values. REL functions are written `module+0xOFFSET` (for example `mymodule+0x1D0`).
