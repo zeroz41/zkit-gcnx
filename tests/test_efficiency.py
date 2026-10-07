@@ -168,6 +168,17 @@ class InstallationTests(unittest.TestCase):
             config.write_text('[plugins."gcn-zkit@gcn-zkit"]\nenabled = true\n', encoding='utf-8')
             self.assertTrue(_codex_plugin()[0])
 
+    def test_codex_local_refresh_does_not_request_git_upgrade(self):
+        from gcn_zkit.onboard import connect_agents
+        with tempfile.TemporaryDirectory() as source, \
+             patch('gcn_zkit.health._claude_plugin', return_value=(True, 'enabled')), \
+             patch('gcn_zkit.health._codex_plugin', return_value=(True, 'enabled')), \
+             patch('shutil.which', side_effect=lambda name: name):
+            text = '\n'.join(connect_agents(True, refresh=True, source=source))
+            self.assertIn('codex plugin add gcn-zkit@gcn-zkit', text)
+            self.assertNotIn('codex plugin marketplace upgrade', text)
+            self.assertIn('claude plugin marketplace update gcn-zkit', text)
+
     def test_refresh_agents_dry_run_does_not_skip_existing_plugins(self):
         from gcn_zkit.onboard import connect_agents
         with patch('gcn_zkit.health._claude_plugin', return_value=(True, 'enabled')), \
