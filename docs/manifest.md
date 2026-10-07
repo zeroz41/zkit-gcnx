@@ -56,6 +56,7 @@ disassembly (`build/<GAMEID>/<module>/asm/`). DOL lookups therefore list REL cal
 | `index_paths`, `index_exclude` | What `search` covers (folders or files; exclude takes regexes). |
 | `cite_paths`, `code_paths` | Where original addresses (`8xxxxxxx`) count as citations, and which of those are code. |
 | `address_pattern` | Regex with one hex group for citations (default: GameCube RAM `8[01]xxxxxx`). |
+| `required_docs` | Repository-relative paths to current architecture/design guides, source layout, engineering/performance standards and contracts. Both brief formats list them and mark missing files. Keep game policy in these documents, not toolkit code. |
 | `rules` | Short rules shown in every brief. Keep them short; the repo's `AGENTS.md` stays the contract. |
 | `start`, `finish` | Commands shown in the brief. `finish` is the gate `zkit-finish` runs. |
 | `finish_sources` | `[{path, after, until}]` sections of docs that must list the same finish commands (`gate` reports drift). |
@@ -65,7 +66,7 @@ disassembly (`build/<GAMEID>/<module>/asm/`). DOL lookups therefore list REL cal
 | `router` | `{brief, lane_stats}`: JSON files your own work router writes (`{"next": {"lane", "commands"}}`); the brief shows its lane. |
 | `status_doc`, `status_section` | Native: the doc whose active-work section the brief excerpts. |
 | `fidelity_tiers` | Native: ordered `{tier, pattern}`; tiers are `exact`, `equivalent`, `liberty`, `infrastructure`. |
-| `tests` | Native: `{build_dir, include_roots}` with a CMake `compile_commands.json`, for `impact`. |
+| `tests` | `{build_dir, include_roots}` with CTest registration and a CMake `compile_commands.json` for `impact`; `test-plan` only needs the configured CTest catalog. Optional `catalog` names a saved JSON catalog relative to the repo. |
 
 ## Top level
 

@@ -216,6 +216,9 @@ def brief(project: Project, repo: str | None = None, demand_rows: int = 5) -> di
             "dirty": state.get("dirty", [])[:8],
             "worktrees_with_changes": [w for w in state.get("worktrees", []) if w.get("dirty_files")],
             "unmerged_branches": state.get("unmerged_branches", []),
+            "required_reading": [{"reference": f"{name}:{relative}",
+                                  "exists": project.file(name, relative).is_file()}
+                                 for relative in config.get("required_docs", [])],
             "rules": config.get("rules", []), "start": config.get("start", []),
             "finish": config.get("finish", []), "handoffs": handoffs(project, name, limit=2),
             "lessons": [{"id": l["id"], "title": l["title"]} for l in lessons(project, role)],

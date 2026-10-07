@@ -51,7 +51,8 @@ paths.
 | `reuse` | Identical normalized bodies of free functions (≤40 lines) across files, plus files that name several sibling variants | Whether sharing is correct. These are candidates |
 | `activity` | Processes whose cwd is inside a repo (Linux: /proc; macOS/Windows: psutil); lock holders from `/proc/locks` on Linux only (the lock is never taken); dirty files with ages; unmerged branches; worktrees | Who owns a dirty file (age is the hint) |
 | `gate` | The manifest's canonical finish list, and which repo copies lack or add commands | Whether the gate passes. Run it |
-| `impact` (native) | Files that directly `#include` the change (the consumers to re-test); CTest names whose test sources include it at distance 1 (direct) or 2 (near); recorded run times; `ctest -R` commands | Behavior reached only through linked libraries or hub headers (counted as "broad"); script tests that don't pass a build executable |
+| `test-plan` | Exact CTest names, recursive setup/cleanup fixture closure, historical costs and optional consolidated CMake prebuild commands | Test execution, coverage, rebuild cost or speedup. Complex/environment-dependent fixtures remain under CTest; required fixtures are never disabled |
+| `impact` (native) | Files that directly `#include` the change (the consumers to re-test); CTest names whose test sources include it at distance 1 (direct) or 2 (near), or whose commands name an edited script/file; exact `ctest -R` commands, build targets and fixture names | Behavior reached only through linked libraries or hub headers (counted as "broad"); script imports and dynamically formed paths; build-fixture time |
 | `lookup` data refs | Every pointer to the function's start inside the original's data sections, named by holder symbol and offset. The same slot in many `__vt__*` tables means an inherited base-class virtual | Virtual calls made through registers (`bctrl`) at runtime |
 | `consts` (native) | For each float literal in a native function that cites originals: whether that value is among the constants those originals, their direct callees, or a cited data object (whole table) load. Powers of two and trivial values are skipped | Whether a *verified* constant is used in the right place, or integer immediates |
 | `suspects` (native) | Files ranked by 3×unmatched cited originals + 4×near-miss constants + 1×unsourced + 2×untested + 1×no recipe, ×1.5 on gameplay paths, with actions | Proof that a file is wrong; it ranks where to look |
@@ -67,6 +68,36 @@ See [manifest.md](manifest.md) for every field. How `impact` maps tests:
   function it calls, and the test source defining that function owns the case.
 - `X.cpp` and `X.hpp` are treated as one unit, so code that a `.cpp` consumes is still reached through the
   tests that include its header.
+- Include candidates are resolved once per query and shared across source files. Each query still reads
+  current files; no persistent graph can hide edits or file moves.
+- Literal file arguments in CTest commands resolve from `WORKING_DIRECTORY` (the build directory by default).
+  Script imports and indirect runtime coverage remain outside this graph.
+- Large selections are split into anchored commands, never widened to a label. GPU-labelled cases remain
+  visible as GPU even when also labelled local. JSON supplies `command_argvs`, `build_targets` and `fixtures`.
+  Build targets are discovered from compiler output paths; wrappers/renamed executable targets may be absent.
+- Recorded durations exclude build fixtures; missing costs are counted, not represented as measured zero.
+  Optional parallel prebuilds use the selected targets. Repository finish requirements remain authoritative.
+
+## Architecture and test planning
+
+The project manifest's `required_docs` supplies its architecture, layout and quality contracts. Both brief formats
+show those references and missing files. The resume and port skills require reading them and identifying the
+owner, dependency direction and extension boundary before editing. This exposes the project's contract; it does
+not prove an implementation follows it or replace the repository's own architecture checks.
+
+`test-plan <repo> <exact names...> --jobs N` resolves CTest fixtures recursively, reports missing/disabled tests,
+and keeps setup/cleanup fixtures in the emitted CTest selection. It suggests a union of build targets only for
+plain, independent CMake build fixtures with the same working directory/configuration. Commands with custom
+options, environment overrides or dependencies are left to CTest. Nothing is built or executed. Costs include
+known fixture durations separately; they are historical observations, not a forecast of fresh compilation.
+
+## Installation provenance
+
+`doctor` parses enabled state and reports the running package path, plugin cache versions and changed skill/hook
+files relative to an editable checkout. This is an on-disk inventory, not proof an existing client reloaded the
+plugin. User configuration can be overridden per project. The legacy `home` setting is unused.
+`setup --refresh-agents --plugin-source <checkout>` explicitly refreshes both clients through their plugin CLIs;
+it does not remove duplicate checkouts. A setup dry run with an existing manifest writes no configuration.
 
 ## Decisions
 

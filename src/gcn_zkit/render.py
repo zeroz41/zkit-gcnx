@@ -95,6 +95,10 @@ def brief(data: dict, compact: bool = False) -> str:
         if repo.get("status"):
             out.append("- status.md (Active work):")
             out.extend("    " + line for line in repo["status"].splitlines()[:14])
+        if repo.get("required_reading"):
+            out.append("- required reading (current architecture, standards and contracts govern implementation):")
+            out.extend(f"    {d['reference']}" + (" [MISSING]" if not d['exists'] else "")
+                       for d in repo['required_reading'])
         if repo.get("start"):
             out.append("- start: " + " ; ".join(f"`{c}`" for c in repo["start"]))
         if repo.get("rules"):
@@ -155,6 +159,9 @@ def _brief_compact(data: dict) -> str:
                        + ", ".join(f"{w['folder']} {w['exact_pct']}%" for w in g["weakest"][:3]))
         if repo.get("drift"):
             out.append(f"- decomp drift: {repo['drift']['changed']} cited function(s) to re-verify (`zkit drift`)")
+        if repo.get("required_reading"):
+            out.append("- required reading: " + "; ".join(
+                d['reference'] + (" [MISSING]" if not d['exists'] else "") for d in repo['required_reading']))
         out.append(f"- rules, finish gate, status, lessons: `zkit_brief {name}` (MCP) or `gcn-zkit brief {name}`")
     demand = data.get("port_demand")
     if demand:
@@ -484,18 +491,41 @@ def impact(data: dict) -> str:
     for tier in ("direct", "near"):
         for label, names in data["groups"].get(tier, {}).items():
             total = data["totals"][f"{tier}/{label}"]
-            out.append(f"{tier}/{label}: {len(names)} tests (~{total['serial_seconds']} s recorded): {', '.join(names[:12])}"
+            unknown = total.get("unknown_costs", 0)
+            out.append(f"{tier}/{label}: {len(names)} tests (~{total['serial_seconds']} s recorded"
+                       + (f", {unknown} unmeasured" if unknown else "") + f"): {', '.join(names[:12])}"
                        + (" ..." if len(names) > 12 else ""))
     if data["commands"]:
         out.append("run (direct first, then near):")
         for key in sorted(data["commands"], key=lambda k: (not k.startswith("direct"), k)):
+            targets = data.get("build_targets", {}).get(key, [])
+            if targets:
+                out.append(f"  # {key} build targets (optional parallel prebuild): " + ", ".join(targets))
             out.append(f"  # {key}\n  {data['commands'][key]}")
     if data["untested_files"]:
-        out.append("NO direct/near test covers: " + ", ".join(data["untested_files"])
-                   + " — add or register a check, or test its consumers above.")
+        out.append("NO direct/near mapping: " + ", ".join(data["untested_files"])
+                   + " — inspect the owning tests/recipes; library-only coverage may be missed.")
     out.append(f"broad: {data['totals']['broad']['tests']} tests reach these files only through hub headers.")
     out.append(f"limits: {data['limits']}")
     return "\n".join(out)
+
+
+def test_plan(data: dict) -> str:
+    out = [f"test plan for {data['repo']}: {len(data['selected'])} selected checks, "
+           f"{len(data['fixture_tests'])} required setup/cleanup tests (nothing executed)"]
+    for key in ('missing', 'disabled', 'unresolved_fixtures'):
+        if data[key]:
+            out.append(f"BLOCKED {key}: " + ', '.join(data[key]))
+    for key, cost in data['costs'].items():
+        out.append(f"{key}: {cost['recorded_seconds']} s recorded; {cost['unknown_costs']} unmeasured")
+    for step in data['prebuilds']:
+        out.append(f"optional prebuild ({len(step['fixture_tests'])} build fixtures; cwd {step['cwd']}):")
+        out.append('  ' + step['command'])
+    if data['commands']:
+        out.append('then run with all fixtures retained:')
+        out.extend('  ' + c for c in data['commands'])
+    out.append('limits: ' + data['limits'])
+    return '\n'.join(out)
 
 
 def grounding(data: dict) -> str:

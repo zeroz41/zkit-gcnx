@@ -85,9 +85,12 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--native", type=Path, help="optional native port repo to join")
     c.add_argument("--name", help="project id")
     c.add_argument("--no-agents", action="store_true", help="only set up the decomp; don't touch Claude/Codex")
+    c.add_argument("--refresh-agents", action="store_true", help="refresh installed agent plugins as well")
+    c.add_argument("--plugin-source", help="plugin marketplace checkout or repository (default: upstream)")
     c.add_argument("--dry-run", action="store_true", help="show what would change without changing it")
     c = add("brief", help="Start-of-session packet: rules, activity, handoffs, next action, port demand")
     c.add_argument("repo", nargs="?")
+    c.add_argument("--full", action="store_true", help="show full packets for all repositories")
     c = add("lookup", help="Everything about original functions: status, TU, callers, callees, slots, cites")
     c.add_argument("query", nargs="+", help="address(es), mangled or demangled name, or Class::method fragment")
     c.add_argument("--body", action="store_true", help="include the decomp source of the definition")
@@ -144,6 +147,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("repo", nargs="?")
     c.add_argument("paths", nargs="*")
     c.add_argument("--base", default="HEAD")
+    c = add("test-plan", help="Exact CTest names, fixture costs and optional consolidated parallel prebuilds")
+    c.add_argument("repo")
+    c.add_argument("names", nargs="+")
+    c.add_argument("--jobs", type=int, default=2, help="parallel jobs for suggested prebuilds (nothing is executed)")
     c = add("grounding", help="Native: how much cited original behavior is proven exact in the decomp")
     c.add_argument("repo", nargs="?")
     c.add_argument("paths", nargs="*", help="folders/files (default: code_paths)")
@@ -236,9 +243,11 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
     elif args.command == "setup":
         from .onboard import connect_agents
         _, said = run(argparse.Namespace(**{**vars(args), "command": "init", "from_setup": True}))
+        steps = []
         if not args.no_agents:
-            said += "\n" + "\n".join(connect_agents(args.dry_run))
-        return {"ok": True}, said
+            steps = connect_agents(args.dry_run, args.refresh_agents, args.plugin_source)
+            said += "\n" + "\n".join(steps)
+        return {"ok": not any(s.startswith("FAILED:") for s in steps)}, said
     if args.command == "init":
         from .onboard import init
         result = init(args.decomp, args.version, args.native, args.name, write=not args.dry_run)
@@ -253,16 +262,22 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from .onboard import register
         path = Path(args.manifest).resolve(strict=True)
         Project.load(path)
+        if args.command == "setup" and args.dry_run:
+            from .onboard import connect_agents
+            steps = [] if args.no_agents else connect_agents(True, args.refresh_agents, args.plugin_source)
+            return {"manifest": str(path), "dry_run": True}, f"would register and index: {path}\n" + "\n".join(steps)
         register(path)
         CONFIG.parent.mkdir(parents=True, exist_ok=True)
         CONFIG.write_text(str(path) + "\n", encoding="utf-8")
         said = f"default project: {path}"
+        steps = []
         if args.command == "setup":  # `setup my.project.json`: a hand-made project file, same full install
             from .onboard import connect_agents
             said = _ready(Project.load(path), [], said, plugins_next=False)
             if not getattr(args, "no_agents", False):
-                said += "\n" + "\n".join(connect_agents(getattr(args, "dry_run", False)))
-        return {"default_project": str(path)}, said
+                steps = connect_agents(args.dry_run, args.refresh_agents, args.plugin_source)
+                said += "\n" + "\n".join(steps)
+        return {"default_project": str(path), "ok": not any(s.startswith("FAILED:") for s in steps)}, said
     if args.command == "projects":
         from .onboard import registered
         here = find_manifest(None, strict=True)
@@ -322,7 +337,7 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
                              f"{', '.join(project.config['repositories'])}")
     if command == "brief":
         data = session.brief(project, args.repo)
-        return data, render.brief(data, compact=args.repo is None)
+        return data, render.brief(data, compact=args.repo is None and not args.full)
     if command == "lookup":
         data = bridge.lookup(project, " ".join(args.query), target, body=args.body)
         return data, render.lookup(data)
@@ -389,6 +404,10 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from .native import impact
         data = impact(project, args.repo, args.paths or None, args.base, target)
         return data, render.impact(data)
+    if command == "test-plan":
+        from .native import test_plan
+        data = test_plan(project, args.repo, args.names, args.jobs)
+        return data, render.test_plan(data)
     if command == "grounding":
         from .native import grounding
         data = grounding(project, args.repo, args.paths or None, target)

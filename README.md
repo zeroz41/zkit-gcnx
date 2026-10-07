@@ -113,7 +113,7 @@ Keep it outside this repo and run `gcn-zkit setup path/to/your.project.json`. Th
 ## Use
 
 Your agent starts with the brief, the tools and four skills: `zkit-resume`, `zkit-recover-function`, `zkit-finish`,
-and `zkit-port-system` for PC ports. The brief already carries the repo's rules, its finish steps, other agents and
+and `zkit-port-system` for PC ports. The brief carries required architecture/standards references, the repo's rules, finish steps, other agents and
 leftover work, so a short prompt is enough. Paste one of these:
 
 **Decompiling:**
@@ -160,6 +160,7 @@ Run these inside the repo. They only read, except `handoff`.
 | Search docs and source | `gcn-zkit search player jump` |
 | Is someone else building? Wait until it's free | `gcn-zkit wait decomp` |
 | Other agents, builds, locks, stranded worktrees | `gcn-zkit activity` |
+| Validate exact tests and plan their parallel prebuilds (no execution) | `gcn-zkit test-plan native movement collision --jobs 4` |
 | What must run before ending a session | `gcn-zkit gate` |
 | Leave a note for the next session | `gcn-zkit handoff decomp "matched X; next: Y"` |
 
@@ -184,7 +185,10 @@ Optional: block commits that break the port's rules with `gcn-zkit install git-h
 
 ## Update or remove
 
-- **Update:** `uv tool upgrade gcn-zkit`, then `gcn-zkit setup` in each decomp.
+- **Update:** `uv tool upgrade gcn-zkit`, then `gcn-zkit setup --refresh-agents` in each decomp.
+  From a local checkout: `uv tool install --force --editable /path/to/gcn-zkit`, then
+  `gcn-zkit setup /path/to/project.json --refresh-agents --plugin-source /path/to/gcn-zkit`.
+  Restart both agents. `gcn-zkit doctor` shows the loaded Python path and plugin cache versions/content.
 - **Remove:** `uv tool uninstall gcn-zkit`, then `claude plugin uninstall gcn-zkit@gcn-zkit` and/or
   `codex plugin remove gcn-zkit@gcn-zkit`. To also remove its notes and index, delete `~/.config/gcn-zkit`,
   `~/.cache/gcn-zkit` and `~/.local/state/gcn-zkit` (on Windows these are in your user folder).

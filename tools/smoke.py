@@ -73,6 +73,16 @@ def project_rows(manifest: Path) -> list[dict]:
         rows.append(run(args, decomp, manifest, ok=(0, 1, 2) if args[0] == "data" else (0, 1)))
     for name, repo in config["repositories"].items():
         if repo.get("role") == "native":
+            build = roots[name] / repo.get("tests", {}).get("build_dir", "build")
+            if repo.get("tests") and build.is_dir():
+                catalog = subprocess.run(["ctest", "--test-dir", str(build), "--show-only=json-v1"],
+                                         capture_output=True, text=True, encoding="utf-8", timeout=60)
+                tests = json.loads(catalog.stdout).get("tests", []) if catalog.returncode == 0 else []
+                candidates = [t["name"] for t in tests if not any(
+                    p["name"] in ("DISABLED", "FIXTURES_SETUP", "FIXTURES_CLEANUP") and p["value"]
+                    for p in t.get("properties", []))]
+                if candidates:
+                    rows.append(run(["test-plan", name, candidates[0]], roots[name], manifest, ok=(0,)))
             for args in [["check"], ["impact"], ["grounding"], ["suspects", "--limit", "5"], ["tiers"], ["drift"],
                          ["demand", "--limit", "5"], ["reuse"], ["brief"]]:
                 rows.append(run(args, roots[name], manifest))

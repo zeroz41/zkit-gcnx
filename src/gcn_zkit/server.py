@@ -116,13 +116,14 @@ def create_server(project: Project) -> FastMCP:
 
     @tool()
     def zkit_lookup(query: str | None = None, body: bool = False, repo: str | None = None,
-                    addresses: list[str] | str | None = None, response_format: Format = "text") -> str:
+                    addresses: list[str] | str | None = None, response_format: Format = "text",
+                    address: str | None = None) -> str:
         """Original function(s) by address, name or Class::method fragment; several addresses or names separated by
         spaces/commas are looked up in one call. Shows match/link/name state, owning TU file:line (body=true adds
         the decomp source), every caller with a per-class count, callees, vtable slots with the owning tables and
         a shared-slot verdict, native/doc cites with their text. A data address shows its symbol and xrefs."""
         p = decomp(repo)
-        wanted = " ".join(bridge.query_list(addresses)) if addresses else ""
+        wanted = " ".join(bridge.query_list(addresses) + bridge.query_list(address))
         if not (query or wanted):
             raise ValueError("Pass query (address(es), name or Class::method)")
         data = bridge.lookup(p, " ".join(x for x in (query, wanted) if x), target(p), body=body)
@@ -162,11 +163,12 @@ def create_server(project: Project) -> FastMCP:
 
     @tool(enabled=has_native)
     def zkit_port_plan(query: str | None = None, depth: int = 2, repo: str | None = None,
-                       address: str | None = None, response_format: Format = "text") -> str:
+                       address: str | None = None, response_format: Format = "text",
+                       entry: str | None = None) -> str:
         """Before implementing original behavior natively: the original direct-call tree under a function,
         each node marked reuse (port already cites it — extend that owner), decompile-first (decomp not exact),
         shared-port (many original callers) or port; bctrl counts flag vtable dispatch the tree cannot follow."""
-        query = query or address
+        query = query or address or entry
         if not query:
             raise ValueError("Pass query (an address or name)")
         p = decomp(repo)
@@ -184,13 +186,18 @@ def create_server(project: Project) -> FastMCP:
 
     @tool()
     def zkit_asm(query: str | None = None, size: Number = None, repo: str | None = None,
-                 addresses: list[str] | str | None = None, response_format: Format = "text") -> str:
+                 addresses: list[str] | str | None = None, response_format: Format = "text",
+                 addrs: list[str] | str | None = None) -> str:
         """Disassemble ORIGINAL bytes. query: address or name (several separated by spaces for a batch). With size
         (int or hex string), disassembly starts exactly at the given address, also mid-function. Branch targets,
         r2/r13 and lis/addi references are resolved to symbols; lfs/lfd show the constant."""
         p = decomp(repo)
         results = []
-        queries = bridge.query_list(query) + bridge.query_list(addresses)
+        if isinstance(addrs, str) and addrs.lstrip().startswith("["):
+            addrs = json.loads(addrs)
+            if not isinstance(addrs, list) or not all(isinstance(a, str) for a in addrs):
+                raise ValueError("addrs must contain address strings")
+        queries = bridge.query_list(query) + bridge.query_list(addresses) + bridge.query_list(addrs)
         if not queries:
             raise ValueError("Pass query (address or name; several separated by spaces)")
         for q in queries[:20]:
@@ -248,10 +255,13 @@ def create_server(project: Project) -> FastMCP:
 
     @tool()
     def zkit_read(reference: str | None = None, start: Number = 1, lines: Number = 120, repo: str | None = None,
-                  path: str | None = None, end: Number = None, line: Number = None, max_lines: Number = None) -> str:
+                  path: str | None = None, end: Number = None, line: Number = None, max_lines: Number = None,
+                  limit: Number = None) -> str:
         """Read repo:path or repo:path:line (centred on that line), up to 400 lines. Or pass repo + path, with
         start/end (inclusive) or line."""
-        start, lines = _int(start, 1), _int(max_lines, None) or _int(lines, 120)
+        start, lines = _int(start, 1), _int(max_lines, None) or _int(limit, None) or _int(lines, 120)
+        if not reference and path and not repo and path.partition(":")[0] in current().config["repositories"]:
+            reference = path
         if _int(end) is not None:
             lines = max(1, _int(end) - start + 1)
         if _int(line) is not None and (reference or (repo and path)) and not (reference and reference.count(":") >= 2):
@@ -283,6 +293,15 @@ def create_server(project: Project) -> FastMCP:
         p, key = scoped(repo, native_default(current()))
         data = impact(p, key, _paths(paths, path), base, target(p))
         return out(data, render.impact(data), response_format)
+
+    @tool(enabled=any(r.get("tests") for r in project.config["repositories"].values()))
+    def zkit_test_plan(repo: str, names: list[str], jobs: int = 2, response_format: Format = "text") -> str:
+        """Plan exact CTest names before running them: reject missing/disabled checks, show fixture costs and
+        optional consolidated parallel prebuild commands. Keeps CTest fixtures; executes no builds or tests."""
+        from .native import test_plan
+        p, key = scoped(repo)
+        data = test_plan(p, key, names, jobs)
+        return out(data, render.test_plan(data), response_format)
 
     @tool(enabled=has_native)
     def zkit_grounding(repo: str | None = None, paths: Paths = None, path: str | None = None,
@@ -347,10 +366,14 @@ def create_server(project: Project) -> FastMCP:
         return out(data, render.reuse(data), response_format)
 
     @tool()
-    def zkit_activity(response_format: Format = "text") -> str:
+    def zkit_activity(response_format: Format = "text", repo: str | None = None) -> str:
         """Other agent/build/emulator processes (labelled by repo and worktree), real lock holders, uncommitted
         files with ages, unmerged branches, worktrees with stranded changes, recent handoff notes."""
-        data = activity(current())
+        p, key = scoped(repo)
+        data = activity(p)
+        if key:
+            data["scope"] = key
+            # Keep cross-repo process/lock information: it matters to shared builds.
         return out(data, render.activity(data), response_format)
 
     @tool()
@@ -367,10 +390,15 @@ def create_server(project: Project) -> FastMCP:
         return out(data, render.wait(data), response_format)
 
     @tool(writes)
-    def zkit_handoff(repo: str, text: str) -> str:
+    def zkit_handoff(repo: str, text: str | None = None, note: str | None = None) -> str:
         """Leave a note for the next session (≤4000 chars; the brief shows the newest notes first): what is verified
         (commit id), what is staged, what failed, the exact next command. repo may be a worktree path; its HEAD and
         branch are recorded. Stored in the toolkit's state directory; never touches the repo."""
+        if text is not None and note is not None and text != note:
+            raise ValueError("Pass text or note, not conflicting notes")
+        text = text if text is not None else note
+        if not text or not text.strip():
+            raise ValueError("Pass text (the handoff note)")
         p, key = scoped(repo)
         row = write_handoff(p, key, text)
         return f"saved {row['time']} {key} @ {row['head']}" + (f" (worktree {row['worktree']})" if row.get("worktree") else "")
