@@ -130,7 +130,8 @@ Keep any verified work you find. Finish with zkit-finish.
 Continue the port on the next milestone in its status doc.
 Use zkit-resume, then zkit-port-system: check zkit grounding for the system,
 run zkit port-plan before porting, and reuse the code that already owns the behavior.
-Test with zkit impact. Finish with zkit-finish.
+Automate import dependencies through the project pipeline; check configured architecture and coverage.
+Test the live path with zkit impact. Finish with zkit-finish.
 ```
 
 **Finding behavior in the port that's slightly off from the real game:**
@@ -160,6 +161,8 @@ Run these inside the repo. They only read, except `handoff`.
 | Search docs and source | `gcn-zkit search player jump` |
 | Is someone else building? Wait until it's free | `gcn-zkit wait decomp` |
 | Other agents, builds, locks, stranded worktrees | `gcn-zkit activity` |
+| Check a port system against its configured include boundaries | `gcn-zkit architecture native src/world` |
+| Find missing import/integration entries in a declared inventory | `gcn-zkit coverage native effects` |
 | Validate exact tests and plan their parallel prebuilds (no execution) | `gcn-zkit test-plan native movement collision --jobs 4` |
 | What must run before ending a session | `gcn-zkit gate` |
 | Leave a note for the next session | `gcn-zkit handoff decomp "matched X; next: Y"` |

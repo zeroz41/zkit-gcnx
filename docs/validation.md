@@ -21,7 +21,36 @@ build waiting, handoffs, hooks and the MCP server over stdio.
 `replay compare` and `ab_eval` keep each version's config, cache and state separate, so they never touch your real
 setup.
 
-## Current measurements (0.5.0)
+## Current measurements (0.6.0)
+
+The feature review revisited the owner's composition/reuse requests, automatic future-asset import requests,
+protocol-to-native boundary complaints and quest identity/shape concerns, then inspected the actual architecture
+contract, technical debt, importer and installed catalogs. It selected executable include-policy checks and
+cross-stage inventory comparisons. Existing lookup/port-plan/reuse, test-plan and importer publication already
+cover adjacent work; the toolkit does not introduce a second game importer or execute it through MCP.
+
+**Independent evidence.** Six project-provided include rules scanned 1,919 files and 7,350 literal includes,
+reporting four upward edges matching the repository's documented debt. Each source line and target was checked.
+A declared catalog population of 26 non-external scripts matched the original executable's table/string reads
+through the unchanged original-data tool. The coverage audit found five installed mission identities and named
+21 missing identities. This is installation coverage, not quest behavior or arbitrary-file compatibility.
+
+**Planning cost.** Five fresh CLI runs after warmup, warm OS cache, same Linux/Core Ultra 7 265K/Python 3.13.5
+workstation as 0.5.0. Full include audit median 0.909 s (1,472 output bytes); one collision-system scope 0.212 s
+(1,014 bytes); catalog coverage 0.179 s (969 bytes). No baseline tool provided these audits; these are query costs,
+not claimed speedups or agent time savings.
+
+Synthetic checks use a differently named project/layout and test relative/external includes, comments/raw strings,
+explicit exceptions, current edits, newly discovered identities, missing/duplicate inventory records, stage-order
+gaps, path containment and CLI/MCP agreement. New identities and files are discovered without changing code or
+fixed content lists. All 94 tests and 37 real-project/synthetic smoke checks passed; all four skills and
+the plugin/marketplace manifests validated. No game sources or packages were modified.
+
+**Agent evaluation limitation.** Automatic approval review rejected the live model comparison because it could
+send repository content to an external service. Local deterministic validation proceeded; no new live agent
+score, skill-following success rate or agent-level productivity improvement is claimed for this release.
+
+## Previous release measurements (0.5.0)
 
 The workflow review used local Codex and Claude Code records from October 1–7, 2026, plus both repositories'
 contracts/status/debt and Claude's saved notes. The recent replay window starts October 4. Approval-review echoes,

@@ -147,6 +147,14 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("repo", nargs="?")
     c.add_argument("paths", nargs="*")
     c.add_argument("--base", default="HEAD")
+    c = add("architecture", help="Check project-defined include boundaries (native-port architecture)")
+    c.add_argument("repo")
+    c.add_argument("paths", nargs="*")
+    c.add_argument("--base", default="HEAD")
+    c.add_argument("--all", action="store_true", dest="all_files", help="scan all configured architecture roots")
+    c = add("coverage", help="Compare declared inventories across import/integration stages")
+    c.add_argument("repo")
+    c.add_argument("name", help="project-owned coverage inventory name")
     c = add("test-plan", help="Exact CTest names, fixture costs and optional consolidated parallel prebuilds")
     c.add_argument("repo")
     c.add_argument("names", nargs="+")
@@ -404,6 +412,14 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from .native import impact
         data = impact(project, args.repo, args.paths or None, args.base, target)
         return data, render.impact(data)
+    if command == "architecture":
+        from .architecture import audit
+        data = audit(project, args.repo, args.paths, args.base, args.all_files)
+        return data, render.architecture(data)
+    if command == "coverage":
+        from .coverage import audit
+        data = audit(project, args.repo, args.name)
+        return data, render.coverage(data)
     if command == "test-plan":
         from .native import test_plan
         data = test_plan(project, args.repo, args.names, args.jobs)

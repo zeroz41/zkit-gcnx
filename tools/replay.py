@@ -42,7 +42,7 @@ SOFT = ("no function matches", "no function for", "No function matches", "no les
 # Validate again at execution: corpora are data, including hand-edited/merged ones.
 READS = {"brief", "lookup", "asm", "data", "xrefs", "names", "search", "read", "check", "impact",
          "grounding", "suspects", "consts", "drift", "demand", "tiers", "recipes", "recipe-preflight",
-         "activity", "gate", "lessons", "doctor", "port-plan", "test-plan", "renamed", "reuse", "projects"}
+         "activity", "gate", "lessons", "doctor", "port-plan", "test-plan", "architecture", "coverage", "renamed", "reuse", "projects"}
 
 
 def replayable(item: dict) -> bool:

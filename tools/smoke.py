@@ -72,6 +72,10 @@ def project_rows(manifest: Path) -> list[dict]:
     for args in [a for a in commands if a]:
         rows.append(run(args, decomp, manifest, ok=(0, 1, 2) if args[0] == "data" else (0, 1)))
     for name, repo in config["repositories"].items():
+        if repo.get("architecture"):
+            rows.append(run(["architecture", name], roots[name], manifest))
+        for inventory in repo.get("coverage", {}):
+            rows.append(run(["coverage", name, inventory], roots[name], manifest))
         if repo.get("role") == "native":
             build = roots[name] / repo.get("tests", {}).get("build_dir", "build")
             if repo.get("tests") and build.is_dir():

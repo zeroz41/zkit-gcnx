@@ -33,24 +33,29 @@ description: Implement or repair original-game behavior in a native port / reimp
    Subagents do not get the session brief: tell every worker to use the gcn-zkit CLI via Bash (`gcn-zkit lookup|asm|data|xrefs <addr ...>`) instead of reading the DOL or symbols.txt with scripts (84% vs 22% zkit use, measured). Before building in the shared decomp tree, `gcn-zkit wait decomp`, then build under its lock.
 2. **Find the existing owner.**
    - `zkit_search` the system name in native docs and source.
-   - `zkit_reuse native` shows copied helpers and the central files that enumerate variants.
-   - Use composition (actors own their shadow, health, status, movement and attack components), interfaces or inheritance where ownership is demonstrated. A variant (another enemy, weapon tier, quest or area) should be data plus composed behavior. It should not copy a controller, and it must never add an area/episode/family branch to shared code.
+   - `zkit_reuse native` shows copied helpers and the central files that enumerate variants. If configured, `zkit_architecture` checks the changed system against the project's include boundaries; investigate each finding against the actual contract.
+   - Define interfaces at real ownership/service boundaries. Keep mutable state with one owner; compose reusable movement, combat, effects and interaction behavior where the evidence supports it. Keep orchestration small. Inheritance needs a valid substitutable contract; neither a new interface nor a copied subsystem is the default answer to every variation.
+   - Use composition (actors own their shadow, health, status, movement and attack components), interfaces or inheritance where ownership is demonstrated. A variant (another enemy, weapon tier, quest or area) should be data plus composed behavior. Extend its existing definition/controller seam. Do not route shared behavior by one asset identity, filename, geometry shape or hand-picked content list. If the original encodes a meaningful distinction, recover and represent it explicitly in the owning data or behavior.
 3. **Respect the extension seams** the repo's rules describe (content definitions, mod or server data). Establish the boundary before implementation: formats and protocol opcodes belong in adapters; native owners consume validated definitions/events. Content identity must not replace authored behavior. Verify a second existing consumer of a changed shared mechanism. Don't add unrequested protocols or content, but preserve their declared interfaces.
-4. **Implement.**
+4. **Automate the content path and complete the requested system.**
+   - Enumerate the supported source inventory from original tables, archives or authored commands. Separate discovered, decoded, converted, admitted, live-integrated and verified entries. With a configured inventory, `zkit_coverage` detects missing/duplicate entries and stage gaps; it does not prove behavior.
+   - Extend the project importer to discover dependencies and apply the same converters, validation and registration to newly discovered content. Use deterministic provenance, staged output, rollback/preservation on failure and repeatable reimports. Do not require another native code patch for each ordinary data variant. Unknown commands/resources remain explicit errors, not guessed behavior or silent skips.
+   - Finish recoverable dependencies within the requested system: importer, native definitions/IO, resource lifetime, shared runtime owner, ordinary live entry path and registered checks. A few working examples, a successful batch command or an inventory count do not establish full support. Investigate available missing dependencies instead of repeatedly deferring them as unsupported; name a concrete blocker when completion is impossible.
+5. **Implement.**
    - Cite the original address (bare 8-digit hex) at every ported function.
    - Mark native-only code `INTENTIONAL-DIVERGENCE` (or the marker the repo's rules name).
    - Keep definitions immutable, mutable state with a single owner, and no allocation in tick/frame paths.
-5. **Check before testing.** Re-run `zkit_consts <file>` after changing constants; it should report them verified. `zkit_check native` lints your diff:
+6. **Check before testing.** Re-run `zkit_consts <file>` after changing constants; it should report them verified. `zkit_check native` lints your diff:
    - citations that don't resolve or point at unmatched decomp;
    - new gameplay functions without a citation;
    - the repo's forbidden patterns (area-specific branches, banned constructs);
    - `/tmp` paths or dated sections in docs.
-6. **Verify like the game is played.**
+7. **Verify like the game is played.**
    - Run `zkit_impact native`. It lists the other code that includes what you changed (the consumers you must not break) and the exact `ctest -R` commands for the tests covering it, direct ones first. Run those instead of a whole label or a render matrix.
    - A missing impact mapping may be a linked-library or script-import limitation. Inspect the owning catalog and recipes before adding a check. Impact reports exact test commands, optional build targets and unmeasured costs; use `zkit_test_plan` with exact CTest names to validate registration, see fixture costs and prebuild only the required targets when useful. Keep the repo's mandatory finish gate.
    - Also run the original-comparison recipe (`zkit_recipes`). Never regenerate expected output from native code.
-   - Test the ordinary saved-character route, and also re-test one other consumer of any shared code you changed.
+   - Test the ordinary live route and another existing consumer of changed shared code. Include an unfamiliar valid data variant through the common import/runtime path, malformed/unsupported inputs and resource retirement. Verify which part of the declared inventory the checks exercise; preserve independent expected results.
    - Rendering checks run off-screen (virtual desktop), scoped to the change; kill what you start.
-7. **Feed back.** If you recovered decomp evidence, bank it in the decomp. Update the owning system doc in place, and rewrite `docs/status.md`.
+8. **Feed back.** If you recovered decomp evidence, bank it in the decomp. Update the owning system doc in place, and rewrite `docs/status.md`.
 
 Finish with `zkit-finish`. Report source-traced, original-executed, native-integrated and presentation evidence separately.
