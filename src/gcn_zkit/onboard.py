@@ -253,6 +253,8 @@ def connect_agents(dry_run: bool = False, refresh: bool = False, source: str | N
                         ["plugin", "marketplace", "update" if client == "claude" else "upgrade", "gcn-zkit"],
                         ["plugin", "update" if client == "claude" and already[client] else
                          "install" if client == "claude" else "add", "gcn-zkit@gcn-zkit"]]
+            if client == "codex" and Path(origin).expanduser().is_dir():
+                commands.pop(1)  # local marketplaces have no Git snapshot to upgrade
         for args in commands:
             line = f"{client} {' '.join(args)}"
             if dry_run:

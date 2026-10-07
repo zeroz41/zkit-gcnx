@@ -29,7 +29,7 @@ unrelated project directories and state-changing calls are excluded from the sco
 static calls, not arbitrary JavaScript expressions or dynamically built shell commands; this is not a complete
 session-cost accounting. Project-specific queries and private transcript references stay outside this generic repo.
 
-**Regression checks.** All 84 synthetic tests and all 35 project/synthetic smoke checks passed on Linux.
+**Regression checks.** All 85 synthetic tests and all 35 project/synthetic smoke checks passed on Linux.
 Both modified skills passed the skill validator, and Claude validated the marketplace and plugin manifest.
 The current release was not rerun on Windows or macOS.
 
