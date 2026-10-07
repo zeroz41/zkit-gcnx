@@ -6,7 +6,7 @@ real repos, minus writes (handoff, drift accept). Build it with `extract` from y
 
   tools/replay.py run --src src --out new.json                 # one version, in-process
   tools/replay.py compare --old /tmp/zkit-old/src --new src    # both, isolated caches, table
-  tools/replay.py load --src src --clients 8 --calls 80        # MCP stdio server under concurrent clients
+  tools/replay.py load --src src --clients 8 --calls 80        # concurrent requests on one MCP stdio session
   tools/replay.py extract --since 2026-10-03T03:50 --merge     # add calls from newer transcripts to the corpus
 
 Each version gets its own XDG_CACHE_HOME and a copy of the state directory, so nothing
@@ -36,7 +36,34 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
 CORPUS = HERE / "evals" / "corpus.json"  # your own, from `extract`; not part of the repo
-SOFT = ("no function matches", "no function for", "No function matches", "no lesson", "No changed source files")
+SOFT = ("no function matches", "no function for", "No function matches", "no lesson", "No changed source files",
+        "No changed source or registered command files")
+
+# Validate again at execution: corpora are data, including hand-edited/merged ones.
+READS = {"brief", "lookup", "asm", "data", "xrefs", "names", "search", "read", "check", "impact",
+         "grounding", "suspects", "consts", "drift", "demand", "tiers", "recipes", "recipe-preflight",
+         "activity", "gate", "lessons", "doctor", "port-plan", "test-plan", "renamed", "reuse", "projects"}
+
+
+def replayable(item: dict) -> bool:
+    if item.get("kind") == "mcp":
+        command = item.get("tool", "").removeprefix("zkit_").replace("_", "-")
+        return command in READS and not item.get("args", {}).get("accept")
+    if item.get("kind") != "cli":
+        return False
+    argv = item.get("argv", [])
+    if any(a.split("=", 1)[0] in ("--accept", "--write") for a in argv):
+        return False
+    # Global flags may precede a command; unknown flags are rejected, not skipped.
+    index = 0
+    while index < len(argv):
+        if argv[index] == "--json":
+            index += 1
+        elif argv[index] in ("--project", "--target"):
+            index += 2
+        else:
+            return argv[index] in READS
+    return False
 
 
 def classify(text: str, raised: bool) -> str | None:
@@ -68,11 +95,13 @@ def run_mcp(server, tool: str, args: dict) -> tuple[str, bool]:
 
 def run_cli(argv: list[str], cwd: str) -> tuple[str, bool]:
     from gcn_zkit import cli
+    if not Path(cwd).is_dir():
+        return f"error: recorded working directory no longer exists: {cwd}", True
     out, err = io.StringIO(), io.StringIO()
     old = os.getcwd()
     code = 0
     try:
-        os.chdir(cwd if Path(cwd).is_dir() else old)
+        os.chdir(cwd)
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
                 code = cli.main(argv)
@@ -83,7 +112,7 @@ def run_cli(argv: list[str], cwd: str) -> tuple[str, bool]:
     text = out.getvalue() + err.getvalue()
     if code == 2 and ("usage:" in err.getvalue() or "error:" in err.getvalue()):
         return text, True
-    return text, False
+    return text, bool(code)
 
 
 def run(args) -> int:
@@ -93,11 +122,13 @@ def run(args) -> int:
     project = Project.load(args.project)
     refresh(project)  # warm the index once; per-call refresh cost is part of what is measured
     server = create_server(project)
-    corpus = json.loads(Path(args.corpus).read_text())
+    corpus = json.loads(Path(args.corpus).read_text(encoding="utf-8"))
     if args.limit:
         corpus = corpus[:args.limit]
     rows = []
     for item in corpus:
+        if not replayable(item):
+            raise ValueError(f"Not a read-only replay call: {item.get('tool') or item.get('argv')}")
         start = time.perf_counter()
         if item["kind"] == "mcp":
             text, raised = run_mcp(server, item["tool"], item["args"])
@@ -110,7 +141,7 @@ def run(args) -> int:
         rows.append({"kind": item["kind"], "tool": item.get("tool") or item["argv"][0],
                      "call": item.get("args") or item.get("argv"), "seen": item.get("seen", 1),
                      "error": kind, "seconds": round(seconds, 4), "chars": len(text), "head": text[:400]})
-    Path(args.out).write_text(json.dumps(rows, indent=0))
+    Path(args.out).write_text(json.dumps(rows, indent=0), encoding="utf-8")
     return 0
 
 
@@ -139,7 +170,7 @@ def summarize(rows: list[dict]) -> dict:
             errors[r["error"]] = errors.get(r["error"], 0) + 1
     secs = sorted(r["seconds"] for r in rows)
     chars = [r["chars"] for r in rows]
-    q = lambda xs, p: xs[min(len(xs) - 1, int(len(xs) * p))]
+    q = lambda xs, p: xs[min(len(xs) - 1, int(len(xs) * p))] if xs else 0
     return {"calls": len(rows), "ok": sum(1 for r in rows if not r["error"]), "errors": errors,
             "weighted_errors": sum(r["seen"] for r in rows if r["error"] and r["error"] != "soft"),
             "p50_s": round(q(secs, .5), 3), "p90_s": round(q(secs, .9), 3), "total_s": round(sum(secs), 1),
@@ -157,7 +188,7 @@ def compare(args) -> int:
         started = time.time()
         subprocess.run(cmd, env=_isolated_env(src.resolve(), label, base), check=True)
         print(f"{label}: replayed in {time.time() - started:.1f} s", file=sys.stderr)
-        results[label] = json.loads(out.read_text())
+        results[label] = json.loads(out.read_text(encoding="utf-8"))
     old, new = results["old"], results["new"]
     by_tool: dict[str, dict] = {}
     for label, rows in results.items():
@@ -171,8 +202,8 @@ def compare(args) -> int:
     report["fixed"] = [{"call": o["call"], "tool": o["tool"], "old": o["head"][:200], "new": n["head"][:200]} for o, n in fixed]
     report["regressed"] = [{"call": o["call"], "tool": o["tool"], "old": o["head"][:200], "new": n["head"][:200]} for o, n in broke]
     if args.report:
-        Path(args.report).write_text(json.dumps(report, indent=1))
-        (Path(args.report).with_suffix(".rows.json")).write_text(json.dumps(results, indent=0))
+        Path(args.report).write_text(json.dumps(report, indent=1), encoding="utf-8")
+        (Path(args.report).with_suffix(".rows.json")).write_text(json.dumps(results, indent=0), encoding="utf-8")
     o, n = report["overall"]["old"], report["overall"]["new"]
     print(f"{'':24} {'old':>14} {'new':>14}")
     for key in ("calls", "ok", "weighted_errors", "p50_s", "p90_s", "total_s", "chars_total", "chars_p50"):
@@ -225,15 +256,30 @@ def _js_args(text: str) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def _entries(path: Path):
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            try:
+                yield json.loads(line)
+            except ValueError:
+                continue
+
+
 def extract(args) -> int:
     """Distinct zkit calls from Claude Code and Codex transcripts newer than --since."""
     sys.path.insert(0, str(HERE / "src"))
     from gcn_zkit.cli import build_parser
     commands = set(next(a for a in build_parser()._actions if a.dest == "command").choices)
     calls: dict[str, dict] = {}
+    roots = [Path(p).expanduser().resolve() for p in args.repo_root]
+
+    def eligible(when: str, cwd: str | None) -> bool:
+        if when < args.since or (args.until and when >= args.until):
+            return False
+        return not roots or bool(cwd and any(Path(cwd).resolve().is_relative_to(r) for r in roots))
 
     def add(item: dict, when: str, src: str) -> None:
-        if (item.get("tool") or item["argv"][0]) in WRITES or item.get("args", {}).get("accept"):
+        if not replayable(item):
             return
         if item["kind"] == "cli" and not any(a in commands for a in item["argv"][:3]):
             return  # `git -C gcn-zkit reflog`, prose mentioning gcn-zkit
@@ -246,22 +292,18 @@ def extract(args) -> int:
         if path.stat().st_mtime < _epoch(args.since):
             continue
         cwd = None
-        for line in path.open(errors="replace"):
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
+        for entry in _entries(path):
             when = entry.get("timestamp") or ""
             cwd = entry.get("cwd") or cwd
             content = (entry.get("message") or {}).get("content")
-            if when < args.since or not isinstance(content, list):
+            if not eligible(when, cwd) or not isinstance(content, list):
                 continue
             for block in content:
                 if block.get("type") != "tool_use":
                     continue
                 name, given = block.get("name", ""), block.get("input") or {}
                 if "gcn-zkit" in name and name.rsplit("__", 1)[-1].startswith("zkit_"):
-                    add({"kind": "mcp", "tool": name.rsplit("__", 1)[-1], "args": given}, when, "claude")
+                    add({"kind": "mcp", "tool": name.rsplit("__", 1)[-1], "args": given, "cwd": cwd}, when, "claude")
                 elif name == "Bash":
                     for argv, where in _cli_argvs(given.get("command", ""), cwd):
                         add({"kind": "cli", "argv": argv, "cwd": where or str(HERE.parent)}, when, "claude")
@@ -269,34 +311,46 @@ def extract(args) -> int:
         if path.stat().st_mtime < _epoch(args.since):
             continue
         cwd = None
-        for line in path.open(errors="replace"):
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
+        for entry in _entries(path):
             when, payload = entry.get("timestamp") or "", entry.get("payload") or {}
+            if entry.get("type") == "session_meta" and payload.get("thread_source") == "guardian_review":
+                break  # approval-review transcripts quote other sessions; they are not agent tool use
             cwd = payload.get("cwd") or cwd
-            if when < args.since or payload.get("type") != "custom_tool_call":
+            if not eligible(when, cwd):
+                continue
+            if payload.get("type") == "function_call":
+                name = payload.get("name", "")
+                try:
+                    given = json.loads(payload.get("arguments", "{}"))
+                except ValueError:
+                    continue
+                if "gcn" in name and name.rsplit("__", 1)[-1].startswith("zkit_"):
+                    add({"kind": "mcp", "tool": name.rsplit("__", 1)[-1], "args": given, "cwd": cwd}, when, "codex")
+                elif name in ("exec_command", "functions.exec_command"):
+                    for argv, where in _cli_argvs(given.get("cmd", ""), given.get("workdir") or cwd):
+                        add({"kind": "cli", "argv": argv, "cwd": where or str(HERE.parent)}, when, "codex")
+                continue
+            if payload.get("type") != "custom_tool_call":
                 continue
             source = payload.get("input") or ""
             for tool, body in re.findall(r"tools\.(?:mcp__\w+__)?(zkit_\w+)\((\{[^{}]*\})?\)", source):
                 given = _js_args(body) if body else {}
                 if given is not None:
-                    add({"kind": "mcp", "tool": tool, "args": given}, when, "codex")
+                    add({"kind": "mcp", "tool": tool, "args": given, "cwd": cwd}, when, "codex")
             for command in re.findall(r"cmd:\s*\"((?:\\.|[^\"\\])*)\"", source):
                 for argv, where in _cli_argvs(json.loads(f'"{command}"'), cwd):
                     add({"kind": "cli", "argv": argv, "cwd": where or str(HERE.parent)}, when, "codex")
     rows = sorted(calls.values(), key=lambda r: r["first_seen"])
     if args.merge:
-        corpus = json.loads(Path(args.corpus).read_text())
+        corpus = json.loads(Path(args.corpus).read_text(encoding="utf-8"))
         known = {json.dumps({k: v for k, v in r.items() if k in ("kind", "tool", "args", "argv", "cwd")}, sort_keys=True)
                  for r in corpus}
         fresh = [r for r in rows if json.dumps({k: v for k, v in r.items() if k in ("kind", "tool", "args", "argv", "cwd")},
                                                sort_keys=True) not in known]
-        Path(args.corpus).write_text(json.dumps(corpus + fresh, indent=0, ensure_ascii=False) + "\n")
+        Path(args.corpus).write_text(json.dumps(corpus + fresh, indent=0, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"{len(rows)} distinct calls since {args.since}; {len(fresh)} new, corpus now {len(corpus) + len(fresh)}")
     else:
-        Path(args.out).write_text(json.dumps(rows, indent=0, ensure_ascii=False) + "\n")
+        Path(args.out).write_text(json.dumps(rows, indent=0, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"{len(rows)} distinct calls since {args.since} -> {args.out}")
     return 0
 
@@ -310,8 +364,10 @@ def _epoch(iso: str) -> float:
 async def _load(args) -> dict:
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
-    corpus = [c for c in json.loads(Path(args.corpus).read_text()) if c["kind"] == "mcp"
+    corpus = [c for c in json.loads(Path(args.corpus).read_text(encoding="utf-8")) if c["kind"] == "mcp"
               and c["tool"] in ("zkit_lookup", "zkit_asm", "zkit_data")][:args.calls]
+    if not corpus:
+        raise ValueError("Corpus has no lookup/asm/data MCP calls")
     params = StdioServerParameters(command=sys.executable, args=["-m", "gcn_zkit.cli", "--project", args.project, "serve"],
                                    env=dict(os.environ))
     latencies: list[float] = []
@@ -319,7 +375,7 @@ async def _load(args) -> dict:
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            await session.call_tool("zkit_lookup", {"query": "0x8001311C"})  # warm
+            await session.call_tool(corpus[0]["tool"], corpus[0]["args"])  # warm with project-owned evidence
             queue = list(corpus)
 
             async def client():
@@ -335,7 +391,7 @@ async def _load(args) -> dict:
             wall = time.perf_counter() - started
     latencies.sort()
     q = lambda p: round(latencies[min(len(latencies) - 1, int(len(latencies) * p))], 2)
-    return {"clients": args.clients, "calls": len(latencies), "errors": sum(errors), "wall_s": round(wall, 1),
+    return {"sessions": 1, "concurrent_requests": args.clients, "calls": len(latencies), "errors": sum(errors), "wall_s": round(wall, 1),
             "p50_s": q(.5), "p90_s": q(.9), "max_s": round(latencies[-1], 2)}
 
 
@@ -353,7 +409,7 @@ def main() -> int:
     # The project the CLI uses (`gcn-zkit use`): a manifest inside a worktree resolves its relative repo roots
     # from the worktree, which made every MCP call in a replay fail against an empty index.
     configured = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "gcn-zkit" / "project"
-    default_project = configured.read_text().strip() if configured.is_file() else None
+    default_project = configured.read_text(encoding="utf-8").strip() if configured.is_file() else None
     for name in ("run", "compare", "load"):
         c = sub.add_parser(name)
         c.add_argument("--project", default=default_project, required=default_project is None)
@@ -366,16 +422,20 @@ def main() -> int:
     sub.choices["compare"].add_argument("--report")
     sub.choices["compare"].add_argument("--old-project", help="project file for the old version (default: --project)")
     sub.choices["load"].add_argument("--src", default=str(HERE / "src"))
-    sub.choices["load"].add_argument("--clients", type=int, default=8)
+    sub.choices["load"].add_argument("--clients", type=int, default=8, help="concurrent requests on one stdio session")
     sub.choices["load"].add_argument("--calls", type=int, default=80)
     c = sub.add_parser("extract")
     c.add_argument("--since", required=True, help="ISO time (UTC), e.g. 2026-10-03T03:50")
+    c.add_argument("--until", help="exclusive ISO upper bound (keep new benchmark sessions out)")
+    c.add_argument("--repo-root", action="append", default=[], help="only sessions in this repo/folder (repeatable)")
     c.add_argument("--claude", default="~/.claude/projects")
     c.add_argument("--codex", default="~/.codex/sessions")
     c.add_argument("--corpus", default=str(CORPUS))
     c.add_argument("--out", default="corpus-new.json")
     c.add_argument("--merge", action="store_true", help="append calls the corpus does not have yet")
     args = parser.parse_args()
+    if getattr(args, "src", None):
+        sys.path.insert(0, str(Path(args.src).resolve()))
     return {"run": run, "compare": compare, "load": load, "extract": extract}[args.command](args)
 
 

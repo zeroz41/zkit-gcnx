@@ -17,6 +17,7 @@ import collections
 import json
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -51,20 +52,33 @@ class IncludeGraph:
                     if Path(name).suffix in SOURCE_SUFFIXES:
                         self.files.append(Path(directory, name).relative_to(root).as_posix())
         known = set(self.files)
+        # Resolve each common include-root candidate once. Most includes are rooted at
+        # src/ or tests/; pathlib.resolve/relative_to per edge dominated real queries.
+        resolved: dict[tuple[str, str], str | None] = {}
+        root_text = str(root)
+
+        def resolve(base: str, target: str) -> str | None:
+            key = (base, target)
+            if key not in resolved:
+                candidate = os.path.realpath(os.path.join(base, target))
+                try:
+                    relative = os.path.relpath(candidate, root_text).replace(os.sep, "/")
+                except ValueError:  # Windows: another drive
+                    relative = ""
+                resolved[key] = relative if relative in known else None
+            return resolved[key]
+
+        roots_text = [str(r) for r in self.roots]
         for rel in self.files:
             try:
                 text = (root / rel).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            here = (root / rel).parent
+            here = os.path.dirname(os.path.join(root_text, rel))
             for target in INCLUDE.findall(text):
-                for base in [here, *self.roots]:
-                    candidate = (base / target).resolve()
-                    try:
-                        name = candidate.relative_to(root).as_posix()
-                    except ValueError:
-                        continue
-                    if name in known:
+                for base in [here, *roots_text]:
+                    name = resolve(base, target)
+                    if name is not None:
                         self.includers[name].add(rel)
                         break
 
@@ -88,7 +102,7 @@ class IncludeGraph:
 
 def _companions(rel: str, known: set[str]) -> set[str]:
     """A .cpp change affects whoever includes its header; a header change, its .cpp."""
-    stem = str(Path(rel).with_suffix(""))
+    stem = Path(rel).with_suffix("").as_posix()
     return {stem + s for s in SOURCE_SUFFIXES if stem + s in known} | {rel}
 
 
@@ -194,18 +208,178 @@ def _case_sources(cache: _Sources, test: dict, sources: list[str]) -> list[str]:
     return sources
 
 
+def _command_files(test: dict, build: Path, root: Path) -> set[str]:
+    """Literal source/script arguments in a CTest command; no inferred imports."""
+    directory = next((p["value"] for p in test.get("properties", [])
+                      if p["name"] == "WORKING_DIRECTORY"), str(build))
+    directory = Path(directory)
+    if not directory.is_absolute():
+        directory = build / directory
+    result = set()
+    for arg in test.get("command") or []:
+        if not arg or arg.startswith("-"):
+            continue
+        path = Path(arg)
+        if not path.is_absolute():
+            path = directory / path
+        try:
+            if path.is_file():
+                result.add(path.resolve().relative_to(root).as_posix())
+        except (OSError, ValueError):
+            continue
+    return result
+
+
+def _test_commands(test_dir: str, names: list[str]) -> list[list[str]]:
+    """Bound command size without widening a selection to an entire label."""
+    chunks, chunk, length = [], [], 0
+    for name in names:
+        escaped = re.escape(name)
+        if chunk and length + len(escaped) > 3000:
+            chunks.append(chunk)
+            chunk, length = [], 0
+        chunk.append(escaped)
+        length += len(escaped) + 1
+    if chunk:
+        chunks.append(chunk)
+    return [["ctest", "--test-dir", test_dir, "-R", "^(" + "|".join(c) + ")$",
+             "--output-on-failure", "--no-tests=error"] for c in chunks]
+
+
+def _display_command(argv: list[str]) -> str:
+    return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+
+
+def _fixture_build(test: dict, build: Path) -> tuple[tuple[str, ...], list[str]] | None:
+    """Only consolidate independent, plain CMake build fixtures; preserve other setup."""
+    props = {p['name']: p['value'] for p in test.get('properties', [])}
+    command = test.get('command') or []
+    if (not props.get('FIXTURES_SETUP') or
+            any(props.get(p) for p in ('FIXTURES_REQUIRED', 'DEPENDS', 'ENVIRONMENT', 'ENVIRONMENT_MODIFICATION')) or
+            not command or Path(command[0]).name.lower() not in ('cmake', 'cmake3', 'cmake.exe')):
+        return None
+    directory = Path(props.get('WORKING_DIRECTORY', str(build)))
+    if not directory.is_absolute():
+        directory = build / directory
+    binary, configuration, targets = None, None, []
+    index = 1
+    while index < len(command):
+        option = command[index]
+        index += 1
+        if option in ('--build', '--config') and index < len(command):
+            if option == '--build':
+                binary = command[index]
+            else:
+                configuration = command[index]
+            index += 1
+        elif option == '--target':
+            while index < len(command) and not command[index].startswith('-'):
+                targets.append(command[index])
+                index += 1
+        else:
+            return None
+    if not binary or not targets or set(targets) & {'all', 'clean', 'install'}:
+        return None
+    binary = Path(binary)
+    if not binary.is_absolute():
+        binary = directory / binary
+    prefix = (command[0], '--build', str(binary.resolve()))
+    if configuration:
+        prefix += ('--config', configuration)
+    return (str(directory.resolve()), *prefix), targets
+
+
+def test_plan(project: Project, repo: str, names: list[str], jobs: int = 2) -> dict:
+    """Resolve exact tests and their fixture closure; suggest commands without executing them."""
+    if not names or any(not isinstance(n, str) or not n.strip() for n in names):
+        raise ValueError('Pass one or more exact CTest names')
+    if isinstance(jobs, bool) or jobs < 1 or jobs > 1024:
+        raise ValueError('jobs must be between 1 and 1024')
+    config = _tests_config(project, repo)
+    root = project.root(repo)
+    build = root / config.get('build_dir', 'build')
+    catalog_file = config.get('catalog')
+    catalog = (json.loads((root / catalog_file).read_text(encoding='utf-8')).get('tests', [])
+               if catalog_file else _catalog(build))
+    catalog = {t['name']: t for t in catalog}
+    props = {n: {p['name']: p['value'] for p in t.get('properties', [])} for n, t in catalog.items()}
+    selected = sorted(set(names))
+    missing = [n for n in selected if n not in catalog]
+    included = set(selected) - set(missing)
+    pending = list(included)
+    fixtures = set()
+    unresolved = set()
+    while pending:
+        name = pending.pop()
+        for fixture in props[name].get('FIXTURES_REQUIRED', []):
+            if fixture in fixtures:
+                continue
+            fixtures.add(fixture)
+            providers = {n for n, p in props.items() if fixture in p.get('FIXTURES_SETUP', [])}
+            if not providers:
+                unresolved.add(fixture)
+            additions = providers | {n for n, p in props.items() if fixture in p.get('FIXTURES_CLEANUP', [])}
+            pending.extend(sorted(additions - included))
+            included.update(additions)
+    disabled = sorted(n for n in included if props[n].get('DISABLED'))
+    fixture_tests = sorted(included - set(selected))
+    costs = _costs(build)
+
+    def cost(test_names: list[str]) -> dict:
+        return {'tests': len(test_names), 'recorded_seconds': round(sum(costs.get(n, 0) for n in test_names), 2),
+                'unknown_costs': sum(n not in costs for n in test_names)}
+
+    groups: dict[tuple[str, ...], dict] = {}
+    for name in sorted(included):
+        if name in disabled:
+            continue
+        recognized = _fixture_build(catalog[name], build)
+        if recognized:
+            key, targets = recognized
+            group = groups.setdefault(key, {'targets': set(), 'fixtures': []})
+            group['targets'].update(targets)
+            group['fixtures'].append(name)
+    prebuilds = []
+    for key, group in groups.items():
+        # Split unusually large target sets without introducing a broad build target.
+        chunks, chunk, length = [], [], 0
+        for name in sorted(group['targets']):
+            if chunk and length + len(name) > 3000:
+                chunks.append(chunk)
+                chunk, length = [], 0
+            chunk.append(name)
+            length += len(name) + 1
+        if chunk:
+            chunks.append(chunk)
+        for targets in chunks:
+            argv = [*key[1:], '--parallel', str(jobs), '--target', *targets]
+            prebuilds.append({'cwd': key[0], 'argv': argv, 'command': _display_command(argv),
+                             'targets': targets, 'fixture_tests': group['fixtures']})
+    ready = not (missing or disabled or unresolved)
+    commands = _test_commands(str(build), selected) if ready else []
+    return {'repo': repo, 'ok': ready, 'selected': selected, 'missing': missing, 'disabled': disabled,
+            'unresolved_fixtures': sorted(unresolved), 'fixture_tests': fixture_tests,
+            'costs': {'selected': cost([n for n in selected if n in catalog]), 'fixtures': cost(fixture_tests)},
+            'prebuilds': prebuilds if ready else [], 'ctest_argvs': commands,
+            'commands': [_display_command(c) for c in commands], 'executed': False,
+            'limits': 'Exact configured names only; this does not discover coverage. Costs are historical serial sums, '
+                      'not a wall-time estimate; unknown costs and rebuild work remain. Optional prebuilds consolidate '
+                      'only independent plain CMake build fixtures. CTest still runs every required fixture. '
+                      'Check build ownership before running commands; the repository finish gate still applies.'}
+
+
 def impact(project: Project, repo: str, paths: list[str] | None = None, base: str = "HEAD",
            target: str | None = None) -> dict[str, Any]:
     config = _tests_config(project, repo)
     root = project.root(repo)
     build = root / config.get("build_dir", "build")
+    paths = [p for p in paths or [] if p.strip() not in ("", ".", "./")]  # "." = the whole working-tree diff
+    changed = [_normalize(root, p) for p in paths] if paths else _changed_files(root, base)
+    if not changed:
+        return {"repo": repo, "changed": [], "note": "No changed source files (pass paths or --base)."}
     graph = IncludeGraph(root, config.get("include_roots", ["src", "tests", "."]),
                          config.get("scan", ["src", "tests"]))
     known = set(graph.files)
-    paths = [p for p in paths or [] if p.strip() not in ("", ".", "./")]  # "." = the whole working-tree diff
-    changed = [_normalize(root, p) for p in paths] if paths else [p for p in _changed_files(root, base) if p in known]
-    if not changed:
-        return {"repo": repo, "changed": [], "note": "No changed source files (pass paths or --base)."}
     code_prefix = tuple(project.config["repositories"][repo].get("code_paths", ["src/"]))
     test_prefix = tuple(config.get("test_paths", ["tests/"]))
     targets = _targets(build, root)
@@ -213,11 +387,20 @@ def impact(project: Project, repo: str, paths: list[str] | None = None, base: st
     catalog = json.loads((root / catalog_file).read_text(encoding="utf-8")).get("tests", []) if catalog_file else _catalog(build)
     costs = _costs(build)
     by_program: dict[str, list[dict]] = collections.defaultdict(list)
+    by_file: dict[str, list[dict]] = collections.defaultdict(list)
+    programs: dict[str, set[str]] = {}
     for test in catalog:
         if test.get("command") and Path(test["command"][0]).name in ("cmake", "cmake3"):
             continue  # build fixtures
-        for program in _programs(test, build):
+        programs[test["name"]] = _programs(test, build)
+        for program in programs[test["name"]]:
             by_program[program].append(test)
+        for file in _command_files(test, build, root):
+            by_file[file].append(test)
+    if not paths:
+        changed = [p for p in changed if p in known or p in by_file]
+    if not changed:
+        return {"repo": repo, "changed": [], "note": "No changed source or registered command files."}
     program_sources: dict[str, list[str]] = collections.defaultdict(list)
     for source, owners in targets.items():
         if source.startswith(test_prefix):
@@ -238,20 +421,26 @@ def impact(project: Project, repo: str, paths: list[str] | None = None, base: st
         consumers = sorted(d for d, n in distance.items() if n == 1 and d.startswith(code_prefix) and d not in seeds)
         test_sources = {d: n for d, n in distance.items() if d.startswith(test_prefix)}
         tests_here = {"direct": set(), "near": set(), "broad": set()}
+
+        def record(test: dict, tier: str) -> None:
+            tests_here[tier].add(test["name"])
+            props = {p["name"]: p["value"] for p in test.get("properties", [])}
+            previous = all_tests.get(test["name"], {}).get("tier", "broad")
+            order = ["direct", "near", "broad"]
+            all_tests[test["name"]] = {"labels": props.get("LABELS", []), "seconds": costs.get(test["name"]),
+                                       "disabled": bool(props.get("DISABLED")),
+                                       "tier": order[min(order.index(previous), order.index(tier))],
+                                       "fixtures": props.get("FIXTURES_REQUIRED", [])}
+
+        for test in by_file.get(rel, []):
+            record(test, "direct")
         for source, n in test_sources.items():
             tier = "direct" if n <= 1 else "near" if n == 2 else "broad"
             for program in targets.get(source, ()):
                 for test in by_program.get(program, []):
                     if source not in case_sources(test, program):
                         continue
-                    tests_here[tier].add(test["name"])
-                    labels = next((p["value"] for p in test.get("properties", []) if p["name"] == "LABELS"), [])
-                    disabled = any(p["name"] == "DISABLED" and p["value"] for p in test.get("properties", []))
-                    previous = all_tests.get(test["name"], {}).get("tier", "broad")
-                    order = ["direct", "near", "broad"]
-                    best = order[min(order.index(previous), order.index(tier))]
-                    all_tests[test["name"]] = {"labels": labels, "seconds": costs.get(test["name"]),
-                                               "disabled": disabled, "tier": best}
+                    record(test, tier)
         tests_here["near"] -= tests_here["direct"]
         tests_here["broad"] -= tests_here["direct"] | tests_here["near"]
         per_file.append({"file": rel, "consumers": consumers, "consumer_count": len(consumers),
@@ -266,27 +455,33 @@ def impact(project: Project, repo: str, paths: list[str] | None = None, base: st
         if info["tier"] == "broad":
             broad += 1
             continue
-        label = next((l for l in ("unit", "reference", "local", "gpu") if l in info["labels"]),
+        label = next((l for l in ("gpu", "unit", "reference", "local") if l in info["labels"]),
                      info["labels"][0] if info["labels"] else "unlabelled")
         groups[info["tier"]][label].append(name)
-    commands, totals = {}, {}
+    commands, totals, command_argvs, build_targets, fixtures = {}, {}, {}, {}, {}
+    compiled = set().union(*targets.values()) if targets else set()
     test_dir = config.get("build_dir", "build")
     for tier, labels in groups.items():
         for label, names in labels.items():
             seconds = sum(all_tests[n]["seconds"] or 0 for n in names)
-            totals[f"{tier}/{label}"] = {"tests": len(names), "serial_seconds": round(seconds, 1)}
-            regex = "^(" + "|".join(re.escape(n) for n in names) + ")$"
-            commands[f"{tier}/{label}"] = (f"ctest --test-dir {test_dir} -R '{regex}' --output-on-failure"
-                                           if len(regex) < 4000 else
-                                           f"ctest --test-dir {test_dir} -L {label}  # {len(names)} tests")
+            key = f"{tier}/{label}"
+            totals[key] = {"tests": len(names), "serial_seconds": round(seconds, 1),
+                           "unknown_costs": sum(all_tests[n]["seconds"] is None for n in names)}
+            command_argvs[key] = _test_commands(test_dir, names)
+            commands[key] = "\n".join(_display_command(a) for a in command_argvs[key])
+            build_targets[key] = sorted(set().union(*(programs.get(n, set()) for n in names)) & compiled)
+            fixtures[key] = sorted({f for n in names for f in all_tests[n]["fixtures"]})
     groups = {tier: dict(labels) for tier, labels in groups.items()}
-    totals["broad"] = {"tests": broad, "note": "reach the change only through hub headers; run by label if needed"}
+    totals["broad"] = {"tests": broad, "note": "reach the change through hub headers; expand only for a concrete risk"}
     untested = [f["file"] for f in per_file if not f["tests"]["direct"] and not f["tests"]["near"]]
     return {"repo": repo, "changed": changed, "files": per_file, "groups": dict(groups), "totals": totals,
             "commands": commands, "untested_files": untested,
+            "command_argvs": command_argvs, "build_targets": build_targets, "fixtures": fixtures,
             "limits": "Coverage = test executables that compile a file including the change (transitively). "
                       "Tests driving code only through a linked library without including it are missed; "
-                      "scripts that do not pass a build executable on their command line are missed."}
+                      "literal CTest script/file arguments are mapped, but script imports and dynamic paths are not. "
+                      "Recorded test time excludes build fixtures and unknown costs. No mapping is not proof of no test. "
+                      "This focused selection does not replace the repository's required finish gate."}
 
 
 def grounding(project: Project, repo: str, paths: list[str] | None = None, target: str | None = None,
@@ -339,5 +534,5 @@ def grounding(project: Project, repo: str, paths: list[str] | None = None, targe
     return {"repo": repo, "scope": list(prefixes), "total": score(total), "files_with_cites": len(per_file),
             "folders": folder_rows[:limit],
             "weakest_files": [{"path": p, "unmatched": len(v), "examples": v[:5]} for p, v in weakest[:limit]],
-            "meaning": "exact_pct: share of cited original functions that are byte-exact in the decomp (their "
-                       "semantics are verified). Low folders port behavior the decomp has not proven yet."}
+            "meaning": "exact_pct: share of cited original functions that are byte-exact in the decomp. "
+                       "This does not verify native behavior, the live caller path, or uncited dependencies."}

@@ -6,10 +6,12 @@ Every check is local and read-only (it never starts a client, a build or the net
 from __future__ import annotations
 
 import importlib.util
+import importlib.metadata
 import json
 import os
 import shutil
 import time
+import tomllib
 from pathlib import Path
 
 from .project import Project, digest
@@ -23,15 +25,15 @@ def _row(status: str, check: str, detail: str = "", fix: str = "") -> dict:
 
 def _claude_plugin() -> tuple[bool | None, str]:
     settings = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
-    found = []
+    enabled = {}
     for name in ("settings.json", "settings.local.json"):
         path = settings / name
         if path.is_file():
             try:
-                enabled = json.loads(path.read_text(encoding="utf-8")).get("enabledPlugins", {})
+                enabled.update(json.loads(path.read_text(encoding="utf-8")).get("enabledPlugins", {}))
             except ValueError:
                 continue
-            found += [k for k, v in enabled.items() if k.startswith("gcn-zkit@") and v]
+    found = [k for k, v in enabled.items() if k.startswith("gcn-zkit@") and v]
     if found:
         return True, ", ".join(found)
     return (False, "not enabled") if settings.is_dir() else (None, "Claude Code config not found")
@@ -41,12 +43,63 @@ def _codex_plugin() -> tuple[bool | None, str]:
     path = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
     if not path.is_file():
         return None, "Codex config not found"
-    text = path.read_text(encoding="utf-8", errors="replace")
-    if '[plugins."gcn-zkit@' in text:
-        return True, "plugin entry present"
-    if "[mcp_servers.gcn-zkit]" in text:
-        return True, "MCP server entry (no plugin)"
+    try:
+        config = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as error:
+        return False, f"cannot read config: {error}"
+    plugins = [v for k, v in config.get("plugins", {}).items() if k.startswith("gcn-zkit@")]
+    if any(p.get("enabled", True) for p in plugins):
+        return True, "plugin enabled in user config (restart to load updates)"
+    if plugins:
+        return False, "plugin disabled in user config"
+    if "gcn-zkit" in config.get("mcp_servers", {}):
+        enabled = config["mcp_servers"]["gcn-zkit"].get("enabled", True)
+        return enabled, "MCP server entry (no plugin)" if enabled else "MCP server disabled"
     return False, "not configured"
+
+
+def installation() -> dict:
+    """On-disk provenance, not a claim about what an already-running client loaded."""
+    from . import __version__
+    package = Path(__file__).resolve().parent
+    try:
+        distribution_version = importlib.metadata.version("gcn-zkit")
+    except importlib.metadata.PackageNotFoundError:
+        distribution_version = None
+    source = package.parent.parent
+    checkout = source if (source / "pyproject.toml").is_file() else None
+    clients = {}
+    for client, base, marker in (
+        ("claude", Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")), ".claude-plugin"),
+        ("codex", Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")), ".codex-plugin"),
+    ):
+        copies = []
+        for path in sorted((base / "plugins" / "cache").glob(f"*/gcn-zkit/*/{marker}/plugin.json")):
+            try:
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+                root = path.parent.parent
+                differences = []
+                if checkout:
+                    for folder in ("skills", "hooks", marker):
+                        for original in (checkout / folder).rglob("*"):
+                            if original.is_file():
+                                rel = original.relative_to(checkout)
+                                installed = root / rel
+                                if not installed.is_file() or installed.read_bytes() != original.read_bytes():
+                                    differences.append(rel.as_posix())
+                copies.append({"path": str(root), "version": manifest.get("version"),
+                               "current": manifest.get("version") == __version__ and not differences,
+                               "different_files": differences})
+            except (OSError, ValueError):
+                copies.append({"path": str(path.parent.parent), "current": False, "error": "unreadable manifest"})
+        clients[client] = copies
+    legacy = CONFIG / "home"
+    return {"version": __version__, "distribution_version": distribution_version,
+            "package": str(package), "checkout": str(checkout) if checkout else None,
+            "launcher": shutil.which("gcn-zkit"), "plugin_caches": clients,
+            "legacy_home": legacy.read_text(encoding="utf-8").strip() if legacy.is_file() else None,
+            "limits": "Cache inventory and user config only; project overrides and running clients may differ. "
+                      "Restart clients after updating. The legacy home setting is unused."}
 
 
 from . import REPOSITORY
@@ -63,6 +116,18 @@ def doctor(project: Project) -> dict:
     on_path = shutil.which("gcn-zkit")
     rows.append(_row("ok" if on_path else "fail", "gcn-zkit on PATH", on_path or "not found (plugins call it by name)",
                      f"{INSTALL}   # then `uv tool update-shell` and reopen the terminal"))
+    provenance = installation()
+    rows.append(_row("info", "loaded Python package", provenance["package"]))
+    rows.append(_row("ok" if provenance["distribution_version"] == provenance["version"] else "warn",
+                     "installed distribution", str(provenance["distribution_version"] or "not installed"), INSTALL))
+    for client, copies in provenance["plugin_caches"].items():
+        if copies:
+            current = [c for c in copies if c["current"]]
+            detail = "; ".join(f"{c['path']} ({'current' if c['current'] else 'differs'})" for c in copies)
+            rows.append(_row("ok" if current else "warn", f"{client}: plugin cache", detail,
+                             "gcn-zkit setup <project.json> --refresh-agents --plugin-source <checkout>"))
+    if provenance["legacy_home"]:
+        rows.append(_row("info", "legacy home (unused)", provenance["legacy_home"]))
     claude, detail = _claude_plugin()
     rows.append(_row({True: "ok", False: "warn", None: "info"}[claude], "Claude Code plugin", detail,
                      f"claude plugin marketplace add {REPOSITORY} && claude plugin install gcn-zkit@gcn-zkit"))
@@ -140,6 +205,7 @@ def doctor(project: Project) -> dict:
                 rows.append(_row("info", f"{name}: finish-gate copies disagree", ", ".join(drift),
                                  f"gcn-zkit gate {name}   # AGENTS.md is the contract"))
     return {"project": project.config["id"], "manifest": str(project.path), "checks": rows,
+            "installation": provenance,
             "ok": not any(r["status"] == "fail" for r in rows)}
 
 

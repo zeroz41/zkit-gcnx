@@ -5,9 +5,9 @@ How gcn-zkit is tested, and what was measured for this release.
 ## Run the checks yourself
 
 ```sh
-uv run --with-editable . python -m unittest discover -s tests   # 69 tests, synthetic fixtures, no game files needed
+uv run --with-editable . python -m unittest discover -s tests   # synthetic fixtures, no game files needed
 python tools/smoke.py                                           # every command against your registered projects
-python tools/replay.py extract --since 2026-01-01 --out calls.json   # your agents' real zkit calls
+python tools/replay.py extract --since 2026-01-01 --until 2026-10-07 --repo-root /my/repo --out calls.json   # your agents' real zkit calls
 python tools/replay.py compare --old ../old/src --new src --corpus calls.json --project <project file>
 python tools/ab_eval.py --suite ../my-evals --cwd ../my-decomp  # same model and tasks, with and without zkit
 claude plugin validate .
@@ -21,7 +21,78 @@ build waiting, handoffs, hooks and the MCP server over stdio.
 `replay compare` and `ab_eval` keep each version's config, cache and state separate, so they never touch your real
 setup.
 
-## Results for this release
+## Current measurements (0.5.0)
+
+The workflow review used local Codex and Claude Code records from October 1–7, 2026, plus both repositories'
+contracts/status/debt and Claude's saved notes. The recent replay window starts October 4. Approval-review echoes,
+unrelated project directories and state-changing calls are excluded from the scoped corpus. Extraction recognizes
+static calls, not arbitrary JavaScript expressions or dynamically built shell commands; this is not a complete
+session-cost accounting. Project-specific queries and private transcript references stay outside this generic repo.
+
+**Regression checks.** All 84 synthetic tests and all 35 project/synthetic smoke checks passed on Linux.
+Both modified skills passed the skill validator, and Claude validated the marketplace and plugin manifest.
+The current release was not rerun on Windows or macOS.
+
+**Recent-call replay.** The scoped corpus has 4,051 distinct calls (4,821 observations): 3,111 from Claude Code
+and 940 from Codex. Both versions used the same corrected replay harness and current repository state. The additive test planner
+and architecture-reference brief changes were verified separately after this replay.
+Hard failures fell from 27 to 20: seven observed request shapes now work, with no newly failing calls.
+Six additional impact calls now map literal CTest input files. There remain 21 no-result responses and
+20 failures, including nine references to removed scratch directories/worktrees, malformed extracted commands,
+missing symbols, and requests for bytes absent from the executable. The replay is a compatibility check,
+not proof of complete answer equivalence or a recreation of each historical working tree.
+The 51 MCP impact calls had medians of 1.450 s and 0.990 s; overall output grew from 14.94 to 15.33 million
+characters. Ordered replay timing is secondary to the alternating-process benchmark below.
+
+**Tool latency.** Five measured pairs per case, alternating old/new order after an unmeasured warmup pair, fresh CLI
+process per call, isolated toolkit caches/state, warm OS file cache. Intel Core Ultra 7 265K, Linux x86-64,
+Python 3.13.5. Process startup and query refresh are included. Read-only benchmark and agent work ran concurrently,
+so these are workstation observations, not hardware-independent budgets.
+
+| Real workflow | 0.4.0 median | 0.5.0 median | Answer check |
+| --- | ---: | ---: | --- |
+| Shared locomotion impact | 1.633 s | 1.125 s | Same 38 selected tests and consumers |
+| Script test registration | 1.412 s | 0.983 s | Previously unmapped; now finds the catalog's one test |
+| Shared graphics-header impact | 1.675 s | 1.128 s | Same 29 selected tests and consumers |
+| Lobby scenery impact | 1.601 s | 1.152 s | Same 39 selected tests and consumers |
+| Three-function decomp lookup | 0.303 s | 0.310 s | Identical JSON evidence |
+| Original float read | 0.170 s | 0.164 s | Identical JSON evidence |
+| Original call-tree plan | 0.290 s | 0.302 s | Identical JSON evidence |
+
+The impact cases improved by 28–33%; the decomp differences are small and do not establish an improvement.
+Every emitted selection was independently matched against CTest's configured catalog. A synthetic 400-name
+selection verifies splitting without admitting an unrelated render check. JSON impact output grows because it
+now includes executable argument arrays, build targets, fixture names and unknown-cost counts; output size is
+not presented as a token saving.
+
+Reproduce on project-owned cases (`name` plus CLI `argv`, with no writes):
+
+```sh
+python tools/benchmark.py --old ../old/src --new src --project /my/project.json \
+  --cases /my/cases.json --out /my/benchmark-results --repeat 5
+```
+
+**Exact test planning.** A 38-check real selection expands to six required build fixtures. The new `test-plan`
+matched CTest's own `--show-only=json-v1` expansion exactly and consolidated the same six fixture targets into
+one optional parallel prebuild command, leaving CTest fixtures enabled. Five warm in-process plans had a median
+of 0.251 s. The text plan was 1,904 UTF-8 bytes versus 54,568 bytes for that selection's raw CTest catalog.
+This measures planning and output size; it does not establish compilation speedup. Synthetic checks cover
+nested cleanup/setup fixtures, cycles, missing/disabled names, command preservation and CLI/MCP equivalence.
+Project-required architecture references are tested with arbitrary document names in both brief formats,
+including missing documents. Skill compliance and architecture quality still require review.
+
+**Agent comparison.** Two read-only tasks, one run per arm, same Sonnet model, with three independent grader votes
+against original-byte and CTest-catalog evidence. All arms answered both correctly. No-toolkit: 11 turns,
+71 s, $0.181; 0.4.0: 7 turns, 22 s, $0.143; 0.5.0: 7 turns, 139 s, $0.096. The new arm's original-byte task spent
+123 of 127 seconds in model/API time. The script-registration agents all chose grep rather than impact.
+These trials validate continued answer quality and show **no demonstrated agent-level speedup**. They do not
+validate the revised skill's milestone decisions. Direct tool benchmarks establish the impact-query improvement.
+
+**Limits.** No native gameplay, original executable or content package was changed. The review does not fix the
+gameplay gaps in the project docs or establish runtime parity. Transport aliases are backed by observed failed
+calls; unknown arguments remain errors. Handoff compatibility is tested only against synthetic temporary state.
+
+## Previous release baseline (0.4.0)
 
 **Projects.** Two real projects:
 
@@ -72,8 +143,8 @@ drift, tiers, recipes, lookup, asm, data, names, xrefs, search, read, brief, act
 same answer or a better one. Differences traced to the live repos changing between the two runs matched once rerun
 together. In the transcripts, the missing definition lines this version adds had been followed by a manual grep or
 file read 43 times, and every previously failing mixed lookup by a retry. Three rounds of four agent tasks gave 12/12
-for both versions at the same time and cost (50 vs 54 turns, 190 vs 186 s, $1.71 each). Under 8 concurrent MCP
-clients the two are equal (p50 about 0.1 s).
+for both versions at the same time and cost (50 vs 54 turns, 190 vs 186 s, $1.71 each). With 8 concurrent requests on one MCP
+stdio session the two are equal (p50 about 0.1 s).
 
 **Windows.** Run with the official Windows builds of uv, Python and Git (under Wine, not a physical machine).
 `uv tool install` brought Python and every dependency by itself; setup, brief, lookups (DOL and REL), asm, xrefs, data,

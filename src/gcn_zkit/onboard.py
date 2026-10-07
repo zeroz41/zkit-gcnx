@@ -227,7 +227,7 @@ def project_for(directory: Path, candidates: list[Path]) -> Path | None:
     return None
 
 
-def connect_agents(dry_run: bool = False) -> list[str]:
+def connect_agents(dry_run: bool = False, refresh: bool = False, source: str | None = None) -> list[str]:
     """Add and install the gcn-zkit plugin in Claude Code and Codex, for whichever is installed.
 
     Runs the same commands the README lists, by full path (works for .exe and .cmd shims on Windows)."""
@@ -235,8 +235,9 @@ def connect_agents(dry_run: bool = False) -> list[str]:
     import subprocess
     from . import REPOSITORY
     from .health import _claude_plugin, _codex_plugin
-    steps = {"claude": [["plugin", "marketplace", "add", REPOSITORY], ["plugin", "install", "gcn-zkit@gcn-zkit"]],
-             "codex": [["plugin", "marketplace", "add", REPOSITORY], ["plugin", "add", "gcn-zkit@gcn-zkit"]]}
+    origin = source or REPOSITORY
+    steps = {"claude": [["plugin", "marketplace", "add", origin], ["plugin", "install", "gcn-zkit@gcn-zkit"]],
+             "codex": [["plugin", "marketplace", "add", origin], ["plugin", "add", "gcn-zkit@gcn-zkit"]]}
     already = {"claude": _claude_plugin()[0], "codex": _codex_plugin()[0]}
     said = []
     for client, commands in steps.items():
@@ -244,9 +245,14 @@ def connect_agents(dry_run: bool = False) -> list[str]:
         if program is None:
             said.append(f"{client}: not installed, skipped")
             continue
-        if already[client]:
+        if already[client] and not refresh:
             said.append(f"{client}: plugin already set up")
             continue
+        if refresh:
+            commands = [["plugin", "marketplace", "add", origin],
+                        ["plugin", "marketplace", "update" if client == "claude" else "upgrade", "gcn-zkit"],
+                        ["plugin", "update" if client == "claude" and already[client] else
+                         "install" if client == "claude" else "add", "gcn-zkit@gcn-zkit"]]
         for args in commands:
             line = f"{client} {' '.join(args)}"
             if dry_run:
