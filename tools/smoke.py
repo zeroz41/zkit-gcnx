@@ -66,7 +66,9 @@ def project_rows(manifest: Path) -> list[dict]:
         address = found["function"]
         commands += [["lookup", address], ["lookup", found["name"]], ["asm", address], ["xrefs", address],
                      ["names", "--range", f"{address[2:]}-{int(address, 16) + 0x100:08X}"] if address.startswith("0x") else [],
-                     ["data", address, "--count", "4"], ["lookup", address, found["name"]]]
+                     ["data", address, "--count", "4"], ["lookup", address, found["name"]], ["classes", "--limit", "5"]]
+        if any(t.get("splits") for t in config.get("targets", {}).values()):
+            commands += [["unit", address], ["unit", "--blocked", "--limit", "5"], ["unit", "--gaps", "--limit", "5"]]
     if found.get("rel"):
         commands += [["lookup", found["rel"]], ["asm", found["rel"]]]
     for args in [a for a in commands if a]:
@@ -87,7 +89,7 @@ def project_rows(manifest: Path) -> list[dict]:
                     for p in t.get("properties", []))]
                 if candidates:
                     rows.append(run(["test-plan", name, candidates[0]], roots[name], manifest, ok=(0,)))
-            for args in [["check"], ["impact"], ["grounding"], ["suspects", "--limit", "5"], ["tiers"], ["drift"],
+            for args in [["check"], ["impact"], ["stale"], ["grounding"], ["suspects", "--limit", "5"], ["tiers"], ["drift"],
                          ["demand", "--limit", "5"], ["reuse"], ["brief"]]:
                 rows.append(run(args, roots[name], manifest))
     rows.append(run(["check"], Path(tempfile.gettempdir()), manifest, ok=(2,)))  # outside any repo: clean error

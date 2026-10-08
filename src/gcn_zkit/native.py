@@ -19,6 +19,7 @@ import os
 import re
 import shlex
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -536,3 +537,115 @@ def grounding(project: Project, repo: str, paths: list[str] | None = None, targe
             "weakest_files": [{"path": p, "unmatched": len(v), "examples": v[:5]} for p, v in weakest[:limit]],
             "meaning": "exact_pct: share of cited original functions that are byte-exact in the decomp. "
                        "This does not verify native behavior, the live caller path, or uncited dependencies."}
+
+
+NINJA_BUILD = re.compile(r"^build (.+?): (\S+)(.*)$")
+
+
+def _ninja_links(build: Path) -> dict[str, tuple[str, list[str]]]:
+    """output -> (rule, inputs) for every link/archive statement in the build's build.ninja."""
+    path = build / "build.ninja"
+    if not path.is_file():
+        return {}
+    text = path.read_text(encoding="utf-8", errors="replace").replace("$\n", " ")
+    links = {}
+    for line in text.splitlines():
+        if not line.startswith("build ") or "LINKER" not in line:
+            continue
+        line = line.replace("$ ", "\0").replace("$:", ":")
+        match = NINJA_BUILD.match(line)
+        if not match:
+            continue
+        inputs = match[3].split("||", 1)[0].replace("|", " ").split()
+        for output in match[1].split():
+            links[output.replace("\0", " ")] = (match[2], [i.replace("\0", " ") for i in inputs])
+    return links
+
+
+def stale(project: Project, repo: str, outputs: list[str] | None = None) -> dict[str, Any]:
+    """Built programs older than a source compiled into them (or a header those sources include)."""
+    config = _tests_config(project, repo)
+    root = project.root(repo)
+    build = root / config.get("build_dir", "build")
+    links = _ninja_links(build)
+    if not links:
+        return {"repo": repo, "checked": False, "outputs": [],
+                "note": f"No link statements in {build / 'build.ninja'}: staleness needs a Ninja build."}
+    objects: dict[str, str] = {}
+    compile_db = build / "compile_commands.json"
+    if compile_db.is_file():
+        for entry in json.loads(compile_db.read_text(encoding="utf-8")):
+            output = entry.get("output")
+            if not output:
+                argv = entry.get("arguments") or shlex.split(entry.get("command", ""))
+                output = next((argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "-o"), None)
+            if not output:
+                continue
+            directory = Path(entry.get("directory", build))
+            file = Path(entry["file"])
+            try:
+                key = os.path.relpath(directory / output, build).replace(os.sep, "/")  # Ninja paths are build-relative
+                objects[key] = (directory / file).resolve().relative_to(root.resolve()).as_posix()
+            except ValueError:
+                continue
+    executables = [o for o, (rule, _) in links.items() if "EXECUTABLE" in rule and (build / o).is_file()]
+    if outputs:
+        wanted = {Path(o).name for o in outputs}
+        selected = [o for o in executables if Path(o).name in wanted]
+    else:  # configured apps (what a person runs), else every linked executable
+        selected = [o for o in executables if Path(o).name in set(config["apps"])] if config.get("apps") else executables
+
+    closures: dict[str, set[str]] = {}
+
+    def sources(output: str, seen: set[str]) -> set[str]:
+        if output in closures:
+            return closures[output]
+        found: set[str] = set()
+        for item in links.get(output, ("", []))[1]:
+            if item in objects:
+                found.add(objects[item])
+            elif item in links and item not in seen:
+                found |= sources(item, seen | {item})
+        closures[output] = found
+        return found
+
+    built = {o: (build / o).stat().st_mtime for o in selected}
+    oldest = min(built.values(), default=0)
+    newer_headers: dict[str, float] = {}
+    for base in config.get("scan", ["src", "tests"]):
+        for directory, dirs, names in os.walk(root / base):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d != "build"]
+            for name in names:
+                if Path(name).suffix in SOURCE_SUFFIXES - {".c", ".cc", ".cpp", ".cxx"}:
+                    path = Path(directory, name)
+                    when = path.stat().st_mtime
+                    if when > oldest:
+                        newer_headers[path.relative_to(root).as_posix()] = when
+    reach: dict[str, set[str]] = {}
+    if newer_headers:
+        graph = IncludeGraph(root, config.get("include_roots", ["src", "tests", "."]), config.get("scan", ["src", "tests"]))
+        reach = {h: set(graph.distances(_companions(h, set(graph.files)))) for h in newer_headers}
+    rows = []
+    for output in sorted(selected):
+        compiled = sources(output, {output})
+        newer = []
+        for source in compiled:
+            try:
+                when = (root / source).stat().st_mtime
+            except OSError:
+                continue
+            if when > built[output]:
+                newer.append((when, source))
+        newer += [(when, header) for header, when in newer_headers.items()
+                  if when > built[output] and reach.get(header, set()) & compiled]
+        newer.sort(reverse=True)
+        rows.append({"output": output, "built": time.strftime("%Y-%m-%d %H:%M", time.localtime(built[output])),
+                     "sources": len(compiled), "stale": bool(newer), "newer_count": len(newer),
+                     "newer": [{"file": f, "minutes_after_build": round((w - built[output]) / 60, 1)}
+                               for w, f in newer[:5]]})
+    apps = set(config.get("apps", []))
+    rows.sort(key=lambda r: (Path(r["output"]).name not in apps, not r["stale"], -built[r["output"]]))
+    return {"repo": repo, "checked": True, "outputs": rows, "stale": sum(r["stale"] for r in rows),
+            "limits": "Compares file times: a program is stale when a source linked into it, or a header such a source "
+                      "includes, is newer than the program (what Ninja's own check does for these inputs). Generated "
+                      "files, content packages and data read at run time are not compared; build to be sure."}

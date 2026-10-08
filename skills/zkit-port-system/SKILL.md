@@ -51,11 +51,12 @@ description: Implement or repair original-game behavior in a native port / reimp
    - the repo's forbidden patterns (area-specific branches, banned constructs);
    - `/tmp` paths or dated sections in docs.
 7. **Verify like the game is played.**
-   - Run `zkit_impact native`. It lists the other code that includes what you changed (the consumers you must not break) and the exact `ctest -R` commands for the tests covering it, direct ones first. Run those instead of a whole label or a render matrix.
+   - Run `zkit_impact native`. It lists the other code that includes what you changed (the consumers you must not break) and the exact `ctest -R` commands for the tests covering it, direct ones first. Run those instead of a whole label or a render matrix. Measured on 40 real commits: impact selected 94% of the tests each commit itself changed, with a median of 9 fixture builds; the habitual `-L 'unit|reference'` sweep found 32% while building 187 fixtures. Size checks to the change: no performance or render matrix for a small fix unless it touches those paths.
    - A missing impact mapping may be a linked-library or script-import limitation. Inspect the owning catalog and recipes before adding a check. Impact reports exact test commands, optional build targets and unmeasured costs; use `zkit_test_plan` with exact CTest names to validate registration, see fixture costs and prebuild only the required targets when useful. Keep the repo's mandatory finish gate.
    - Also run the original-comparison recipe (`zkit_recipes`). Never regenerate expected output from native code.
    - Test the ordinary live route and another existing consumer of changed shared code. Include an unfamiliar valid data variant through the common import/runtime path, malformed/unsupported inputs and resource retirement. Verify which part of the declared inventory the checks exercise; preserve independent expected results.
    - Rendering checks run off-screen (virtual desktop), scoped to the change; kill what you start.
+   - Before asking anyone to run the game or a tool, `zkit_stale native` must show it up to date (it compares the program with every source and header compiled into it, as Ninja does). Rebuild if not; "did you rebuild?" is a real failure the owner hit.
 8. **Feed back.** If you recovered decomp evidence, bank it in the decomp. Update the owning system doc in place, and rewrite `docs/status.md`.
 
 Finish with `zkit-finish`. Report source-traced, original-executed, native-integrated and presentation evidence separately.

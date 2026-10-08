@@ -5,7 +5,7 @@ description: End a session on a gcn-zkit project correctly - run the repo's fini
 
 # Finish a session
 
-1. Run `zkit_gate <repo>` and execute every command it lists, in order, for each repo you changed. If it reports that copies of the gate disagree, follow the repo's `AGENTS.md`.
+1. Run `zkit_gate <repo>` and execute every command it lists, in order, for each repo you changed. If it reports that copies of the gate disagree, follow the repo's `AGENTS.md`. If it reports a stale build of a configured app, rebuild it before you report the work as ready to run.
 2. Decomp: rebuild and compare match progress with what you started from. No function may lose its match.
 3. Native port (when configured):
    - `zkit_check native` must have no errors. Fix warnings on code you added, or justify them.

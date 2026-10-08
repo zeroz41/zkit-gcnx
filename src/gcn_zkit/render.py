@@ -402,6 +402,26 @@ def gate(data: dict) -> str:
             out.append(f"drift: {d['source']} missing")
             continue
         out.append(f"drift: {d['source']} lacks {d['missing'] or '-'}; extra {d['extra'] or '-'}")
+    for app in data.get("stale_apps", []):
+        newest = app["newer"][0]
+        out.append(f"stale build: {app['output']} (built {app['built']}) is older than {app['newer_count']} source(s), "
+                   f"newest {newest['file']}; rebuild before anyone runs it")
+    return "\n".join(out)
+
+
+def stale(data: dict) -> str:
+    if not data.get("checked"):
+        return data.get("note", "not checked")
+    rows = data["outputs"]
+    out = [f"{data['stale']} of {len(rows)} built program(s) older than their sources:"]
+    for r in [r for r in rows if r["stale"]][:25]:
+        newest = r["newer"][0]
+        out.append(f"  STALE {r['output']} built {r['built']}: {r['newer_count']} newer, e.g. {newest['file']} "
+                   f"(+{newest['minutes_after_build']} min)")
+    fresh = [r["output"] for r in rows if not r["stale"]]
+    if fresh:
+        out.append(f"  up to date: {', '.join(fresh[:12])}" + (f" +{len(fresh) - 12}" if len(fresh) > 12 else ""))
+    out.append("limits: " + data["limits"])
     return "\n".join(out)
 
 

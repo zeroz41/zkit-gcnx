@@ -7,7 +7,7 @@ skills (zkit-resume / -recover-function / -port-system / -finish)
         │ tell the agent when to call what
 MCP server (server.py) ── CLI (cli.py) ── SessionStart hook (`hook session-start`)
         │ thin; text by default, --json / response_format=json for data
-bridge.py  session.py  activity.py  inspect_dol.py      ← answers
+bridge.py  structure.py  session.py  activity.py  inspect_dol.py      ← answers
         │
 index.py (SQLite + FTS5, ~/.cache/gcn-zkit/<id>-<hash>.sqlite)
         │ functions · calls · cites · lines · files
@@ -53,6 +53,9 @@ paths.
 | `gate` | The manifest's canonical finish list, and which repo copies lack or add commands | Whether the gate passes. Run it |
 | `architecture` | Project-configured C/C++ include boundary checks, exact source lines, resolved headers and explicit exceptions | Semantic coupling, ownership, preprocessor evaluation or a complete architecture proof |
 | `coverage` | Dynamic reference/stage inventory joins, duplicates, missing identities, prerequisite gaps and source hashes | Import validity, runtime admission, successful tests or system completion |
+| `unit` | A unit's splits.txt ranges, the report's state of its functions, its data symbols with the units whose code or data points at them, the data its code uses that another unit (or no split) holds, and section neighbours. `--blocked`: units whose functions are all exact but not all linked, with those references. `--gaps`: per section, the bytes no split claims (extents from symbols.txt) and the units whose code uses each range | Why a link actually fails (order, alignment, padding and missing runtime symbols need a link attempt), or which fold is right. References are straight-line decoded forms, so register-passed and indexed accesses are missed |
+| `classes` | For each function held by named `__vt__` tables: whether its class name is among them; strong when the named class has its own named vtable without it; the holding class when there is one | The base class of several holders (no RTTI), or anything about non-virtual methods. Unnamed `lbl_` tables are only counted |
+| `stale` (native) | Programs from `build.ninja` link statements older than a source compiled into them (`compile_commands.json`), or a header such a source includes | Generated sources, content packages or data read at run time. It reads file times; it never builds |
 | `test-plan` | Exact CTest names, recursive setup/cleanup fixture closure, historical costs and optional consolidated CMake prebuild commands | Test execution, coverage, rebuild cost or speedup. Complex/environment-dependent fixtures remain under CTest; required fixtures are never disabled |
 | `impact` (native) | Files that directly `#include` the change (the consumers to re-test); CTest names whose test sources include it at distance 1 (direct) or 2 (near), or whose commands name an edited script/file; exact `ctest -R` commands, build targets and fixture names | Behavior reached only through linked libraries or hub headers (counted as "broad"); script imports and dynamically formed paths; build-fixture time |
 | `lookup` data refs | Every pointer to the function's start inside the original's data sections, named by holder symbol and offset. The same slot in many `__vt__*` tables means an inherited base-class virtual | Virtual calls made through registers (`bctrl`) at runtime |

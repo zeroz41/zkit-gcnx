@@ -42,7 +42,12 @@ answers what an agent needs in one call.
   every slot it points to.
 - **asm / data**: the original instructions with symbols and constants resolved, and the original data.
 - **xrefs**: who reads or writes a global.
-- **names**: find functions by name, file or match state, for example the closest near-misses.
+- **names**: find functions by name, file or match state, for example the closest near-misses. A range over data
+  lists its data symbols.
+- **unit**: a split unit's ranges, the functions still to match or name, the data other units use, and the literals
+  and globals its code takes from elsewhere. `--blocked` lists every exact unit that won't link yet, with those
+  cross-unit references; `--gaps` maps every data range no split claims and which unit uses it.
+- **classes**: method names whose class the original vtables contradict, and virtuals with no class yet.
 
 **For a port that must behave like the original** (the port cites the original addresses it implements, like
 `// 800C1C4C`):
@@ -56,6 +61,7 @@ answers what an agent needs in one call.
   waiting on.
 - **impact / check / tiers**: the exact tests to run for a change, lint against the port's rules, and which code must
   match the original exactly and which is free to differ (rendering, UI).
+- **stale**: which built programs are older than the code compiled into them, so nobody tests an old build.
 
 **For every session:** the **brief** is handed to each new agent. It covers progress, other agents and builds running,
 uncommitted work, and the last session's notes, so no session starts from zero.
@@ -157,6 +163,10 @@ Run these inside the repo. They only read, except `handoff`.
 | What's in a vtable | `gcn-zkit lookup __vt__7MyClass` |
 | The closest near-misses in a file | `gcn-zkit names --unit my_file --below 100 --sort match` |
 | Original disassembly / data | `gcn-zkit asm 0x80012345` / `gcn-zkit data 0x80345678 --type str` |
+| A unit's ranges, data and cross-unit references | `gcn-zkit unit game/MyClass` or `gcn-zkit unit 0x80345678` |
+| Exact units that don't link yet, and why | `gcn-zkit unit --blocked` |
+| Data no split claims yet, and who uses it | `gcn-zkit unit --gaps --section .sdata2` |
+| Class names the vtables contradict | `gcn-zkit classes` |
 | Who reads or writes a global | `gcn-zkit xrefs g_gameState` |
 | Search docs and source | `gcn-zkit search player jump` |
 | Is someone else building? Wait until it's free | `gcn-zkit wait decomp` |
@@ -178,6 +188,7 @@ With a PC port (`setup --native`), run these inside the port:
 | Are the port's numbers the real game's numbers? | `gcn-zkit consts src/combat` |
 | What changed in the decomp that the port must re-check | `gcn-zkit drift` (after re-checking: `gcn-zkit drift --accept`) |
 | Which tests cover my change, and who else uses that code | `gcn-zkit impact` |
+| Is the build older than my edits? (check before running it) | `gcn-zkit stale` |
 | What must match the original exactly, and where I'm free | `gcn-zkit tiers src/camera` |
 | Is my change breaking the repo's rules? | `gcn-zkit check` |
 | Copy-pasted code that should be shared | `gcn-zkit reuse` |

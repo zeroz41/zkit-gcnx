@@ -791,20 +791,15 @@ def names(project: Project, queries: list[str] | None = None, target: str | None
         if pattern and not (pattern.search(row["name"]) or (row["demangled"] and pattern.search(row["demangled"]))):
             continue
         matched.append(row)
-    if start is not None and end is not None and not (unit or provisional is not None or below is not None):
+    if (start is not None and end is not None and not matched
+            and not (unit or provisional is not None or below is not None)):
         # A range over data has no functions: list its data symbols, which agents otherwise grep for.
         symbols, starts = _symbol_table(project, target)
-        functions = {r["address"] for r in matched}
         extra = [{"query": address_text(s.address), "address": address_text(s.address), "name": s.name, "data": True,
                   "symbol": {"name": s.name, "section": s.section, "size": s.size, "offset": 0}}
                  for s in symbols[bisect.bisect_left(starts, start):bisect.bisect_left(starts, end)]
-                 if s.type not in ("function", "label") and s.address not in functions
-                 and (not pattern or pattern.search(s.name))]
-        if extra:
-            merged = sorted([(r["address"], _status(r)) for r in matched]
-                            + [(int(e["address"], 16), e) for e in extra], key=lambda kv: kv[0])
-            rows = [row for _, row in merged[:limit]]
-            return {"target": target, "rows": rows, "total": len(merged), "truncated": max(0, len(merged) - len(rows))}
+                 if s.type not in ("function", "label") and (not pattern or pattern.search(s.name))]
+        return {"target": target, "rows": extra[:limit], "total": len(extra), "truncated": max(0, len(extra) - limit)}
     rows = [_status(row) for row in matched[:limit]]
     return {"target": target, "rows": rows, "total": len(matched), "truncated": max(0, len(matched) - len(rows))}
 
