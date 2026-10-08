@@ -191,10 +191,18 @@ def doctor(project: Project) -> dict:
         rows.append(_row("ok" if baseline.is_file() else "info", f"{name}: drift baseline",
                          "recorded" if baseline.is_file() else "none yet", "gcn-zkit drift --accept   # records one"))
     if project.config.get("targets"):
-        from .decompile import status as ghidra_status
+        from .decompile import budget, status as ghidra_status
         ghidra = ghidra_status()
-        rows.append(_row("info" if ghidra.get("problem") else "ok", "Ghidra decompile (optional)",
-                         ghidra.get("problem") or f"{ghidra['version']} at {ghidra['install']}", ghidra.get("fix", "")))
+        detail = ghidra.get("problem") or f"{ghidra['version']} at {ghidra['install']}"
+        if not ghidra.get("problem"):
+            plan = budget()
+            detail += (f"; now {plan['available_mb']}/{plan['total_mb']} MB available, agents {plan['agents_mb']}/"
+                       f"{plan['agent_cap_mb']} MB: " +
+                       (plan["refuse"].split(";")[0] + " (memory short)" if plan.get("refuse") else
+                        f"up to {plan['workers']} worker(s), {plan['threads']} threads, heap <= {plan['heap_mb']} MB, "
+                        f"keeps {plan['reserve_mb']} MB free"))
+        rows.append(_row("info" if ghidra.get("problem") else "ok", "Ghidra decompile (optional)", detail,
+                         ghidra.get("fix", "")))
     try:
         from .index import refresh
         stats = refresh(project)

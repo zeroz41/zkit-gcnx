@@ -132,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     c = add("asm", help="Disassemble original bytes with symbol/SDA/lis resolution")
     c.add_argument("query", nargs="+")
     c.add_argument("--size", type=lambda v: int(v, 0))
-    c = add("decompile", help="Ghidra C for original functions: structured flow where m2c fails or emits goto (cached)")
+    c = add("decompile", help="Ghidra C for original functions, a second reading next to m2c (cached)")
     c.add_argument("query", nargs="*", help="address(es) or name(s)")
     c.add_argument("--all", action="store_true", help="fill the cache for every DOL function (~40 s for 27k)")
     c.add_argument("--threads", type=int)

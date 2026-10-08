@@ -26,7 +26,7 @@ def main(request_path: str) -> int:
 
     from pyghidra.launcher import HeadlessPyGhidraLauncher
     launcher = HeadlessPyGhidraLauncher(install_dir=Path(request["install_dir"]))
-    launcher.add_vmargs("-Djava.awt.headless=true")
+    launcher.add_vmargs("-Djava.awt.headless=true", f"-Xmx{request.get('heap', '2048m')}")
     launcher.start()
 
     from java.io import ByteArrayInputStream
@@ -110,7 +110,7 @@ def main(request_path: str) -> int:
         return {"address": start, "text": str(result.getDecompiledFunction().getC()).strip()}
 
     begun = time.monotonic()
-    with ThreadPoolExecutor(max(1, request.get("threads", 4))) as pool, out.open("w", encoding="utf-8") as stream:
+    with ThreadPoolExecutor(max(1, request.get("threads", 8))) as pool, out.open("w", encoding="utf-8") as stream:
         for row in pool.map(decompile, request["addresses"]):
             stream.write(json.dumps(row) + "\n")
         stream.write(json.dumps({"timing": {"setup": round(setup, 2), "decompile": round(time.monotonic() - begun, 2),

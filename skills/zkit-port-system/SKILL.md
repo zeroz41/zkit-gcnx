@@ -30,7 +30,7 @@ description: Implement or repair original-game behavior in a native port / reimp
    - **port:** exact in the decomp and not yet in the port.
 
    Also run `zkit_lookup` on the entry point for its callers (who drives it, in what order) and use `zkit_asm`/`zkit_data` for constants and tables. Vtable calls are not in the tree: read the asm for `bctrl`.
-   Subagents do not get the session brief: tell every worker to use the gcn-zkit CLI via Bash (`gcn-zkit lookup|asm|data|xrefs <addr ...>`) instead of reading the DOL or symbols.txt with scripts (84% vs 22% zkit use, measured). Before building in the shared decomp tree, `gcn-zkit wait decomp`, then build under its lock.
+   Subagents do not get the session brief: tell every worker to use the gcn-zkit CLI via Bash (`gcn-zkit lookup|asm|decompile|data|xrefs <addr ...>`; `decompile` is Ghidra's C for an original function) instead of reading the DOL or symbols.txt with scripts (84% vs 22% zkit use, measured). Before building in the shared decomp tree, `gcn-zkit wait decomp`, then build under its lock.
 2. **Find the existing owner.**
    - `zkit_search` the system name in native docs and source.
    - `zkit_reuse native` shows copied helpers and the central files that enumerate variants. If configured, `zkit_architecture` checks the changed system against the project's include boundaries; investigate each finding against the actual contract.
