@@ -190,6 +190,11 @@ def doctor(project: Project) -> dict:
         baseline = state_dir(project) / f"drift-{name}.json"
         rows.append(_row("ok" if baseline.is_file() else "info", f"{name}: drift baseline",
                          "recorded" if baseline.is_file() else "none yet", "gcn-zkit drift --accept   # records one"))
+    if project.config.get("targets"):
+        from .decompile import status as ghidra_status
+        ghidra = ghidra_status()
+        rows.append(_row("info" if ghidra.get("problem") else "ok", "Ghidra decompile (optional)",
+                         ghidra.get("problem") or f"{ghidra['version']} at {ghidra['install']}", ghidra.get("fix", "")))
     try:
         from .index import refresh
         stats = refresh(project)

@@ -249,6 +249,25 @@ def create_server(project: Project) -> FastMCP:
         return out(data, render.disasm(data) if "text" not in data or data.get("size") else data["text"],
                    response_format)
 
+    @tool(enabled=bool(project.config.get("targets")))
+    def zkit_decompile(query: str, repo: str | None = None, response_format: Format = "text") -> str:
+        """Ghidra's C for ORIGINAL functions (address or name; several separated by spaces, max 12). Use it when
+        m2c fails or emits goto, or to read what an unmatched function does: there its control flow is measurably
+        closer to the real source. Elsewhere m2c is closer (switch, return, calls) and stays the seed. Not
+        compilable, not a match. Cached; a miss starts Ghidra (~10 s)."""
+        from .decompile import decompile
+        p = decomp(repo)
+        found = []
+        for q in bridge.query_list(query)[:12]:
+            hits = bridge.resolve(p, q, target(p))
+            if not hits:
+                raise ValueError(f"No function matches {q}")
+            found.append(hits[0])
+        if not found:
+            raise ValueError("Pass query (address or name; several separated by spaces)")
+        data = decompile(p, target(p), found)
+        return out(data, render.decompiled(data), response_format)
+
     @tool()
     def zkit_data(address: str | None = None, type: str = "u32", count: Number = None, fields: str | None = None,
                   stride: Number = None, query: str | None = None, size: Number = None,
