@@ -292,6 +292,8 @@ def lookup(data: dict) -> str:
             sorted({f"{c['repo']}:{c['path']}" for c in data["mentions"]})[:8]))
     if data["recipes"]:
         out.append("fidelity recipes: " + ", ".join(data["recipes"]))
+    if data.get("decompile"):
+        out.append(f"Ghidra's C next to m2c: gcn-zkit decompile {f['address']} (MCP zkit_decompile)")
     if data.get("body"):
         lo, hi = data["body_lines"]
         out.append(f"body ({f.get('source')}:{lo}-{hi}):")

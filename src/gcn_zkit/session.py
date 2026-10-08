@@ -293,7 +293,8 @@ def brief(project: Project, repo: str | None = None, demand_rows: int = 5) -> di
 SUBAGENT_CONTEXT = (
     "gcn-zkit is available for evidence on {project}. Use the CLI via Bash (MCP zkit_* tools may need loading): "
     "`gcn-zkit lookup <addr|name ...>` (match/name state, owning file:line, callers, cites), "
-    "`gcn-zkit asm <addr> [--size 0x40]`, `gcn-zkit data <addr|symbol ...> --type f32 --size 64`, "
+    "`gcn-zkit asm <addr> [--size 0x40]`, `gcn-zkit decompile <addr ...>` (Ghidra's C for the original function; "
+    "read it next to m2c, especially where m2c fails or emits goto), `gcn-zkit data <addr|symbol ...> --type f32 --size 64`, "
     "`gcn-zkit names --regex RE | --range A-B`, `gcn-zkit xrefs <addr|symbol ...>`, `gcn-zkit search <words>`, "
     "`gcn-zkit wait <repo>` before a build instead of pgrep/sleep. All take several addresses per call. "
     "Prefer these to grepping symbols.txt or parsing the executable/report.json with Python.")

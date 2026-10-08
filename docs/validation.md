@@ -42,8 +42,16 @@ language, no auto-analysis). Paired per function, m2c closer / tie / Ghidra clos
 So Ghidra is not a replacement (overall a tie, worse on switches and calls) but is closer where m2c breaks: mean
 structural distance to the source falls from 3.43 (m2c) to 3.15 with Ghidra used only there, and 4.19 for Ghidra
 everywhere. Of the 1,635 unmatched functions, m2c fails or emits goto on 663; Ghidra is goto-free on 539 of them.
-The tools and the decomp's `m2c` command therefore use it only there. These are structural proxies against matched
-source, not a match rate.
+0.8.0 therefore offered it only there; 0.8.1 offers it for every function (skills, worker context, `lookup` of an
+unmatched function) with these numbers as guidance on which reading to trust, since the gate kept agents from
+reading it on the control-flow blockers it exists for. These are structural proxies against matched source, not a
+match rate.
+
+**Match-rate check (0.8.1, quick).** Five control-flow blockers (81.5-97.8%), each given to two workers from the same
+candidate with six scoring compiles: m2c only, or m2c plus Ghidra. Final scores m2c / Ghidra: 93.8 / 91.0, 85.1 /
+85.1, 100 / 100, 100 / 100, 99.5 / 99.3 (both arms matched the same two). No gain at this size: what remained was
+register allocation, which neither reading shows. Ghidra's stack arrays gave the frame layout on the 81.5% function,
+but the m2c worker found it from the asm too. The second round itself matched two functions filed as stuck.
 
 The same study found the decomp's interactive `m2c` command printing stale monolith names: callee order agreed with
 the source 0.05 of the time, 0.85 after renaming on output (fixed in that project).

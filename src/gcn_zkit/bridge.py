@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .gc import Symbol, read_symbols
-from .index import address_text, cache_path, connect, containing, fts_query, module_address, refresh, report_age_hours
+from .index import MODULE_SHIFT, address_text, cache_path, connect, containing, fts_query, module_address, refresh, report_age_hours
 from .project import Project
 
 HEX = re.compile(r"^(?:0x)?([0-9A-Fa-f]{8})$")
@@ -112,6 +112,11 @@ def class_of(name: str | None, demangled: str | None = None) -> str | None:
         return match[2][:int(match[1])]
     match = re.match(r"^([A-Za-z_]\w*?)__(?:sub|vt\d*|data)_?[0-9A-Fa-f]*", name)
     return match[1] if match else None
+
+
+def _decompile_available() -> bool:
+    from .decompile import available
+    return available()
 
 
 def _status(row) -> dict[str, Any]:
@@ -635,6 +640,7 @@ def lookup(project: Project, query: str, target: str | None = None, fresh: bool 
         "decomp_cites": [c for c in cites if c["repo"] not in native],
         "mentions": mentions,
         "recipes": recipes,
+        "decompile": not info["exact"] and row["address"] < 1 << MODULE_SHIFT and _decompile_available(),
         "limits": "Callers are direct `bl` calls; data_refs are pointers in data (vtable slots, tables). Match/link "
                   "state is the current report (report_age_h); a cite means the address is mentioned, not that "
                   "behavior was verified.",

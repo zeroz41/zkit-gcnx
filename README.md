@@ -170,7 +170,7 @@ Run these inside the repo. They only read, except `handoff`.
 | What's in a vtable | `gcn-zkit lookup __vt__7MyClass` |
 | The closest near-misses in a file | `gcn-zkit names --unit my_file --below 100 --sort match` |
 | Original disassembly / data | `gcn-zkit asm 0x80012345` / `gcn-zkit data 0x80345678 --type str` |
-| Readable C for an original function where m2c fails or emits `goto` (Ghidra, optional) | `gcn-zkit decompile 0x80012345` |
+| Ghidra's C for an original function, next to m2c (optional; closer where m2c emits `goto`) | `gcn-zkit decompile 0x80012345` |
 | A unit's ranges, data and cross-unit references | `gcn-zkit unit game/MyClass` or `gcn-zkit unit 0x80345678` |
 | Exact units that don't link yet, and why | `gcn-zkit unit --blocked` |
 | Data no split claims yet, and who uses it | `gcn-zkit unit --gaps --section .sdata2` |
