@@ -107,6 +107,17 @@ def build_parser() -> argparse.ArgumentParser:
     c = add("xrefs", help="Code that reads/writes/takes the address of a global or table, and pointers to it")
     c.add_argument("query", nargs="+", help="address(es) or symbol name(s)")
     c.add_argument("--size", type=lambda v: int(v, 0))
+    c = add("unit", help="A split unit: section ranges, functions, data, cross-unit references, neighbours; "
+                         "--blocked: every exact unit that is not linked, with what references cross its boundary")
+    c.add_argument("query", nargs="*", help="unit path from splits.txt, an address, or a function in it")
+    c.add_argument("--blocked", action="store_true")
+    c.add_argument("--gaps", action="store_true", help="per-section split coverage and every unclaimed range")
+    c.add_argument("--section", help="with --gaps: only this section, e.g. .sdata2")
+    c.add_argument("--limit", type=int, default=40)
+    c = add("classes", help="Function class names the original vtables contradict, and unclaimed single-class virtuals")
+    c.add_argument("--class", dest="cls", help="only rows naming or suggesting this class")
+    c.add_argument("--unit", help="only functions whose unit contains this text")
+    c.add_argument("--limit", type=int, default=60)
     c = add("renamed", help="Decomp symbols renamed since a git revision (old -> new)")
     c.add_argument("since")
     c = add("port-plan", help="Original call tree joined with native coverage: reuse / port / decompile-first")
@@ -361,6 +372,21 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         data = bridge.batch(bridge.query_list(" ".join(args.query)),
                             lambda q: bridge.xrefs(project, q, target, size=args.size))
         return data, render.xrefs(data)
+    if command == "unit":
+        from . import structure
+        if args.gaps:
+            data = structure.gaps(project, target, args.section, args.limit)
+            return data, render.split_gaps(data)
+        if args.blocked or not args.query:
+            data = structure.blocked(project, target, args.limit)
+            return data, render.blocked_units(data)
+        data = bridge.batch(bridge.query_list(" ".join(args.query)),
+                            lambda q: structure.unit(project, q, target, args.limit))
+        return data, render.unit(data)
+    if command == "classes":
+        from . import structure
+        data = structure.classes(project, target, args.cls, args.unit, args.limit)
+        return data, render.classes(data)
     if command == "renamed":
         data = bridge.renamed(project, args.since, target)
         return data, render.renamed(data)

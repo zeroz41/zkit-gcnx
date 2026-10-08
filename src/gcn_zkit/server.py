@@ -154,6 +154,40 @@ def create_server(project: Project) -> FastMCP:
         data = bridge.batch(bridge.query_list(query), lambda q: bridge.xrefs(p, q, target(p), size=_int(size)))
         return out(data, render.xrefs(data), response_format)
 
+    @tool(enabled=any(t.get("splits") for t in project.config.get("targets", {}).values()))
+    def zkit_unit(query: str | None = None, blocked: bool = False, gaps: bool = False, section: str | None = None,
+                  limit: int = 40, repo: str | None = None, response_format: Format = "text",
+                  unit: str | None = None, address: str | None = None) -> str:
+        """Linking: a split unit (path from splits.txt, an address or a function in it; several separated by
+        spaces) with its section ranges, functions still to match or name, data symbols used by other units,
+        literals and globals it uses from other units, and each section's neighbours. blocked=true (or no query):
+        every unit whose functions are all exact but not linked, with those cross-unit references, fewest first.
+        gaps=true: per-section split coverage and every unclaimed range with the units using it (section filters).
+        Use instead of grepping splits.txt/symbols.txt to decide a fold, merge or split."""
+        p = decomp(repo)
+        from . import structure
+        if gaps:
+            data = structure.gaps(p, target(p), section, max(1, min(limit, 500)))
+            return out(data, render.split_gaps(data), response_format)
+        query = query or unit or address
+        if blocked or not query:
+            data = structure.blocked(p, target(p), max(1, min(limit, 500)))
+            return out(data, render.blocked_units(data), response_format)
+        data = bridge.batch(bridge.query_list(query), lambda q: structure.unit(p, q, target(p), max(1, min(limit, 500))))
+        return out(data, render.unit(data), response_format)
+
+    @tool()
+    def zkit_classes(class_name: str | None = None, unit: str | None = None, limit: int = 60, repo: str | None = None,
+                     response_format: Format = "text") -> str:
+        """Naming: functions whose class name the original vtables contradict (strong when the named class has
+        its own vtable without them) with the class whose vtable holds them, and virtuals with no class in their
+        name that sit in exactly one named class's vtables. class_name/unit filter. Check before naming a method
+        after a class or accepting a provisional Class__sub_ prefix."""
+        p = decomp(repo)
+        from . import structure
+        data = structure.classes(p, target(p), class_name, unit, max(1, min(limit, 1000)))
+        return out(data, render.classes(data), response_format)
+
     @tool()
     def zkit_renamed(since: str, repo: str | None = None, response_format: Format = "text") -> str:
         """Symbols renamed at the same address since a git revision of the decomp (old -> new): rebase staged
