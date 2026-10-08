@@ -661,8 +661,10 @@ def data_lookup(project: Project, address: int, target: str, query: str | None =
     start = int(symbol["address"], 16) if symbol else address
     size = max(symbol["size"], 1) if symbol else 4
     refs = xrefs(project, start, target, size=size, fresh=False)
+    from .structure import split_owner, splits
     return {"query": query or address_text(address), "found": False, "address": address_text(address),
-            "symbol": symbol, "slots": _pointer_slots(project, target, db, start, size) if symbol else [],
+            "symbol": symbol, "owner_unit": split_owner(project, target, address),
+            "has_splits": bool(splits(project, target)[0]), "slots": _pointer_slots(project, target, db, start, size) if symbol else [],
             "readers_writers": refs["code"], "pointed_from": refs["data"],
             "cites": _cites(db, start, size), "mentions": _cites(db, start, size, limit=20, table="mentions"),
             "hint": "Not inside a known function; the symbol above (if any) is the data/object owner."}
@@ -784,14 +786,27 @@ def names(project: Project, queries: list[str] | None = None, target: str | None
     if sort not in order:
         raise ValueError(f"sort must be one of {', '.join(order)}")
     pattern = re.compile(regex) if regex else None
-    total = 0
+    matched = []
     for row in db.execute(sql + " ORDER BY " + order[sort], args):
         if pattern and not (pattern.search(row["name"]) or (row["demangled"] and pattern.search(row["demangled"]))):
             continue
-        total += 1
-        if len(rows) < limit:
-            rows.append(_status(row))
-    return {"target": target, "rows": rows, "total": total, "truncated": max(0, total - len(rows))}
+        matched.append(row)
+    if start is not None and end is not None and not (unit or provisional is not None or below is not None):
+        # A range over data has no functions: list its data symbols, which agents otherwise grep for.
+        symbols, starts = _symbol_table(project, target)
+        functions = {r["address"] for r in matched}
+        extra = [{"query": address_text(s.address), "address": address_text(s.address), "name": s.name, "data": True,
+                  "symbol": {"name": s.name, "section": s.section, "size": s.size, "offset": 0}}
+                 for s in symbols[bisect.bisect_left(starts, start):bisect.bisect_left(starts, end)]
+                 if s.type not in ("function", "label") and s.address not in functions
+                 and (not pattern or pattern.search(s.name))]
+        if extra:
+            merged = sorted([(r["address"], _status(r)) for r in matched]
+                            + [(int(e["address"], 16), e) for e in extra], key=lambda kv: kv[0])
+            rows = [row for _, row in merged[:limit]]
+            return {"target": target, "rows": rows, "total": len(merged), "truncated": max(0, len(merged) - len(rows))}
+    rows = [_status(row) for row in matched[:limit]]
+    return {"target": target, "rows": rows, "total": len(matched), "truncated": max(0, len(matched) - len(rows))}
 
 
 def renamed(project: Project, since: str, target: str | None = None) -> dict[str, Any]:

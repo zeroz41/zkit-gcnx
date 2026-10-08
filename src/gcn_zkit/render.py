@@ -206,6 +206,11 @@ def lookup(data: dict) -> str:
                      f"size 0x{s['size']:X}" + (f", +0x{s['offset']:X} into it" if s['offset'] else "") + ")"]
         else:
             lines = [f"no function for {data.get('query')}: {data.get('hint', '')}"]
+        owner = data.get("owner_unit")
+        if owner:
+            lines.append(f"  owner unit {owner['unit']} ({owner['section']} {owner['start']}-{owner['end']})")
+        elif s and data.get("has_splits"):
+            lines.append("  owner unit: none in splits.txt (decomp-toolkit gives it to an auto-generated unit)")
         if data.get("suggestions"):
             lines.append("  similar: " + ", ".join(data["suggestions"]))
         slots = data.get("slots") or []
@@ -649,3 +654,92 @@ def wait(data: dict) -> str:
     if data.get("locked_build"):
         out += f"\nadvisory only; build under the lock: {data['locked_build']}"
     return out
+
+
+def unit(data: dict) -> str:
+    batched = _batched(unit, data)
+    if batched is not None:
+        return batched
+    if not data.get("found"):
+        lines = [f"no unit for {data['query']}: {data.get('hint', '')}"]
+        if data.get("candidates"):
+            lines.append("  candidates: " + ", ".join(data["candidates"][:20]))
+        return "\n".join(lines)
+    f = data["functions"]
+    out = [f"unit {data['unit']}: {f.get('exact', 0)}/{f.get('total', 0)} exact, {f.get('linked', 0)} linked, "
+           f"{f.get('provisional', 0)} provisional names"]
+    out.append("  sections: " + ", ".join(f"{s['section']} {s['start']}-{s['end']} (0x{s['size']:X})"
+                                         for s in data["sections"]))
+    for n in data["neighbours"]:
+        gap = lambda g: "" if not g else f" +0x{g:X} unsplit"
+        out.append(f"  {n['section']} neighbours: {n['before'] or '-'}{gap(n['gap_before'])} | "
+                   f"{n['after'] or '-'}{gap(n['gap_after'])}")
+    if data["pending"]:
+        out.append(f"to match or name ({data['pending_total']}):")
+        out.extend(f"  {_fn(r)}" for r in data["pending"][:20])
+    shared = [d for d in data["data"] if d["refs_outside"]]
+    out.append(f"data symbols: {data['data_total']}, {data['shared_data']} used by other units")
+    for d in shared[:20]:
+        out.append(f"  {d['address']} {d['name']} {d['section']} 0x{d['size']:X}: used by "
+                   + ", ".join(f"{u} x{n}" for u, n in d["refs_outside"][:4]))
+    if data["outgoing"]:
+        out.append("this unit's code uses data owned elsewhere:")
+    for o in data["outgoing"][:16]:
+        more = f" (+{o['symbol_count'] - len(o['symbols'])})" if o["symbol_count"] > len(o["symbols"]) else ""
+        out.append(f"  {o['unit']} {o['section']} x{o['refs']}{' [literal pool]' if o['literal'] else ''}: "
+                   + ", ".join(o["symbols"]) + more)
+    out.append("limits: " + data["limits"])
+    return "\n".join(out)
+
+
+def blocked_units(data: dict) -> str:
+    out = [f"{data['total']} unit(s) exact but not linked ({data['linked_units']} fully linked); fewest blockers first:"]
+    for u in data["units"]:
+        f = u["functions"]
+        out.append(f"{u['unit']}: {f['exact']}/{f['total']} exact, {f['linked']} linked — " + "; ".join(u["reasons"]))
+        for i in u["incoming"][:3]:
+            out.append(f"  {i['symbol']} {i['section']} used by " + ", ".join(i["from"]))
+        for lit in u["literals"][:2]:
+            out.append(f"  literals in {lit['unit']} {lit['section']}: " + ", ".join(lit["symbols"]))
+    if data["total"] > len(data["units"]):
+        out.append(f"... {data['total'] - len(data['units'])} more (raise --limit)")
+    out.append("`unit <name>` shows one in full. limits: " + data["limits"])
+    return "\n".join(out)
+
+
+def classes(data: dict) -> str:
+    c = data.get("counts", {})
+    out = [f"class evidence from vtables: {c.get('consistent', 0)} consistent, "
+           f"{c.get('contradicted_strong', 0)} strong + {c.get('contradicted_weak', 0)} weak contradictions, "
+           f"{c.get('unclaimed', 0)} unclaimed single-class virtuals"]
+    if data.get("contradicted"):
+        out.append(f"named class not among the vtables holding it ({data['contradicted_total']}):")
+    for r in data.get("contradicted", []):
+        tables = ", ".join(r["classes"][:4]) + (f" +{r['class_count'] - 4}" if r["class_count"] > 4 else "")
+        unnamed = f" +{r['unnamed_tables']} unnamed" if r["unnamed_tables"] else ""
+        out.append(f"  [{r['strength']}] {r['address']} {r['name']} [{r['status']}] in {tables}{unnamed} -> {r['suggestion']}")
+    if data.get("unclaimed"):
+        out.append(f"no class in the name, one named class's vtables ({data['unclaimed_total']}):")
+    for r in data.get("unclaimed", []):
+        out.append(f"  {r['address']} {r['name']} [{r['status']}] -> {r['suggestion']}")
+    out.append("limits: " + data["limits"])
+    return "\n".join(out)
+
+
+def split_gaps(data: dict) -> str:
+    out = ["split coverage by section:"]
+    for s in data["sections"]:
+        pct = 100 * s["claimed"] / s["size"] if s["size"] else 100
+        out.append(f"  {s['section']} {s['start']}-{s['end']}: {pct:.1f}% claimed, {s['gaps']} gap(s), "
+                   f"0x{s['unclaimed']:X} bytes unclaimed")
+    out.append(f"unclaimed ranges with symbols: {data['total']} ({data['ready']} used by exactly one unit), "
+               f"single-user first:")
+    for r in data["ranges"]:
+        users = ", ".join(f"{u} x{n}" for u, n in r["used_by"]) or "no decoded users"
+        lead = f"-> {r['sole_user']}" if r["sole_user"] else f"used by {users}"
+        out.append(f"  {r['section']} {r['start']}-{r['end']} (0x{r['size']:X}, {r['symbols']} symbols: "
+                   f"{', '.join(r['names'][:3])}{'...' if r['symbols'] > 3 else ''}) {lead}")
+    if data["total"] > len(data["ranges"]):
+        out.append(f"... {data['total'] - len(data['ranges'])} more (--section or --limit)")
+    out.append("limits: " + data["limits"])
+    return "\n".join(out)

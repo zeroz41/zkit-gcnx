@@ -31,7 +31,7 @@ class McpTests(unittest.TestCase):
                         await session.initialize()
                         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
                         # No native port and no recipes: the port tools are left out.
-                        self.assertEqual(len(tools), 16)
+                        self.assertEqual(len(tools), 17)  # +zkit_classes; zkit_unit needs a splits file
                         self.assertNotIn("zkit_impact", tools)
                         self.assertTrue(all(name.startswith("zkit_") for name in tools))
                         writers = {name for name, tool in tools.items() if not tool.annotations.readOnlyHint}
@@ -68,6 +68,6 @@ class McpTests(unittest.TestCase):
             names = {t.name for t in create_server(Project.load(manifest))._tool_manager.list_tools()}
             from gcn_zkit.index import close_connections
             close_connections()
-        self.assertEqual(len(names), 25)
+        self.assertEqual(len(names), 26)
         self.assertTrue({"zkit_impact", "zkit_drift", "zkit_port_plan", "zkit_demand"} <= names)
         self.assertNotIn("zkit_recipes", names)
