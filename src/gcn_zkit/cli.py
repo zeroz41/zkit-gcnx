@@ -158,6 +158,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("repo", nargs="?")
     c.add_argument("paths", nargs="*")
     c.add_argument("--base", default="HEAD")
+    c.add_argument("--budget", type=float, metavar="SECONDS",
+                   help="keep all direct tests; add near tests cheapest first within this recorded time; list the rest")
     c = add("architecture", help="Check project-defined include boundaries (native-port architecture)")
     c.add_argument("repo")
     c.add_argument("paths", nargs="*")
@@ -440,7 +442,7 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         return data, render.check(data)
     if command == "impact":
         from .native import impact
-        data = impact(project, args.repo, args.paths or None, args.base, target)
+        data = impact(project, args.repo, args.paths or None, args.base, target, args.budget)
         return data, render.impact(data)
     if command == "architecture":
         from .architecture import audit
