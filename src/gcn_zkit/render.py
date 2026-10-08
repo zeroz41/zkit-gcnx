@@ -430,6 +430,23 @@ def stale(data: dict) -> str:
     return "\n".join(out)
 
 
+def decompiled(data: dict) -> str:
+    if data.get("results") is None:
+        return (f"{data['functions']} function(s) in {data['target']}: decompiled {data['decompiled_now']} now in "
+                f"{data['seconds']} s, the rest were cached.\n{data['limits']}")
+    out = []
+    for r in data["results"]:
+        if r.get("text"):
+            head = f"// {r['address']} {r['name']} size 0x{r['size']:X}"
+            if r.get("match") is not None:
+                head += f" [{r['match']:.0f}% matched]"
+            out.append(head + "\n" + r["text"])
+        else:
+            out.append(f"// {r['address']} {r.get('name') or ''}: {r.get('error')}".replace("  ", " "))
+    tail = f"// {data['engine']}; {data['decompiled_now']} decompiled now, {data['seconds']} s. {data['limits']}"
+    return "\n\n".join(out) + "\n\n" + tail
+
+
 def disasm(data: dict) -> str:
     if data.get("batch") is not None:
         return "\n\n".join(disasm(item) for item in data["batch"])

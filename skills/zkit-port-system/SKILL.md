@@ -25,7 +25,7 @@ description: Implement or repair original-game behavior in a native port / reimp
 1. **Trace the original first.** Run `zkit_port_plan <original entry addr|name>` (depth 2-3). It walks the original direct-call tree and marks each callee:
    - **reuse:** the port already implements it (files listed). Extend that owner; do not write a second copy.
    - **reuse-unverified:** the port implements it, but the decomp is not exact yet. Treat its native semantics as suspect.
-   - **decompile-first:** recover it in the decomp before porting (`zkit-recover-function`). Never guess.
+   - **decompile-first:** recover it in the decomp before porting (`zkit-recover-function`). Never guess. `zkit_decompile` reads what it does while you plan; that reading is not proof.
    - **shared-port:** the original calls it from many places. Port it once into a shared owner.
    - **port:** exact in the decomp and not yet in the port.
 

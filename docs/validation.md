@@ -21,6 +21,42 @@ build waiting, handoffs, hooks and the MCP server over stdio.
 `replay compare` and `ab_eval` keep each version's config, cache and state separate, so they never touch your real
 setup.
 
+## Ghidra decompile (0.8.0)
+
+**Question.** Does a second decompiler help next to the decomp's own m2c pipeline, or only cost time? Measured on
+the decomp-plus-port project (27,572 functions) with the project's `tools/decompiler_eval.py`: 590 byte-matched
+functions sampled by size (seeded), each scored against its matched source, plus all 1,635 unmatched functions.
+m2c ran exactly as the project shows it (cached, live names); Ghidra is `gcn-zkit decompile` (12.1.2, Gekko/Broadway
+language, no auto-analysis). Paired per function, m2c closer / tie / Ghidra closer, two-sided sign test:
+
+| Against the matched source | m2c / tie / Ghidra | p |
+| --- | --- | --- |
+| `goto` count | 40 / 407 / 143 | 9e-15 |
+| loop count | 40 / 476 / 74 | 0.002 |
+| `if` count | 150 / 329 / 111 | 0.02 |
+| `switch` count (MWCC compare trees) | 121 / 466 / 3 | 3e-32 |
+| callee order | 190 / 370 / 30 | 1e-29 |
+| all control structure | 154 / 303 / 133 | 0.24 (no winner) |
+| **only where m2c fails or emits goto** | **49 / 13 / 111** | **1e-6** |
+
+So Ghidra is not a replacement (overall a tie, worse on switches and calls) but is closer where m2c breaks: mean
+structural distance to the source falls from 3.43 (m2c) to 3.15 with Ghidra used only there, and 4.19 for Ghidra
+everywhere. Of the 1,635 unmatched functions, m2c fails or emits goto on 663; Ghidra is goto-free on 539 of them.
+The tools and the decomp's `m2c` command therefore use it only there. These are structural proxies against matched
+source, not a match rate.
+
+The same study found the decomp's interactive `m2c` command printing stale monolith names: callee order agreed with
+the source 0.05 of the time, 0.85 after renaming on output (fixed in that project).
+
+**Choices it measured.** Ghidra auto-analysis added 141 s per run and changed no structure count, so it is off.
+Pinning GQR0 to 0 (the OS sets it; MWCC's paired-single code uses it) removed 2,785 dequantization artifacts.
+Defining data objects made no structural difference, so data stays undefined and names are substituted on read:
+renames and data re-layouts never invalidate the cache, and 23,000 `xRam`/`DAT_` references read as symbols.
+
+**Cost.** A cold miss is 9 s (JVM 3 s, mapping and 27k boundaries 4 s, decompile); four parallel cold misses each
+finished in 8-10 s. Every function of the 4 MB DOL decompiles in 36 s (8 threads), 0 failures, a 22 MB cache.
+A cached `decompile` call is 0.38 s end to end, the same as `asm`. Nothing else imports Ghidra code.
+
 ## Current measurements (0.7.0, port additions 0.7.1)
 
 **What the review looked at.** Local Claude Code and Codex records from October 1-7, 2026 (about 82,000 tool calls

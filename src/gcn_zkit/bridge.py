@@ -899,7 +899,8 @@ def port_plan(project: Project, query: str, depth: int = 2, target: str | None =
             "legend": {"reuse": "the port already cites this; extend that owner instead of writing a copy",
                        "reuse-unverified": "the port implements it but the decomp is not exact; recover it before "
                                            "trusting the native semantics",
-                       "decompile-first": "decomp is not exact yet; recover it before trusting semantics",
+                       "decompile-first": "decomp is not exact yet; recover it before trusting semantics "
+                                          "(`decompile` reads it meanwhile; that is not proof)",
                        "shared-port": "many original callers: port once into a shared owner, not per feature",
                        "port": "exact in the decomp and not yet cited natively"},
             "limits": "Direct calls only; `indirect_calls` counts bctrl sites (vtable/pointer dispatch) whose "

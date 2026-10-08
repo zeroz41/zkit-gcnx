@@ -66,13 +66,14 @@ def project_rows(manifest: Path) -> list[dict]:
         address = found["function"]
         commands += [["lookup", address], ["lookup", found["name"]], ["asm", address], ["xrefs", address],
                      ["names", "--range", f"{address[2:]}-{int(address, 16) + 0x100:08X}"] if address.startswith("0x") else [],
-                     ["data", address, "--count", "4"], ["lookup", address, found["name"]], ["classes", "--limit", "5"]]
+                     ["data", address, "--count", "4"], ["lookup", address, found["name"]], ["classes", "--limit", "5"],
+                     ["decompile", address]]  # exits 1 with the fix when Ghidra is not set up
         if any(t.get("splits") for t in config.get("targets", {}).values()):
             commands += [["unit", address], ["unit", "--blocked", "--limit", "5"], ["unit", "--gaps", "--limit", "5"]]
     if found.get("rel"):
         commands += [["lookup", found["rel"]], ["asm", found["rel"]]]
     for args in [a for a in commands if a]:
-        rows.append(run(args, decomp, manifest, ok=(0, 1, 2) if args[0] == "data" else (0, 1)))
+        rows.append(run(args, decomp, manifest, ok=(0, 1, 2) if args[0] in ("data", "decompile") else (0, 1)))
     for name, repo in config["repositories"].items():
         if repo.get("architecture"):
             rows.append(run(["architecture", name], roots[name], manifest))

@@ -132,6 +132,10 @@ def build_parser() -> argparse.ArgumentParser:
     c = add("asm", help="Disassemble original bytes with symbol/SDA/lis resolution")
     c.add_argument("query", nargs="+")
     c.add_argument("--size", type=lambda v: int(v, 0))
+    c = add("decompile", help="Ghidra C for original functions: structured flow where m2c fails or emits goto (cached)")
+    c.add_argument("query", nargs="*", help="address(es) or name(s)")
+    c.add_argument("--all", action="store_true", help="fill the cache for every DOL function (~40 s for 27k)")
+    c.add_argument("--threads", type=int)
     c = add("data", help="Typed reads of original data (f32, u32, ptr, str, tables) by address or symbol")
     c.add_argument("address", nargs="+", help="address(es) or symbol name(s) (lbl_*, jumptable_*, __vt__*)")
     c.add_argument("--type", default="u32", choices=["u8", "s8", "u16", "s16", "u32", "s32", "f32", "f64", "ptr", "str"])
@@ -415,6 +419,22 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             results.append(inspect_dol.disasm(project, target, int(exact[1], 16) if exact else found[0], args.size))
         data = results[0] if len(results) == 1 else {"batch": results}
         return data, render.disasm(data)
+    if command == "decompile":
+        from .decompile import decompile
+        if args.all:
+            data = decompile(project, target, None, args.threads)
+        else:
+            queries = bridge.split_queries(" ".join(args.query))
+            if not queries:
+                raise ValueError("Pass address(es) or name(s), or --all")
+            found = []
+            for query in queries:
+                hits = bridge.resolve(project, query, target)
+                if not hits:
+                    raise ValueError(f"No function matches {query}")
+                found.append(hits[0])
+            data = decompile(project, target, found, args.threads)
+        return data, render.decompiled(data)
     if command == "data":
         fields = args.fields.split(",") if args.fields else None
         from .index import refresh

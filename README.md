@@ -99,6 +99,13 @@ definition lines agents otherwise found by hand, and lookups that mix names and 
 | **A dtk decomp, built once** | `python configure.py`, then `ninja` in the decomp (its README lists what that needs) | same | same |
 | Claude Code or Codex (optional) | [Claude Code](https://docs.claude.com/en/docs/claude-code), [Codex](https://github.com/openai/codex) | same | same |
 
+Optional, for `decompile`: [Ghidra](https://github.com/NationalSecurityAgency/ghidra/releases) 11.3+, the
+[GameCube Loader](https://github.com/Cuyler36/Ghidra-GameCube-Loader/releases) build for that Ghidra unzipped into
+Ghidra's user `Extensions` folder (only its Gekko/Broadway language is used; its DOL loader, which opens dialogs, never
+runs), and the `ghidra` extra:
+`uv tool install --force 'gcn-zkit[ghidra] @ git+https://github.com/zeroz41/gcn-zkit'` (from a checkout:
+`uv tool install --force --editable '/path/to/gcn-zkit[ghidra]'`). `gcn-zkit doctor` says which piece is missing.
+
 uv brings the right Python and every package gcn-zkit needs. The decomp's own build downloads dtk, the compilers and
 binutils. No decomp yet? Start one from [dtk-template](https://github.com/encounter/dtk-template).
 
@@ -163,6 +170,7 @@ Run these inside the repo. They only read, except `handoff`.
 | What's in a vtable | `gcn-zkit lookup __vt__7MyClass` |
 | The closest near-misses in a file | `gcn-zkit names --unit my_file --below 100 --sort match` |
 | Original disassembly / data | `gcn-zkit asm 0x80012345` / `gcn-zkit data 0x80345678 --type str` |
+| Readable C for an original function where m2c fails or emits `goto` (Ghidra, optional) | `gcn-zkit decompile 0x80012345` |
 | A unit's ranges, data and cross-unit references | `gcn-zkit unit game/MyClass` or `gcn-zkit unit 0x80345678` |
 | Exact units that don't link yet, and why | `gcn-zkit unit --blocked` |
 | Data no split claims yet, and who uses it | `gcn-zkit unit --gaps --section .sdata2` |
