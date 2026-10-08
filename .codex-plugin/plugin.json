@@ -1,6 +1,6 @@
 {
   "name": "gcn-zkit",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "For agents decompiling GameCube games with decomp-toolkit and porting them to PC with matching behavior: session brief, lookup with callers across DOL and RELs, original asm/data, port planning, behavior-drift checks, test impact, handoffs.",
   "author": {
     "name": "zeroz"

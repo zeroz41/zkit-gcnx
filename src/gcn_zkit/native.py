@@ -370,7 +370,7 @@ def test_plan(project: Project, repo: str, names: list[str], jobs: int = 2) -> d
 
 
 def impact(project: Project, repo: str, paths: list[str] | None = None, base: str = "HEAD",
-           target: str | None = None) -> dict[str, Any]:
+           target: str | None = None, budget: float | None = None) -> dict[str, Any]:
     config = _tests_config(project, repo)
     root = project.root(repo)
     build = root / config.get("build_dir", "build")
@@ -447,6 +447,30 @@ def impact(project: Project, repo: str, paths: list[str] | None = None, base: st
         per_file.append({"file": rel, "consumers": consumers, "consumer_count": len(consumers),
                          "transitive_dependents": len(distance) - len(seeds),
                          "tests": {k: len(v) for k, v in tests_here.items()}})
+    deferred: list[str] = []
+    if budget is not None:
+        # Direct tests always run. Near tests then fill the recorded-time budget: first the cheapest test of each
+        # test program not yet exercised, then the cheapest of the rest; unmeasured tests go last. Cheapest-only
+        # skipped whole programs, and a real failure hid in one of them.
+        live = {n: i for n, i in all_tests.items() if not i["disabled"]}
+        spent = sum(i["seconds"] or 0 for i in live.values() if i["tier"] == "direct")
+        near = sorted((n for n, i in live.items() if i["tier"] == "near"),
+                      key=lambda n: (all_tests[n]["seconds"] is None, all_tests[n]["seconds"] or 0, n))
+        family = lambda n: tuple(sorted(programs.get(n) or ())) or (n,)
+        covered = {family(n) for n, i in live.items() if i["tier"] == "direct"}
+        first = []
+        for name in near:
+            if family(name) not in covered:
+                covered.add(family(name))
+                first.append(name)
+        near = first + [n for n in near if n not in set(first)]
+        for name in near:
+            seconds = all_tests[name]["seconds"]
+            if seconds is not None and spent + seconds <= budget:
+                spent += seconds
+            else:
+                deferred.append(name)
+                all_tests[name]["tier"] = "deferred"
     groups: dict[str, dict[str, list[str]]] = {"direct": collections.defaultdict(list),
                                                "near": collections.defaultdict(list)}
     broad = 0
@@ -455,6 +479,8 @@ def impact(project: Project, repo: str, paths: list[str] | None = None, base: st
             continue
         if info["tier"] == "broad":
             broad += 1
+            continue
+        if info["tier"] == "deferred":
             continue
         label = next((l for l in ("gpu", "unit", "reference", "local") if l in info["labels"]),
                      info["labels"][0] if info["labels"] else "unlabelled")
@@ -474,9 +500,16 @@ def impact(project: Project, repo: str, paths: list[str] | None = None, base: st
             fixtures[key] = sorted({f for n in names for f in all_tests[n]["fixtures"]})
     groups = {tier: dict(labels) for tier, labels in groups.items()}
     totals["broad"] = {"tests": broad, "note": "reach the change through hub headers; expand only for a concrete risk"}
+    if budget is not None:
+        totals["deferred"] = {"tests": len(deferred), "budget_seconds": budget,
+                              "serial_seconds": round(sum(all_tests[n]["seconds"] or 0 for n in deferred), 1),
+                              "unknown_costs": sum(all_tests[n]["seconds"] is None for n in deferred)}
+        if deferred:
+            command_argvs["deferred"] = _test_commands(test_dir, sorted(deferred))
+            commands["deferred"] = "\n".join(_display_command(a) for a in command_argvs["deferred"])
     untested = [f["file"] for f in per_file if not f["tests"]["direct"] and not f["tests"]["near"]]
     return {"repo": repo, "changed": changed, "files": per_file, "groups": dict(groups), "totals": totals,
-            "commands": commands, "untested_files": untested,
+            "commands": commands, "untested_files": untested, "deferred": sorted(deferred),
             "command_argvs": command_argvs, "build_targets": build_targets, "fixtures": fixtures,
             "limits": "Coverage = test executables that compile a file including the change (transitively). "
                       "Tests driving code only through a linked library without including it are missed; "

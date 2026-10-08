@@ -9,6 +9,7 @@ repository contracts it points to stay authoritative.
 from __future__ import annotations
 
 import json
+import subprocess
 import re
 import time
 from datetime import datetime, timezone
@@ -111,6 +112,17 @@ def gate(project: Project, repo: str) -> dict[str, Any]:
         extra = sorted(found - reference)
         if missing or extra:
             drift.append({"source": source["path"], "missing": missing, "extra": extra})
+    owning = None
+    if config.get("tests"):
+        from .native import impact
+        try:  # the tests that compile or register this diff: what a "<owning checks>" gate line means
+            found = impact(project, repo)
+            direct = [n for names in found.get("groups", {}).get("direct", {}).values() for n in names]
+            if direct:
+                owning = {"tests": len(direct), "changed": len(found["changed"]),
+                          "commands": [c for k, c in found["commands"].items() if k.startswith("direct/")]}
+        except (OSError, ValueError, subprocess.SubprocessError):
+            owning = None
     stale_apps = []
     if (config.get("tests") or {}).get("apps"):
         from .native import stale
@@ -118,7 +130,7 @@ def gate(project: Project, repo: str) -> dict[str, Any]:
             stale_apps = [r for r in stale(project, repo)["outputs"] if r["stale"]]
         except (OSError, ValueError):
             stale_apps = []
-    return {"repo": repo, "finish": canonical, "drift": drift, "stale_apps": stale_apps,
+    return {"repo": repo, "finish": canonical, "drift": drift, "stale_apps": stale_apps, "owning_tests": owning,
             "note": "The repository's AGENTS.md is the contract; the manifest copy must be updated with it."}
 
 

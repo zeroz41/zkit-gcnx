@@ -187,7 +187,7 @@ With a PC port (`setup --native`), run these inside the port:
 | **Where the port probably behaves slightly wrong, and what to do** | `gcn-zkit suspects` |
 | Are the port's numbers the real game's numbers? | `gcn-zkit consts src/combat` |
 | What changed in the decomp that the port must re-check | `gcn-zkit drift` (after re-checking: `gcn-zkit drift --accept`) |
-| Which tests cover my change, and who else uses that code | `gcn-zkit impact` |
+| Which tests cover my change, and who else uses that code | `gcn-zkit impact` (`--budget 120` while iterating) |
 | Is the build older than my edits? (check before running it) | `gcn-zkit stale` |
 | What must match the original exactly, and where I'm free | `gcn-zkit tiers src/camera` |
 | Is my change breaking the repo's rules? | `gcn-zkit check` |

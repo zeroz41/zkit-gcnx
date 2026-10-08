@@ -21,7 +21,7 @@ build waiting, handoffs, hooks and the MCP server over stdio.
 `replay compare` and `ab_eval` keep each version's config, cache and state separate, so they never touch your real
 setup.
 
-## Current measurements (0.7.0)
+## Current measurements (0.7.0, port additions 0.7.1)
 
 **What the review looked at.** Local Claude Code and Codex records from October 1-7, 2026 (about 82,000 tool calls
 with timings, and every message the owner sent), on the decomp-plus-port project. Where agent time went:
@@ -56,6 +56,29 @@ impact on the source changes selected 2,434 of the 2,599 tests registered by the
 (93.7%; a lower bound, since some edits were unrelated), median 9 fixture builds. The `-L 'unit|reference'` sweep
 agents used covered 31.7% while building 187 fixtures. This is a selection measurement; no tests were run.
 
+**Port tests, run for real (0.7.1).** The port at its current HEAD, one change from its history (a weapon-definition
+header, commit 07a543c8), CTest `-j8` on the same 20-thread workstation, run in this order so later runs inherit
+fixture builds:
+
+| Selection | Wall time | Tests | Result |
+| --- | ---: | ---: | --- |
+| `impact` direct + near | 440 s | 259 | 3 failures |
+| `impact --budget 120`, cheapest first (first design) | 78 s | 102 | passed: the 3 failures were deferred |
+| `impact --budget 120`, each test program first (shipped) | 143 s | 72 | 3 failures |
+| `-L 'unit\|reference'`, the finish gate's sweep | 123 s | 705 | passed |
+
+The three failing checks (`local-basic-weapon-field`, `local-heavy-weapon-field`, `local-game-magazine-field`, one
+program) fail the same way run alone and serially: a port defect at HEAD, not flakiness. The sweep cannot see them
+because they are `local` tests, which is what the gate's "owning local checks" line is for; `gate` now prints that
+command for the current diff. On the 40-commit selection replay the program-first budget scores 79.8% against
+82.1% for cheapest-only at 120 s; it is preferred because cheapest-only skipped a whole failing program. Building
+the port also showed one test program that cannot build at HEAD (GCC 16.2.1 internal compiler error in
+`tests/AtomizerFieldChecks.cpp` and `tests/SupportTechniqueFieldChecks.cpp`, reproducible at `-j2`).
+
+Near-tier ranking evidence (40 commits): direct tests alone cover 74.6% of the tests those commits touched for a
+median 2 s of recorded time; all near tests add 19 points for a median 495 s. Ranking near tests by name overlap or
+by rare identifiers they share with the change did not beat cheapest-first.
+
 **Stale builds (`stale`).** Against `ninja -n` (a dry run that builds nothing) on 30 sampled programs of the port
 (15 stale, 15 fresh by zkit): 30 of 30 agree. One app takes 0.3 s, all 404 linked programs 3.3 s.
 
@@ -81,7 +104,7 @@ Differences of a few hundredths of a second are within this machine's run-to-run
 symbol table load that produces the new answer. New commands on the real decomp: `unit` 0.15 s, `unit --blocked`
 1.0 s, `unit --gaps` 4.0 s, `classes` 0.5 s (in-process, warm index).
 
-**Checks.** 104 synthetic tests (new: units, cross-unit references, blocked units, gaps, class evidence, stale
+**Checks.** 106 synthetic tests (0.7.1) (new: units, cross-unit references, blocked units, gaps, class evidence, stale
 programs through a static library and headers, gate, CLI/MCP agreement) and 42 real-project/synthetic smoke checks
 passed; `claude plugin validate .` passed. Linux only for this release.
 

@@ -402,6 +402,11 @@ def gate(data: dict) -> str:
             out.append(f"drift: {d['source']} missing")
             continue
         out.append(f"drift: {d['source']} lacks {d['missing'] or '-'}; extra {d['extra'] or '-'}")
+    owning = data.get("owning_tests")
+    if owning:
+        out.append(f"owning checks for this diff ({owning['tests']} direct test(s) of {owning['changed']} changed "
+                   f"file(s), from zkit impact):")
+        out.extend(f"  {command}" for command in owning["commands"])
     for app in data.get("stale_apps", []):
         newest = app["newer"][0]
         out.append(f"stale build: {app['output']} (built {app['built']}) is older than {app['newer_count']} source(s), "
@@ -532,9 +537,15 @@ def impact(data: dict) -> str:
             out.append(f"{tier}/{label}: {len(names)} tests (~{total['serial_seconds']} s recorded"
                        + (f", {unknown} unmeasured" if unknown else "") + f"): {', '.join(names[:12])}"
                        + (" ..." if len(names) > 12 else ""))
+    deferred = data["totals"].get("deferred")
+    if deferred:
+        out.append(f"budget {deferred['budget_seconds']:g} s: {deferred['tests']} near test(s) deferred "
+                   f"(~{deferred['serial_seconds']} s recorded" + (f", {deferred['unknown_costs']} unmeasured" if
+                   deferred["unknown_costs"] else "") + "); run them for a shared or risky change")
     if data["commands"]:
-        out.append("run (direct first, then near):")
-        for key in sorted(data["commands"], key=lambda k: (not k.startswith("direct"), k)):
+        out.append("run (direct first, then near; deferred last, if at all):")
+        order = lambda k: (0 if k.startswith("direct") else 2 if k == "deferred" else 1, k)
+        for key in sorted(data["commands"], key=order):
             targets = data.get("build_targets", {}).get(key, [])
             if targets:
                 out.append(f"  # {key} build targets (optional parallel prebuild): " + ", ".join(targets))

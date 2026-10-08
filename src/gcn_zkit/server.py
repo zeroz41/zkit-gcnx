@@ -322,12 +322,14 @@ def create_server(project: Project) -> FastMCP:
 
     @tool(enabled=has_native)
     def zkit_impact(repo: str | None = None, paths: Paths = None, base: str = "HEAD", path: str | None = None,
-                    response_format: Format = "text") -> str:
+                    budget: float | None = None, response_format: Format = "text") -> str:
         """Native port: for changed files (default: the working-tree diff) list the code that includes them and the
-        exact CTest names that compile them, direct/near with recorded run times and ready-to-run ctest -R commands."""
+        exact CTest names that compile them, direct/near with recorded run times and ready-to-run ctest -R commands.
+        budget (seconds of recorded test time): keep every direct test, add near tests cheapest first, and list the
+        deferred rest with their own command."""
         from .native import impact
         p, key = scoped(repo, native_default(current()))
-        data = impact(p, key, _paths(paths, path), base, target(p))
+        data = impact(p, key, _paths(paths, path), base, target(p), budget)
         return out(data, render.impact(data), response_format)
 
     @tool(enabled=any(r.get("tests") for r in project.config["repositories"].values()))

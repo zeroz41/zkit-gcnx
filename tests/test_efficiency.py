@@ -43,6 +43,79 @@ class ImpactTests(unittest.TestCase):
         self.assertEqual(result['totals']['direct/gpu']['unknown_costs'], 1)
         self.assertEqual(result['untested_files'], [])
 
+    def test_budget_keeps_direct_and_fills_near_cheapest_first(self):
+        from gcn_zkit.native import impact
+        from gcn_zkit.project import Project
+        build = self.native / 'build'
+        build.mkdir()
+        self.write_native('src/actors/Enemy.hpp', 'void check();\n')
+        self.write_native('src/actors/Mid.hpp', '#include "actors/Enemy.hpp"\n')
+        self.write_native('tests/Check.cpp', '#include "actors/Enemy.hpp"\n')
+        self.write_native('tests/Near.cpp', '#include "actors/Mid.hpp"\n')
+        (build / 'compile_commands.json').write_text(json.dumps([
+            {'file': str(self.native / 'tests/Check.cpp'), 'output': 'CMakeFiles/check.dir/Check.cpp.o'},
+            {'file': str(self.native / 'tests/Near.cpp'), 'output': 'CMakeFiles/near.dir/Near.cpp.o'}]), encoding='utf-8')
+        test = lambda name, program: {'name': name, 'command': [str(build / program)],
+                                      'properties': [{'name': 'LABELS', 'value': ['local']}]}
+        (build / 'catalog.json').write_text(json.dumps({'tests': [
+            test('direct-a', 'check'), test('near-costly', 'near'), test('near-mid', 'near'),
+            test('near-cheap', 'near'), test('near-unmeasured', 'near')]}), encoding='utf-8')
+        (build / 'Testing/Temporary').mkdir(parents=True)
+        (build / 'Testing/Temporary/CTestCostData.txt').write_text(
+            'direct-a 1 3\nnear-costly 1 100\nnear-mid 1 5\nnear-cheap 1 2\n', encoding='utf-8')
+        config = json.loads(self.manifest.read_text(encoding='utf-8'))
+        config['repositories']['native']['tests'] = {'build_dir': 'build', 'catalog': 'build/catalog.json'}
+        self.manifest.write_text(json.dumps(config), encoding='utf-8')
+        project = Project.load(self.manifest)
+        everything = impact(project, 'native', ['src/actors/Enemy.hpp'])
+        self.assertEqual(everything['groups']['near']['local'], ['near-cheap', 'near-costly', 'near-mid', 'near-unmeasured'])
+        self.assertNotIn('deferred', everything['totals'])
+        budgeted = impact(project, 'native', ['src/actors/Enemy.hpp'], budget=10)
+        self.assertEqual(budgeted['groups']['direct']['local'], ['direct-a'])
+        self.assertEqual(budgeted['groups']['near']['local'], ['near-cheap', 'near-mid'])  # 3 + 2 + 5 = 10 s
+        self.assertEqual(budgeted['deferred'], ['near-costly', 'near-unmeasured'])
+        self.assertEqual(budgeted['totals']['deferred'], {'tests': 2, 'budget_seconds': 10, 'serial_seconds': 100.0,
+                                                          'unknown_costs': 1})
+        self.assertTrue(re.fullmatch(budgeted['command_argvs']['deferred'][0][4], 'near-costly'))
+        # A second program reached only by a pricier test still gets exercised before cheaper repeats.
+        self.write_native('tests/Other.cpp', '#include "actors/Mid.hpp"\n')
+        compile_db = json.loads((build / 'compile_commands.json').read_text(encoding='utf-8'))
+        compile_db.append({'file': str(self.native / 'tests/Other.cpp'), 'output': 'CMakeFiles/other.dir/Other.cpp.o'})
+        (build / 'compile_commands.json').write_text(json.dumps(compile_db), encoding='utf-8')
+        catalog = json.loads((build / 'catalog.json').read_text(encoding='utf-8'))
+        catalog['tests'].append(test('other-program', 'other'))
+        (build / 'catalog.json').write_text(json.dumps(catalog), encoding='utf-8')
+        with (build / 'Testing/Temporary/CTestCostData.txt').open('a', encoding='utf-8') as costs:
+            costs.write('other-program 1 4\n')
+        diverse = impact(project, 'native', ['src/actors/Enemy.hpp'], budget=10)
+        self.assertEqual(sorted(diverse['groups']['near']['local']), ['near-cheap', 'other-program'])  # 3 + 2 + 4
+        self.assertIn('near-mid', diverse['deferred'])
+        tight = impact(project, 'native', ['src/actors/Enemy.hpp'], budget=0)
+        self.assertEqual(tight['groups']['direct']['local'], ['direct-a'])  # direct tests are never dropped
+        self.assertEqual(len(tight['deferred']), 5)
+
+    def test_gate_names_the_owning_checks_of_the_diff(self):
+        from gcn_zkit.project import Project
+        from gcn_zkit.session import gate
+        from gcn_zkit.render import gate as render_gate
+        build = self.native / 'build'
+        build.mkdir()
+        self.write_native('tests/Check.cpp', '#include "actors/Enemy.cpp"\n')
+        (build / 'compile_commands.json').write_text(json.dumps([{
+            'file': str(self.native / 'tests/Check.cpp'), 'output': 'CMakeFiles/check.dir/Check.cpp.o'}]), encoding='utf-8')
+        (build / 'catalog.json').write_text(json.dumps({'tests': [
+            {'name': 'enemy-check', 'command': [str(build / 'check')], 'properties': [
+                {'name': 'LABELS', 'value': ['local']}]}]}), encoding='utf-8')
+        config = json.loads(self.manifest.read_text(encoding='utf-8'))
+        config['repositories']['native']['tests'] = {'build_dir': 'build', 'catalog': 'build/catalog.json'}
+        self.manifest.write_text(json.dumps(config), encoding='utf-8')
+        project = Project.load(self.manifest)
+        self.write_native('src/actors/Enemy.cpp', '// Original enemy update 80003000.\nvoid EnemyController::update() {}\n')
+        data = gate(project, 'native')
+        self.assertEqual(data['owning_tests']['tests'], 1)
+        self.assertIn('enemy\\-check', data['owning_tests']['commands'][0])
+        self.assertIn('owning checks for this diff', render_gate(data))
+
     def test_long_selection_never_expands_to_label(self):
         from gcn_zkit.native import _test_commands
         names = [f'local-{i:04}-shared-render-scene-variant-check' for i in range(400)]
