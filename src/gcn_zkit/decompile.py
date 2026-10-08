@@ -160,6 +160,8 @@ def _run_worker(info: dict, dol: Path, sda: dict[int, int], boundaries: list[tup
 
 FN_NAME = re.compile(r"\bfn_([0-9A-F]{8})\b")
 DATA_NAME = re.compile(r"\b(?:PTR_\w*?_|DAT_|[a-z]{1,6}Ram)([0-9a-fA-F]{8})\b")
+# Ghidra notes dead paths it pruned; with GQR0 pinned these are paired-single dequantization paths, never source.
+UNREACHABLE = re.compile(r"^/\* WARNING: Removing unreachable block \(ram,0x[0-9a-f]+\) \*/\n", re.M)
 POINTER = re.compile(r"\b0x(8[01][0-9a-fA-F]{6})\b")  # lis/addi addresses Ghidra did not type as pointers
 
 
@@ -198,7 +200,7 @@ def _namer(project: Project, target: str, db):
             seen["ptr", address] = name
         return seen["ptr", address] or match[0]
 
-    return lambda text: POINTER.sub(pointer, DATA_NAME.sub(data, FN_NAME.sub(function, text)))
+    return lambda text: POINTER.sub(pointer, DATA_NAME.sub(data, FN_NAME.sub(function, UNREACHABLE.sub("", text))))
 
 
 def decompile(project: Project, target: str, addresses: list[int] | None, threads: int | None = None) -> dict:

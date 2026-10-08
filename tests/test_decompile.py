@@ -24,7 +24,8 @@ class DecompileTests(unittest.TestCase):
             calls.append(list(addresses))
             self.assertEqual(sda, {2: 0x80003100, 13: 0x80003100})  # decoded from __init_registers
             self.assertIn(TEXT + 0x10, dict(boundaries))
-            return [{"address": a, "text": f"void fn_{a:08X}(void) {{ fn_80003000(); iRam80003104 = 1; "
+            return [{"address": a, "text": "/* WARNING: Removing unreachable block (ram,0x80003014) */\n"
+                                           f"void fn_{a:08X}(void) {{ fn_80003000(); iRam80003104 = 1; "
                                            f"fRam80003106 = 2; DAT_80003100 = 3; f(0x80003104, 0x80000000); }}"} for a in addresses], {}
 
         info = {"install": "/ghidra", "version": "12.1.2 PUBLIC", "language": str(language), "python": "python"}
@@ -37,7 +38,7 @@ class DecompileTests(unittest.TestCase):
             first = decompile(self.project, "t", [TEXT + 0x10, TEXT])
             self.assertEqual(calls, [[TEXT + 0x10, TEXT]])
             text = first["results"][0]["text"]
-            self.assertIn("void TPlayer__sub_80003010(void)", text)
+            self.assertTrue(text.startswith("void TPlayer__sub_80003010(void)"))  # pruned-path notes dropped
             self.assertIn("update__6TEnemyFv();", text)
             self.assertIn("enemyTable = 1", text)
             self.assertIn("enemyTable.unk2 = 2", text)  # interior of a sized object
