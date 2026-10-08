@@ -166,6 +166,10 @@ def build_parser() -> argparse.ArgumentParser:
     c = add("coverage", help="Compare declared inventories across import/integration stages")
     c.add_argument("repo")
     c.add_argument("name", help="project-owned coverage inventory name")
+    c = add("stale", help="Native: built programs older than a source or header compiled into them (rebuild first)")
+    c.add_argument("repo", nargs="?")
+    c.add_argument("paths", nargs="*", metavar="program",
+                   help="program names (default: the manifest's tests.apps, else every linked one)")
     c = add("test-plan", help="Exact CTest names, fixture costs and optional consolidated parallel prebuilds")
     c.add_argument("repo")
     c.add_argument("names", nargs="+")
@@ -333,7 +337,7 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
 
     target = bridge.default_target(project, args.target) if project.config.get("targets") else None
     command = "check-recipe" if args.command == "recipe-preflight" else args.command
-    native_only = ("impact", "grounding", "consts", "suspects", "tiers")
+    native_only = ("impact", "grounding", "consts", "suspects", "tiers", "stale")
     path_commands = ("check",) + native_only
     here, worktree = project.locate(Path.cwd())
     if getattr(args, "repo", None):
@@ -446,6 +450,10 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from .coverage import audit
         data = audit(project, args.repo, args.name)
         return data, render.coverage(data)
+    if command == "stale":
+        from .native import stale
+        data = stale(project, args.repo, args.paths or None)
+        return data, render.stale(data)
     if command == "test-plan":
         from .native import test_plan
         data = test_plan(project, args.repo, args.names, args.jobs)

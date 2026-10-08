@@ -111,7 +111,14 @@ def gate(project: Project, repo: str) -> dict[str, Any]:
         extra = sorted(found - reference)
         if missing or extra:
             drift.append({"source": source["path"], "missing": missing, "extra": extra})
-    return {"repo": repo, "finish": canonical, "drift": drift,
+    stale_apps = []
+    if (config.get("tests") or {}).get("apps"):
+        from .native import stale
+        try:
+            stale_apps = [r for r in stale(project, repo)["outputs"] if r["stale"]]
+        except (OSError, ValueError):
+            stale_apps = []
+    return {"repo": repo, "finish": canonical, "drift": drift, "stale_apps": stale_apps,
             "note": "The repository's AGENTS.md is the contract; the manifest copy must be updated with it."}
 
 

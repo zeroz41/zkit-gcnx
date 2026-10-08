@@ -37,6 +37,7 @@ Relative `root` paths are relative to the project file. All other paths are rela
 | Field | Meaning |
 | --- | --- |
 | `symbols` | dtk `symbols.txt` of the main DOL. Names and data symbols. |
+| `splits` | dtk `splits.txt` (`setup` fills it in). Needed for `unit` (ranges, cross-unit data, `--blocked`, `--gaps`) and the owner unit of a data address. |
 | `report` | objdiff `report.json`. Match state, source files and REL functions. Without it, functions come from `symbols.txt`. |
 | `original` | The DOL, or a `.iso`/`.gcm` disc image (the DOL is read in place). Needed for asm, data, callers and xrefs in the DOL. |
 | `module` | Name of the main module in the report (dtk `config.yml` `name`, default `main`). |
@@ -68,7 +69,7 @@ disassembly (`build/<GAMEID>/<module>/asm/`). DOL lookups therefore list REL cal
 | `router` | `{brief, lane_stats}`: JSON files your own work router writes (`{"next": {"lane", "commands"}}`); the brief shows its lane. |
 | `status_doc`, `status_section` | Native: the doc whose active-work section the brief excerpts. |
 | `fidelity_tiers` | Native: ordered `{tier, pattern}`; tiers are `exact`, `equivalent`, `liberty`, `infrastructure`. |
-| `tests` | `{build_dir, include_roots}` with CTest registration and a CMake `compile_commands.json` for `impact`; `test-plan` only needs the configured CTest catalog. Optional `catalog` names a saved JSON catalog relative to the repo. |
+| `tests` | `{build_dir, include_roots}` with CTest registration and a CMake `compile_commands.json` for `impact`; `test-plan` only needs the configured CTest catalog. Optional `catalog` names a saved JSON catalog relative to the repo. Optional `apps` lists the programs people run (for `stale` and the finish gate); `stale` also needs a Ninja `build.ninja`. |
 
 ## Top level
 

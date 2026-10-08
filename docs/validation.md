@@ -7,7 +7,7 @@ How gcn-zkit is tested, and what was measured for this release.
 ```sh
 uv run --with-editable . python -m unittest discover -s tests   # synthetic fixtures, no game files needed
 python tools/smoke.py                                           # every command against your registered projects
-python tools/replay.py extract --since 2026-01-01 --until 2026-10-07 --repo-root /my/repo --out calls.json   # your agents' real zkit calls
+python tools/replay.py extract --since 2026-01-01 --until 2026-10-08 --repo-root /my/repo --out calls.json   # your agents' real zkit calls
 python tools/replay.py compare --old ../old/src --new src --corpus calls.json --project <project file>
 python tools/ab_eval.py --suite ../my-evals --cwd ../my-decomp  # same model and tasks, with and without zkit
 claude plugin validate .
@@ -21,7 +21,74 @@ build waiting, handoffs, hooks and the MCP server over stdio.
 `replay compare` and `ab_eval` keep each version's config, cache and state separate, so they never touch your real
 setup.
 
-## Current measurements (0.6.0)
+## Current measurements (0.7.0)
+
+**What the review looked at.** Local Claude Code and Codex records from October 1-7, 2026 (about 82,000 tool calls
+with timings, and every message the owner sent), on the decomp-plus-port project. Where agent time went:
+
+- Claude decomp sessions: the decomp's own compile-and-diff loop ran 17,777 times (14.5 agent-hours, median 2.4 s),
+  its context command 3,699 times. Both were mostly start-up work, fixed in that project rather than here:
+  compiler flags were split for every rule (0.6 s per call) and every source file was re-read (0.4 s). Output is
+  byte-identical; a fresh compile-and-diff went from 1.28 s to 0.87 s and context from 1.44 s to 1.18 s (medians of
+  seven alternating runs).
+- 2,289 greps of splits.txt/symbols.txt in that week (578 after 0.4.0 was installed). Of the 578, 403 asked for a
+  unit's ranges and 94 for which unit owns an address range: questions no command answered.
+- Port sessions: CTest was 44.5% of Claude's port tool time. Runs of `-L 'unit|reference'` hit the 600 s tool
+  limit. The owner's complaints included testing an unrebuilt game ("did you rebuild?") and over-broad checks.
+
+**Linking evidence (`unit`).** On the real decomp, 4,829 split units: of the 4,104 linked units whose functions are
+all exact, 3% have data used by other units; of the 117 exact units that are not linked, 40%. `unit --blocked`
+lists those 117 in 1.0 s. It includes all 93 units the decomp's own link attempts recorded as blocked, finds
+cross-unit references for 61 of them, and for 21 of the 22 "missing symbol" failures names the unit holding it.
+Units with no cross-unit reference are reported as such (order, alignment or runtime symbols need a link attempt).
+
+**Data map (`unit --gaps`).** Split coverage per section: `.text` 100%, `.rodata` 4.2%, `.data` 25.1%,
+`.sdata2` 30.4% on the real decomp, with 969 unclaimed ranges, 246 used by exactly one unit. Retrospective
+check: computed from the splits.txt of September 30, 24 single-user ranges were claimed by October 7; 21 of them
+by the suggested code (units renamed in between were matched by their code address). 75 are still unclaimed.
+
+**Class evidence (`classes`).** 105 strong and 7 weak contradictions between a method's class name and the named
+vtables holding it, plus 10 unclaimed single-class virtuals, in 0.5 s. A sampled strong case was checked against
+the DOL bytes directly (the named class's vtable lacks it; the suggested class's has it at slot 59).
+
+**Test selection (`impact`, unchanged).** On the port's last 40 commits that changed both `src/` and `tests/`:
+impact on the source changes selected 2,434 of the 2,599 tests registered by the test files those commits edited
+(93.7%; a lower bound, since some edits were unrelated), median 9 fixture builds. The `-L 'unit|reference'` sweep
+agents used covered 31.7% while building 187 fixtures. This is a selection measurement; no tests were run.
+
+**Stale builds (`stale`).** Against `ninja -n` (a dry run that builds nothing) on 30 sampled programs of the port
+(15 stale, 15 fresh by zkit): 30 of 30 agree. One app takes 0.3 s, all 404 linked programs 3.3 s.
+
+**Recent-call replay against 0.6.0.** 4,074 distinct read-only calls Claude Code and Codex made from October 4 to 7,
+replayed on both versions with isolated caches: 0 answers got worse; error counts are identical (20 exceptions,
+21 no-result answers, the same calls). 168 `names --range` calls over data that answered "no matches" now list the
+range's data symbols. 560 data lookups gain their owner unit (146 characters on average); the rest of each answer is
+unchanged. `doctor` warns that the installed package metadata predates the source until it is reinstalled.
+
+**Latency.** Fresh CLI process per call, five measured pairs alternating order after a warmup pair, isolated caches,
+same Linux/Core Ultra 7 265K/Python 3.13.5 workstation; other agent sessions were running.
+
+| Real workflow | 0.6.0 median | 0.7.0 median | Answer |
+| --- | ---: | ---: | --- |
+| Function lookup | 0.413 s | 0.421 s | identical |
+| Data-address lookup | 0.390 s | 0.436 s | adds owner unit |
+| `names` over a data range | 0.169 s | 0.306 s | was "no matches"; now the symbols |
+| `names` over a code range | 0.176 s | 0.181 s | identical |
+| Three-address asm | 0.376 s | 0.369 s | identical |
+| Typed data read | 0.194 s | 0.218 s | identical |
+
+Differences of a few hundredths of a second are within this machine's run-to-run noise; the data-range cost is the
+symbol table load that produces the new answer. New commands on the real decomp: `unit` 0.15 s, `unit --blocked`
+1.0 s, `unit --gaps` 4.0 s, `classes` 0.5 s (in-process, warm index).
+
+**Checks.** 104 synthetic tests (new: units, cross-unit references, blocked units, gaps, class evidence, stale
+programs through a static library and headers, gate, CLI/MCP agreement) and 42 real-project/synthetic smoke checks
+passed; `claude plugin validate .` passed. Linux only for this release.
+
+**Limits.** No agent-level speed-up is claimed: the measurements are of answers, coverage and tool cost. Which units
+to fold or merge, and whether a suggested class is right, stay decisions for the decomp's own rules and evidence.
+
+## Previous release measurements (0.6.0)
 
 The feature review revisited the owner's composition/reuse requests, automatic future-asset import requests,
 protocol-to-native boundary complaints and quest identity/shape concerns, then inspected the actual architecture
