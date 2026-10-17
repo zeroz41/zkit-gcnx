@@ -89,7 +89,7 @@ class Constants:
         if address in self.cache:
             return self.cache[address]
         symbol = _symbol_lookup(self.project, self.target, address)
-        start = int(symbol["address"], 16) if symbol else address
+        start = symbol["key"] if symbol else address
         size = min(max(symbol["size"], 4) if symbol else 4, 0x2000)
         out: set[float] = set()
         try:

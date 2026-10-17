@@ -130,6 +130,20 @@ def batch(queries: list[str], answer, limit: int = 20) -> dict[str, Any]:
     return out
 
 
+_VTABLE_CLASSES: dict[str, str] = {}
+
+
+def vtable_class(symbol: str) -> str:
+    """The class a vtable symbol belongs to: __vt__6TEnemy -> TEnemy, _ZTVN2mp6LayoutE -> mp::Layout."""
+    if symbol.startswith("__vt__"):
+        return re.sub(r"^__vt__\d*", "", symbol)
+    if symbol not in _VTABLE_CLASSES:
+        from .platform import demangle_itanium
+        text = demangle_itanium([symbol])[0] or symbol
+        _VTABLE_CLASSES[symbol] = text.removeprefix("vtable for ")
+    return _VTABLE_CLASSES[symbol]
+
+
 def class_of(name: str | None, demangled: str | None = None) -> str | None:
     """Class part of a function name: `TClass::m`, `m__6TClassFv`, or a `TClass__sub_ADDR` vote."""
     if demangled and "::" in demangled:
@@ -189,7 +203,7 @@ def _symbol_lookup(project: Project, target: str, address: int) -> dict | None:
         index -= 1
     if best is None:
         return None
-    return {"address": address_text(best.address), "name": best.name, "section": best.section,
+    return {"address": address_text(best.address), "key": best.address, "name": best.name, "section": best.section,
             "type": best.type, "size": best.size, "offset": address - best.address}
 
 
@@ -217,8 +231,73 @@ def _parsed_symbols(project: Project, path: Path, stamp: str) -> list[Symbol]:
     return symbols
 
 
+def _module_symbols(project: Project, target: str) -> list[Symbol]:
+    """Switch: data and function symbols from the module itself (dynamic symbols, and vtables, typeinfos and
+    typeinfo names from RTTI), plus a project data-symbol CSV (`data_symbols`: address,name), cached like
+    symbols.txt."""
+    from .inspect_dol import _dol
+    from .platform import for_target
+    config = project.target(target)
+    platform = for_target(config)
+    original = project.file(config["repository"], config["original"])
+    extra = project.file(config["repository"], config["data_symbols"]) if config.get("data_symbols") else None
+    stamp = f"{original.stat().st_mtime_ns}:{original.stat().st_size}" + (
+        f":{extra.stat().st_mtime_ns}" if extra and extra.is_file() else "")
+    store = cache_path(project).with_name(f"symbols-{target}-{hashlib.sha1(str(original).encode()).hexdigest()[:12]}.marshal")
+    try:
+        version, saved, rows = marshal.loads(store.read_bytes())
+        if version == SYMBOLS_CACHE_VERSION and saved == stamp:
+            return [Symbol(*row) for row in rows]
+    except (OSError, EOFError, ValueError, TypeError):
+        pass
+    module = _dol(project, target)
+    section = lambda offset: (module.segment_at(offset).name if module.segment_at(offset) else "?")
+    found: dict[int, Symbol] = {}
+    for offset, name in module.symbols.items():
+        kind = "function" if module.kinds.get(offset) == "func" else "object"
+        found[offset] = Symbol(name, section(offset), offset, kind, module.sizes.get(offset, 0), "global")
+    from . import rtti
+    for info in rtti.classes(module).values():
+        size = {"class": 16, "single": 24}.get(info.kind, 24 + 16 * len(info.bases))
+        found.setdefault(info.typeinfo, Symbol(f"_ZTI{info.mangled}", section(info.typeinfo), info.typeinfo,
+                                               "object", size, "global"))
+        if info.vtables:
+            top = min(v["address"] for v in info.vtables) - 16
+            end = max(v["address"] + 8 * len(v["slots"]) for v in info.vtables)
+            found.setdefault(top, Symbol(f"_ZTV{info.mangled}", section(top), top, "object", end - top, "global"))
+    if extra and extra.is_file():
+        import csv
+        with extra.open(encoding="utf-8", errors="replace", newline="") as stream:
+            for row in csv.reader(stream):
+                if len(row) < 2:
+                    continue
+                address = platform.parse(row[0])
+                if address is not None:
+                    found[address] = Symbol(row[1].strip(), section(address), address, "object",
+                                            int(row[2], 0) if len(row) > 2 and row[2].strip() else 0, "global")
+    symbols = sorted(found.values(), key=lambda s: (s.address, -s.size))
+    try:
+        store.write_bytes(marshal.dumps((SYMBOLS_CACHE_VERSION, stamp, [tuple(s) for s in symbols])))
+    except OSError:
+        pass
+    return symbols
+
+
 def _symbol_table(project: Project, target: str) -> tuple[list, list[int]]:
     config = project.target(target)
+    if (config.get("platform") or "").lower() in ("switch", "nx") and config.get("original"):
+        key = f"module:{target}:{config['original']}"
+        cached = _SYMBOLS.get(key)
+        original = project.file(config["repository"], config["original"])
+        stamp = f"{original.stat().st_mtime_ns}" if original.is_file() else ""
+        if not cached or cached[0] != stamp:
+            symbols = _module_symbols(project, target) if original.is_file() else []
+            by_name = {}
+            for s in symbols:
+                by_name.setdefault(s.name, s)
+            _SYMBOLS[key] = (stamp, (symbols, [s.address for s in symbols], by_name))
+        symbols, starts, _ = _SYMBOLS[key][1]
+        return symbols, starts
     if not config.get("symbols"):
         return [], []
     path = project.file(config["repository"], config["symbols"])
@@ -240,6 +319,9 @@ def _symbol_table(project: Project, target: str) -> tuple[list, list[int]]:
 def symbol_named(project: Project, target: str, name: str):
     _symbol_table(project, target)
     config = project.target(target)
+    if (config.get("platform") or "").lower() in ("switch", "nx") and config.get("original"):
+        cached = _SYMBOLS.get(f"module:{target}:{config['original']}")
+        return cached[1][2].get(name) if cached else None
     if not config.get("symbols"):
         return None
     cached = _SYMBOLS.get(str(project.file(config["repository"], config["symbols"])))
@@ -584,11 +666,14 @@ def _holders(project: Project, target: str, db, pointee: int) -> list[dict]:
         symbol = _symbol_lookup(project, target, holder)
         entry: dict[str, Any] = {"address": address_text(holder)}
         if symbol:
-            table = int(symbol["address"], 16)
+            table = symbol["key"]
             entry.update(symbol=symbol["name"], table=symbol["address"], offset=symbol["offset"],
                          table_size=symbol["size"])
-            is_vtable = symbol["name"].startswith("__vt__")
-            if is_vtable or symbol["name"].startswith("lbl_"):
+            itanium = symbol["name"].startswith("_ZTV")
+            is_vtable = symbol["name"].startswith("__vt__") or itanium
+            if itanium:
+                entry["vtable_slot"] = (symbol["offset"] - 16) // 8
+            elif is_vtable or symbol["name"].startswith("lbl_"):
                 entry["vtable_slot"] = symbol["offset"] // 4
             if not is_vtable:
                 owners = _table_owners(project, target, db, table)
@@ -617,12 +702,12 @@ def _slot_summary(refs: list[dict]) -> list[dict]:
             groups[ref["offset"]].append(ref)
     out = []
     for offset, holders in sorted(groups.items(), key=lambda kv: -len(kv[1])):
-        named = sorted({h["symbol"] for h in holders if h["symbol"].startswith("__vt__")})
+        named = sorted({h["symbol"] for h in holders if h["symbol"].startswith(("__vt__", "_ZTV"))})
         tables = [{"table": h["table"], "symbol": h["symbol"], "owners": h.get("owners", [])} for h in holders]
-        classes = sorted({re.sub(r"^__vt__\d*", "", n) for n in named})
+        classes = sorted({vtable_class(n) for n in named})
         verdict = ("shared by %d tables: an inherited base-class virtual — do not name it after one subclass"
                    % len(holders)) if len(holders) > 1 else "one table: the class owning that table defines it"
-        out.append({"offset": offset, "slot": offset // 4, "tables": len(holders), "classes": classes,
+        out.append({"offset": offset, "slot": holders[0]["vtable_slot"], "tables": len(holders), "classes": classes,
                     "holders": tables[:12], "verdict": verdict})
     return out
 
@@ -724,7 +809,7 @@ def data_lookup(project: Project, address: int, target: str, query: str | None =
     """An address that is not inside a function: its symbol, who reads/writes it, who points at it."""
     db = connect(project)
     symbol = _symbol_lookup(project, target, address)
-    start = int(symbol["address"], 16) if symbol else address
+    start = symbol["key"] if symbol else address
     size = max(symbol["size"], 1) if symbol else 4
     refs = xrefs(project, start, target, size=size, fresh=False)
     from .structure import split_owner, splits
@@ -782,7 +867,7 @@ def xrefs(project: Project, address: int | str, target: str | None = None, size:
     if size is None:
         row = containing(db, target, address)
         size = (row["size"] if row and row["address"] == address else
-                max(symbol["size"], 1) if symbol and int(symbol["address"], 16) == address else 4)
+                max(symbol["size"], 1) if symbol and symbol["key"] == address else 4)
     code = []
     kinds = collections.Counter()
     per_function: collections.Counter = collections.Counter()

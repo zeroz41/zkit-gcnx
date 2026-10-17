@@ -165,7 +165,7 @@ class Switch(Platform):
         except ValueError:
             return []
         out = []
-        for pc, (address, kind) in track_addresses(words, start).items():
+        for pc, (address, kind) in track_addresses(words, start, image.pointers.get).items():
             out.append((pc, address, kind))
             # A load from a pointer slot (the GOT, a vtable reference) also refers to what the slot holds.
             if kind == "load" and address in image.pointers:
@@ -188,6 +188,21 @@ class Switch(Platform):
     def cite_pattern(self) -> str:
         high = f"{self.base >> 32:X}"
         return rf"(?<![0-9A-Fa-f])(?:0x)?({high}[0-9A-Fa-f]{{8}})(?![0-9A-Fa-f])"
+
+
+def demangle_itanium(names: list[str]) -> list[str | None]:
+    """Itanium C++ names demangled in one batch (llvm-cxxfilt or c++filt); None where nothing changes."""
+    import shutil
+    import subprocess
+    tool = shutil.which("llvm-cxxfilt") or shutil.which("c++filt")
+    if tool is None or not names:
+        return [None] * len(names)
+    result = subprocess.run([tool], input="\n".join(names), capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=300)
+    lines = result.stdout.splitlines()
+    if len(lines) != len(names):
+        return [None] * len(names)
+    return [line if line != name else None for name, line in zip(names, lines)]
 
 
 def for_target(target: dict) -> Platform:

@@ -54,12 +54,13 @@ def _ldst_scale(word: int) -> int:
     return size
 
 
-def track_addresses(words: list[int], start: int) -> dict[int, tuple[int, str]]:
+def track_addresses(words: list[int], start: int, load64=None) -> dict[int, tuple[int, str]]:
     """{pc: (address, kind)} formed by straight-line code; kind is addr, load, store, f32 or f64.
 
     adrp sets a page in a register; a following add/ldr/str through that register completes the address. Calls
     forget the caller-saved registers; any other write to a tracked register is not followed (an over-approximation
-    that keeps only addresses actually formed from an adrp)."""
+    that keeps only addresses actually formed from an adrp). `load64(address)` returns the pointer a 64-bit load
+    reads when it is known (a relocated GOT or table slot), so `ldr x8, [got]; add x8, x8, #16` is followed."""
     pages: dict[int, int] = {}
     out: dict[int, tuple[int, str]] = {}
     for index, word in enumerate(words):
@@ -89,9 +90,15 @@ def track_addresses(words: list[int], start: int) -> dict[int, tuple[int, str]]:
             continue
         if word & 0x3B000000 == 0x39000000 and rn in pages:      # ldr/str (unsigned immediate)
             imm = (word >> 10 & 0xFFF) << _ldst_scale(word)
-            out[pc] = (pages[rn] + imm, _ldst_kind(word))
-            if _ldst_kind(word) != "store" and rd == rn:
-                pages.pop(rn, None)
+            address = pages[rn] + imm
+            kind = _ldst_kind(word)
+            out[pc] = (address, kind)
+            if kind != "store":
+                loaded = load64(address) if load64 is not None and word >> 30 == 3 and not word >> 26 & 1 else None
+                if loaded is not None:
+                    pages[rd] = loaded                             # the pointer the slot holds
+                elif rd == rn or rd in pages:
+                    pages.pop(rd, None)
             continue
         if word & 0xFC000000 == 0x94000000 or word & 0xFFFFFC1F == 0xD63F0000:  # bl / blr
             for register in range(19):

@@ -339,8 +339,9 @@ def _functions_from_image(path: Path, target: str, platform: Platform, pattern: 
     image = platform.open(path)
     rows = []
     starts = dict(image.functions()) if hasattr(image, "functions") else {}
+    stubs = image.stubs() if hasattr(image, "stubs") else {}
     for start, size in sorted(starts.items()):
-        fname = image.symbols.get(start) or f"fn_{platform.text(start)[2:]}"
+        fname = image.symbols.get(start) or stubs.get(start) or f"fn_{platform.text(start)[2:]}"
         rows.append((target, start, size, fname, None, None, None, None, 0, int(bool(pattern.search(fname)))))
     return rows
 
@@ -388,7 +389,8 @@ def _load_functions(project: Project, db: sqlite3.Connection, name: str, target:
                 if not base and platform.base and value >= platform.base:
                     value -= platform.base
                 rows.append((name, base + value, int(function.get("size", 0)), fname,
-                             info.get("demangled_name") or cw_demangle(fname), function.get("fuzzy_match_percent"),
+                             info.get("demangled_name") or (cw_demangle(fname) if platform.name == "gamecube" else None),
+                             function.get("fuzzy_match_percent"),
                              unit["name"], meta.get("source_path"), int(bool(meta.get("complete"))),
                              int(bool(pattern.search(fname)))))
     elif source.suffix.lower() == ".csv":
@@ -403,6 +405,12 @@ def _load_functions(project: Project, db: sqlite3.Connection, name: str, target:
         for symbol in best.values():
             rows.append((name, symbol.address, symbol.size, symbol.name, cw_demangle(symbol.name), None, None,
                          None, 0, int(bool(pattern.search(symbol.name)))))
+    if platform.name == "switch":  # Itanium names: demangle the ones the source did not
+        from .platform import demangle_itanium
+        wanted = [i for i, r in enumerate(rows) if r[4] is None and r[3].startswith("_Z")]
+        for i, text in zip(wanted, demangle_itanium([rows[i][3] for i in wanted])):
+            if text:
+                rows[i] = rows[i][:4] + (text,) + rows[i][5:]
     db.execute("DELETE FROM functions WHERE target=?", (name,))
     db.executemany("INSERT OR REPLACE INTO functions VALUES(?,?,?,?,?,?,?,?,?,?)", rows)
     _set_meta(db, f"functions:{name}", stamp)
