@@ -912,6 +912,27 @@ def objects_compare(data: dict) -> str:
     return "\n".join(out)
 
 
+def boundaries(data: dict, limit: int = 30) -> str:
+    out = [f"boundaries for {data['target']}: {data['assigned']:,} of {data['functions']:,} functions placed "
+           f"({data['assigned_bytes_percent']}% of code bytes) in {len({u['unit'] for u in data['units']})} units "
+           f"from {data['files']} source paths; {len(data['gaps'])} gaps between different units; "
+           f"{len(data['names'])} name proposals",
+           "evidence: " + ", ".join(f"{k} {v:,}" for k, v in data["evidence"].items())
+           + f"; {data['header_inlines']:,} functions are inlines from headers"]
+    if data.get("roots"):
+        out.append("source trees: " + "; ".join(data["roots"]))
+    for unit in sorted(data["units"], key=lambda u: -u["functions"])[:limit]:
+        out.append(f"  {unit['start']}-{unit['end']}  {unit['functions']:>4} fn  {unit['unit']}"
+                   + (f"  (piece of {unit['pieces']})" if unit["pieces"] > 1 else ""))
+    if len(data["units"]) > limit:
+        out.append(f"  ... {len(data['units']) - limit} more units (--json, or --splits FILE writes them all)")
+    for name in data["names"][:12]:
+        out.append(f"  name {name['address']} {name['current']} -> {name['proposed']} ({name['confidence']})")
+    if len(data["names"]) > 12:
+        out.append(f"  ... {len(data['names']) - 12} more names (--json)")
+    return "\n".join(out)
+
+
 def refs(data: dict) -> str:
     f = data.get("function")
     head = f"refs for {data['query']}" + (f" ({_fn(f)})" if f else "") + f": {data['total']} line(s); spellings " + \
