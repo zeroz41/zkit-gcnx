@@ -130,8 +130,13 @@ def gate(project: Project, repo: str) -> dict[str, Any]:
             stale_apps = [r for r in stale(project, repo)["outputs"] if r["stale"]]
         except (OSError, ValueError):
             stale_apps = []
+    try:
+        review = session_review(project, repo)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        review = {"error": str(error)}
     return {"repo": repo, "finish": canonical, "drift": drift, "stale_apps": stale_apps, "owning_tests": owning,
-            "note": "The repository's AGENTS.md is the contract; the manifest copy must be updated with it."}
+            "session": review,
+            "note": "The repository's own contract is authoritative; the manifest copy must be updated with it."}
 
 
 def _decomp_next(project: Project, repo: str) -> dict | None:
@@ -291,15 +296,84 @@ def brief(project: Project, repo: str | None = None, demand_rows: int = 5) -> di
 
 
 SUBAGENT_CONTEXT = (
-    "gcn-zkit is available for evidence on {project}. Use the CLI via Bash (MCP zkit_* tools may need loading): "
-    "`gcn-zkit lookup <addr|name ...>` (match/name state, owning file:line, callers, cites), "
-    "`gcn-zkit asm <addr> [--size 0x40]`, `gcn-zkit decompile <addr ...>` (Ghidra's C for the original function; "
-    "read it next to m2c, especially where m2c fails or emits goto), `gcn-zkit data <addr|symbol ...> --type f32 --size 64`, "
-    "`gcn-zkit names --regex RE | --range A-B`, `gcn-zkit xrefs <addr|symbol ...>`, `gcn-zkit search <words>`, "
-    "`gcn-zkit wait <repo>` before a build instead of pgrep/sleep. All take several addresses per call. "
+    "zkit is available for evidence on {project}. Use the CLI via Bash (MCP zkit_* tools may need loading): "
+    "`zkit lookup <addr|name ...>` (match/name state, owning file:line, callers, cites), "
+    "`zkit asm <addr> [--size 0x40]`, `zkit decompile <addr ...>` (Ghidra's C for the original function; "
+    "read it next to m2c, especially where m2c fails or emits goto), `zkit data <addr|symbol ...> --type f32 --size 64`, "
+    "`zkit names --regex RE | --range A-B`, `zkit xrefs <addr|symbol ...>`, `zkit search <words>`, "
+    "`zkit wait <repo>` before a build instead of pgrep/sleep. All take several addresses per call. "
     "Prefer these to grepping symbols.txt or parsing the executable/report.json with Python.")
 
 
 def subagent_context(project: Project) -> str:
     """The short pointer a subagent gets at start (it never sees the session brief)."""
     return SUBAGENT_CONTEXT.format(project=project.config.get("id", "this project"))
+
+
+# Session start records: what a session began from, so its finish gate judges what that session changed.
+
+def record_start(project: Project) -> dict:
+    """Save a report baseline per target and every repository's HEAD for the calling agent session."""
+    from .activity import agent_identity, state_dir
+    from .progress import save_baseline
+    from .project import git
+    who = agent_identity()
+    heads = {}
+    for name in project.config["repositories"]:
+        result = git(project.root(name), "rev-parse", "HEAD")
+        if result.returncode == 0:
+            heads[name] = result.stdout.decode().strip()
+    saved = {}
+    for name, target in project.config.get("targets", {}).items():
+        if target.get("report"):
+            try:
+                meta = save_baseline(project, name, f"session:{who}")
+            except (OSError, ValueError):
+                meta = None
+            if meta:
+                saved[name] = meta["name"]
+    row = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"), "agent": who, "heads": heads,
+           "baselines": saved}
+    path = state_dir(project) / "sessions.jsonl"
+    lines = path.read_text(encoding="utf-8").splitlines()[-199:] if path.is_file() else []
+    path.write_text("\n".join(lines + [json.dumps(row)]) + "\n", encoding="utf-8")
+    return row
+
+
+def session_start(project: Project, agent: str | None = None) -> dict | None:
+    """The newest start record of this agent session (or of `agent`), else None."""
+    from .activity import agent_identity, state_dir
+    path = state_dir(project) / "sessions.jsonl"
+    if not path.is_file():
+        return None
+    who = agent or agent_identity()
+    for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("agent") == who:
+            return row
+    return None
+
+
+def session_review(project: Project, repo: str) -> dict:
+    """What this session changed in one repository: report delta, commit hygiene and the tree it leaves."""
+    from . import hygiene, progress
+    start = session_start(project)
+    out: dict[str, Any] = {"start": start}
+    head = (start or {}).get("heads", {}).get(repo)
+    commits = f"{head}..HEAD" if head else None
+    out["hygiene"] = hygiene.audit(project, repo, commits, parts=("commits", "tree")) if head else \
+        hygiene.audit(project, repo, None, 5, parts=("commits", "tree"))
+    if _role_of(project, repo) == "decomp" and start:
+        deltas = {}
+        for target, name in start.get("baselines", {}).items():
+            if project.target(target).get("repository") != repo:
+                continue
+            try:
+                deltas[target] = progress.since(project, target, name)
+            except (OSError, ValueError) as error:
+                deltas[target] = {"error": str(error)}
+        out["progress"] = deltas
+    return out

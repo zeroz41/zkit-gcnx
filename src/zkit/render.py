@@ -82,16 +82,16 @@ def brief(data: dict, compact: bool = False) -> str:
             out.append("- lane yield (kept/attempted, last 3 runs): " + ", ".join(f"{k} {v}" for k, v in ranked[:8]))
         if repo.get("tiers"):
             out.append("- fidelity tiers: " + ", ".join(f"{k} {v}" for k, v in repo["tiers"].items())
-                       + " files — EXACT unless listed otherwise (`gcn-zkit tiers`)")
+                       + " files — EXACT unless listed otherwise (`zkit tiers`)")
         ground = repo.get("grounding")
         if ground:
             weak = ", ".join(f"{w['folder']} {w['exact_pct']}%" for w in ground["weakest"])
             out.append(f"- grounding: cited originals {ground['total'].get('exact_pct')}% exact in the decomp; "
-                       f"weakest: {weak} (`gcn-zkit grounding`)")
+                       f"weakest: {weak} (`zkit grounding`)")
         if repo.get("drift"):
             d = repo["drift"]
             out.append(f"- decomp drift: {d['changed']} cited function(s) changed since {d['since']}; re-verify "
-                       + ", ".join(f"{r['path']}({r['functions']})" for r in d["files"]) + " (`gcn-zkit drift`)")
+                       + ", ".join(f"{r['path']}({r['functions']})" for r in d["files"]) + " (`zkit drift`)")
         if repo.get("status"):
             out.append("- status.md (Active work):")
             out.extend("    " + line for line in repo["status"].splitlines()[:14])
@@ -104,9 +104,9 @@ def brief(data: dict, compact: bool = False) -> str:
         if repo.get("audits"):
             audits = repo['audits']
             if audits['architecture_rules']:
-                out.append(f"- include audit: `gcn-zkit architecture {name} <paths>` ({audits['architecture_rules']} rules)")
+                out.append(f"- include audit: `zkit architecture {name} <paths>` ({audits['architecture_rules']} rules)")
             for inventory in audits['coverage_inventories']:
-                out.append(f"- inventory audit: `gcn-zkit coverage {name} {inventory['name']}` — {inventory['boundary']}")
+                out.append(f"- inventory audit: `zkit coverage {name} {inventory['name']}` — {inventory['boundary']}")
         if repo.get("port_guidance"):
             out.append('- native-port architecture and completion: ' + repo['port_guidance'])
         if repo.get("rules"):
@@ -116,12 +116,12 @@ def brief(data: dict, compact: bool = False) -> str:
             out.append("- finish gate:")
             out.extend(f"    {c}" for c in repo["finish"])
         if repo.get("lessons"):
-            out.append("- lessons (`gcn-zkit lessons <id>`): " + "; ".join(l["id"] for l in repo["lessons"]))
+            out.append("- lessons (`zkit lessons <id>`): " + "; ".join(l["id"] for l in repo["lessons"]))
     demand = data.get("port_demand")
     if demand:
         t = demand["totals"]
         out.append(f"\n## Port waiting on decomp — {t.get('cited_functions')} cited funcs, {t.get('exact')} exact, "
-                   f"{t.get('provisional_name')} provisional names (`gcn-zkit demand`)")
+                   f"{t.get('provisional_name')} provisional names (`zkit demand`)")
         for row in demand["top"]:
             out.append(f"- {row['address']} {row['name']} needs {'+'.join(row['need'])} ({row['native_files']} native files)")
     return "\n".join(out)
@@ -174,7 +174,7 @@ def _brief_compact(data: dict) -> str:
             out.append('- native port: shared owners and interfaces; composed behavior; automated import/dependency '
                        'discovery; authored data rather than identity/shape guesses. Complete the requested live '
                        'system and verify its boundary. Matching decomp keeps original layout/compiler constraints.')
-        out.append(f"- rules, finish gate, status, lessons: `zkit_brief {name}` (MCP) or `gcn-zkit brief {name}`")
+        out.append(f"- rules, finish gate, status, lessons: `zkit_brief {name}` (MCP) or `zkit brief {name}`")
     demand = data.get("port_demand")
     if demand:
         t = demand["totals"]
@@ -293,7 +293,7 @@ def lookup(data: dict) -> str:
     if data["recipes"]:
         out.append("fidelity recipes: " + ", ".join(data["recipes"]))
     if data.get("decompile"):
-        out.append(f"Ghidra's C next to m2c: gcn-zkit decompile {f['address']} (MCP zkit_decompile)")
+        out.append(f"Ghidra's C next to m2c: zkit decompile {f['address']} (MCP zkit_decompile)")
     if data.get("body"):
         lo, hi = data["body_lines"]
         out.append(f"body ({f.get('source')}:{lo}-{hi}):")
@@ -326,7 +326,7 @@ def demand(data: dict) -> str:
     t = data["totals"]
     out = [f"port cites {t.get('cited_functions')} decomp functions: {t.get('exact')} exact, {t.get('linked')} linked, "
            f"{t.get('provisional_name')} provisional names; {data['unresolved_native_addresses']} cited addresses "
-           "are not functions (data/typos — `gcn-zkit cites`)"]
+           "are not functions (data/typos — `zkit cites`)"]
     shown = len(data["rows"])
     out.append(f"{data.get('matching_rows', shown)} rows match the filter; showing {shown} from offset {data.get('offset', 0)}"
                + (f" (report {data['report_age_h']}h old)" if data.get("report_age_h") is not None else ""))
@@ -413,6 +413,31 @@ def gate(data: dict) -> str:
         newest = app["newer"][0]
         out.append(f"stale build: {app['output']} (built {app['built']}) is older than {app['newer_count']} source(s), "
                    f"newest {newest['file']}; rebuild before anyone runs it")
+    review = data.get("session") or {}
+    if review.get("error"):
+        out.append(f"session review unavailable: {review['error']}")
+    elif review:
+        start = review.get("start")
+        out.append("this session" + (f" (started {start['time']}):" if start else
+                                     " (no start record; judging the last 5 commits):"))
+        for target, delta_data in (review.get("progress") or {}).items():
+            if delta_data.get("error"):
+                out.append(f"  {target}: {delta_data['error']}")
+                continue
+            m = delta_data["metrics"]
+            out.append(f"  {target}: exact functions {m['matched_functions']['delta']:+,}, matched code "
+                       f"{m['matched_code']['delta']:+,} B, linked code {m['complete_code']['delta']:+,} B, matched data "
+                       f"{m['matched_data']['delta']:+,} B" + ("" if delta_data["ok"] else " — LOSSES:"))
+            out.extend(f"    FAIL {f}" for f in delta_data["failures"])
+            out.extend(f"    lost: {r['address']} {r['name']}" for r in delta_data["regressed"][:10])
+        hyg = review.get("hygiene") or {}
+        for row in (hyg.get("commits") or {}).get("problems", [])[:10]:
+            out.append(f"  commit {row['commit']} {row['subject'][:50]!r}: " + "; ".join(row["problems"]))
+        tree = hyg.get("tree") or {}
+        if tree.get("problems"):
+            out.append("  leaves behind: " + "; ".join(tree["problems"][:8]))
+        elif tree:
+            out.append("  working tree clean")
     return "\n".join(out)
 
 
@@ -674,7 +699,7 @@ def drift(data: dict) -> str:
         out.append(f"  {c['address']} {c['name']}: {', '.join(c['changes'])}  <- {', '.join(c['native'][:2])}")
     if len(data["changes"]) > 20:
         out.append(f"  ... {len(data['changes']) - 20} more (--json)")
-    out.append("after re-checking: gcn-zkit drift --accept")
+    out.append("after re-checking: zkit drift --accept")
     return "\n".join(out)
 
 
@@ -792,4 +817,110 @@ def split_gaps(data: dict) -> str:
     if data["total"] > len(data["ranges"]):
         out.append(f"... {data['total'] - len(data['ranges'])} more (--section or --limit)")
     out.append("limits: " + data["limits"])
+    return "\n".join(out)
+
+
+def _bytes(part: int, whole: int) -> str:
+    return f"{100.0 * part / whole:.2f}% ({part:,}/{whole:,})" if whole else "0% (0/0)"
+
+
+def progress(data: dict) -> str:
+    m = data["overall"]
+    out = [f"progress {data.get('target', '')} (report {data.get('report_age_h')}h old; objdiff counters)",
+           f"  code matched {_bytes(m['matched_code'], m['total_code'])}, linked {_bytes(m['complete_code'], m['total_code'])}",
+           f"  data matched {_bytes(m['matched_data'], m['total_data'])}, linked {_bytes(m['complete_data'], m['total_data'])}",
+           f"  functions exact {m['matched_functions']:,}/{m['total_functions']:,}; "
+           f"units linked {m['complete_units']:,}/{m['total_units']:,}"]
+    for c in data.get("categories", []):
+        x = c["measures"]
+        out.append(f"  [{c['name']}] code {x['matched_code_percent']:.2f}% matched, {x['complete_code_percent']:.2f}% "
+                   f"linked; data {x['matched_data_percent']:.2f}%; functions {x['matched_functions']:,}/{x['total_functions']:,}")
+    if len(data.get("modules", [])) > 1:
+        for mod in data["modules"]:
+            x = mod["measures"]
+            out.append(f"  module {mod['name']}: code {x['matched_code_percent']:.2f}% matched, "
+                       f"{x['complete_code_percent']:.2f}% linked; {x['complete_units']}/{x['total_units']} units linked")
+    out.append("  `zkit report --out build/progress` writes the browsable page")
+    return "\n".join(out)
+
+
+def delta(data: dict) -> str:
+    base = data.get("baseline", {})
+    out = [f"since {base.get('label', '?')} baseline {base.get('time', base.get('name', ''))}"
+           f" (report {data.get('report_age_h')}h old): " + ("OK" if data.get("ok", data.get("regression_free")) else "REGRESSIONS")]
+    for key in ("matched_functions", "matched_code", "complete_code", "matched_data", "complete_data"):
+        v = data["metrics"][key]
+        if v["delta"]:
+            out.append(f"  {key}: {v['before']:,} -> {v['after']:,} ({v['delta']:+,})")
+    if not any(data["metrics"][k]["delta"] for k in data["metrics"]):
+        out.append("  no counter changed")
+    for failure in data["failures"]:
+        out.append(f"  FAIL {failure}")
+    for label, key in (("lost match", "regressed"), ("unlinked", "unlinked"), ("new exact", "new_exact"),
+                       ("newly linked", "newly_linked")):
+        rows = data.get(key, [])
+        for row in rows[:12]:
+            out.append(f"  {label}: {row['address']} {row['name']}")
+        if len(rows) > 12:
+            out.append(f"  ... {len(rows) - 12} more {label}")
+    for key in ("exact_data_lost", "linked_data_lost", "data_coverage_lost"):
+        for row in data.get(key, [])[:8]:
+            out.append(f"  {key}: {row['module']} {row['section']} {row['address']} +{row['size']}")
+    if data.get("renamed"):
+        out.append(f"  {len(data['renamed'])} function(s) renamed at the same address")
+    return "\n".join(out)
+
+
+def quality(data: dict) -> str:
+    out = [f"source quality of {data['repo']} at {data['revision']}: {data['total']:,} items of decompiler debt in "
+           f"{data['files_with_debt']:,} of {data['files']:,} files ({', '.join(data['paths'])})"]
+    for row in sorted(data["counts"], key=lambda r: -r["count"]):
+        if row["count"]:
+            out.append(f"  {row['count']:>9,}  {row['label']}")
+    if data.get("worst_files"):
+        out.append("most debt:")
+        for row in data["worst_files"]:
+            top = ", ".join(f"{k} {v}" for k, v in row["top"])
+            out.append(f"  {row['total']:>6,}  {row['path']}  ({top})")
+    return "\n".join(out)
+
+
+def quality_compare(data: dict) -> str:
+    t = data["total"]
+    out = [f"source quality {data['before']} -> {data['after']}: {t['before']:,} -> {t['after']:,} ({t['delta']:+,})"]
+    for row in sorted(data["rows"], key=lambda r: r["delta"]):
+        if row["delta"] or row["after"]:
+            out.append(f"  {row['before']:>9,} -> {row['after']:>9,} ({row['delta']:+,})  {row['label']}")
+    if data["worse"]:
+        out.append("WORSE: " + ", ".join(r["label"] for r in data["worse"]))
+    return "\n".join(out)
+
+
+def hygiene(data: dict) -> str:
+    out = [f"hygiene {data['repo']}: " + ("OK" if data["ok"] else "problems found")]
+    commits = data.get("commits")
+    if commits:
+        out.append(f"commits ({commits['checked']} checked, identity {commits['identity'] or 'not configured'}): "
+                   f"{len(commits['problems'])} with problems")
+        for row in commits["problems"][:10]:
+            out.append(f"  {row['commit']} {row['subject'][:60]!r}: " + "; ".join(row["problems"]))
+        if len(commits["problems"]) > 10:
+            out.append(f"  ... {len(commits['problems']) - 10} more")
+    files = data.get("files")
+    if files:
+        out.append(f"tracked files: {files['tracked']:,} ({files['documents']} documents, {files['scripts']} scripts)"
+                   + (": " + ", ".join(f"{k} {v}" for k, v in sorted(files["counts"].items())) if files["counts"] else ""))
+        by_kind: dict[str, list] = {}
+        for f in files["findings"]:
+            by_kind.setdefault(f["kind"], []).append(f)
+        for kind, rows in by_kind.items():
+            for f in rows[:6]:
+                out.append(f"  {f['severity']:<7} {kind:<16} {f['path']}: {f['message']}")
+            if len(rows) > 6:
+                out.append(f"  ... {len(rows) - 6} more {kind}")
+    tree = data.get("tree")
+    if tree:
+        out.append("working tree: " + ("clean" if not tree["problems"] else "; ".join(tree["problems"])))
+        for d in tree["dirty"][:8]:
+            out.append(f"  {d['state']:<2} {d['path']}")
     return "\n".join(out)

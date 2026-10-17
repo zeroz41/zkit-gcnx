@@ -1,6 +1,7 @@
 """Regression tests for 0.3.1: measured speedups (planner stats, caches) and the argument shapes and waiting
 patterns seen in real sessions after 0.3.0 landed."""
 
+import support  # noqa: F401  (isolates config, cache and state)
 import asyncio
 import contextlib
 import io
@@ -28,7 +29,7 @@ class Speed(unittest.TestCase):
     write_native = test_bridge.BridgeTests.write_native
 
     def test_refresh_keeps_planner_statistics(self):
-        from gcn_zkit.index import cache_path, refresh
+        from zkit.index import cache_path, refresh
         refresh(self.project)
         db = sqlite3.connect(cache_path(self.project))
         tables = {row[0] for row in db.execute("SELECT DISTINCT tbl FROM sqlite_stat1")}
@@ -44,15 +45,15 @@ class Speed(unittest.TestCase):
         db.close()
 
     def test_refresh_restores_missing_statistics(self):
-        from gcn_zkit.index import cache_path, connect, refresh
+        from zkit.index import cache_path, connect, refresh
         refresh(self.project)
         connect(self.project).execute("DROP TABLE sqlite_stat1")
         self.assertTrue(refresh(self.project).get("analyzed"))
         self.assertFalse(refresh(self.project).get("analyzed"))  # nothing changed: no second ANALYZE
 
     def test_native_file_counts_match_a_python_count(self):
-        from gcn_zkit.bridge import _native_file_counts
-        from gcn_zkit.index import connect, refresh
+        from zkit.bridge import _native_file_counts
+        from zkit.index import connect, refresh
         refresh(self.project)
         db = connect(self.project)
         rows = [{"address": a, "size": n} for a, n in ((0x80003000, 12), (0x80003010, 16), (0x80003020, 4))]
@@ -67,7 +68,7 @@ class Speed(unittest.TestCase):
 
     def test_concurrent_refresh_scans_once(self):
         from concurrent.futures import ThreadPoolExecutor
-        from gcn_zkit import index
+        from zkit import index
         os.environ["ZKIT_REFRESH_TTL"] = "60"
         self.addCleanup(os.environ.__setitem__, "ZKIT_REFRESH_TTL", "0")
         index._FRESH.clear()
@@ -84,7 +85,7 @@ class Speed(unittest.TestCase):
         self.assertEqual(sorted(calls), ["decomp", "native"])  # one walk per repo, not one per thread
 
     def test_name_scan_matches_the_definition_regex(self):
-        from gcn_zkit.bridge import _name_call
+        from zkit.bridge import _name_call
         rng = random.Random(7)
         for _ in range(20000):
             name = rng.choice(["ab", "a", "b_x", "a~b"])
@@ -93,7 +94,7 @@ class Speed(unittest.TestCase):
             self.assertEqual(_name_call(text, name), (m.start(), m.end()) if m else None, (text, name))
 
     def test_source_cache_evicts_least_recent_files(self):
-        from gcn_zkit import bridge
+        from zkit import bridge
         old = bridge.SOURCE_CACHE
         bridge.SOURCE_CACHE = 2
         self.addCleanup(setattr, bridge, "SOURCE_CACHE", old)
@@ -110,8 +111,8 @@ class Speed(unittest.TestCase):
         self.assertEqual(sorted(Path(k).name for k in bridge._SOURCES), ["f0.cpp", "f2.cpp"])
 
     def test_symbols_cache_survives_processes_and_invalidates(self):
-        from gcn_zkit import bridge
-        from gcn_zkit.index import cache_path
+        from zkit import bridge
+        from zkit.index import cache_path
         bridge._SYMBOLS.clear()
         first = bridge._symbol_table(self.project, "t")[0]
         stores = list(cache_path(self.project).parent.glob("symbols-*.marshal"))
@@ -129,13 +130,13 @@ class Arguments(unittest.TestCase):
     write_native = test_bridge.BridgeTests.write_native
 
     def call(self, name, args):
-        from gcn_zkit.server import create_server
+        from zkit.server import create_server
         if not hasattr(self, "_server"):
             self._server = create_server(self.project)
         return mcp_text(asyncio.run(self._server.call_tool(name, args)))
 
     def cli(self, *argv):
-        from gcn_zkit import cli
+        from zkit import cli
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             code = cli.main(["--project", str(self.manifest), *argv])
@@ -166,8 +167,8 @@ class Arguments(unittest.TestCase):
     def test_lookup_asm_addresses_and_impact_dot(self):
         self.assertIn("0x80003010", self.call("zkit_lookup", {"addresses": ["80003000", "80003010"], "repo": "decomp"}))
         self.assertIn("0x80003010", self.call("zkit_asm", {"addresses": '["0x80003010"]'}))
-        from gcn_zkit.native import impact
-        from gcn_zkit.project import Project
+        from zkit.native import impact
+        from zkit.project import Project
         manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
         manifest["repositories"]["native"]["tests"] = {"build_dir": "build", "include_roots": ["src"], "scan": ["src"]}
         self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
@@ -196,19 +197,19 @@ class SubagentHook(unittest.TestCase):
     write_native = test_bridge.BridgeTests.write_native
 
     def test_subagent_start_hook_payload_and_install(self):
-        from gcn_zkit import cli
+        from zkit import cli
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(cli.main(["--project", str(self.manifest), "hook", "subagent-start"]), 0)
         payload = json.loads(out.getvalue())["hookSpecificOutput"]
         self.assertEqual(payload["hookEventName"], "SubagentStart")
-        self.assertIn("gcn-zkit lookup", payload["additionalContext"])
+        self.assertIn("zkit lookup", payload["additionalContext"])
         self.assertLess(len(payload["additionalContext"]), 800)  # every subagent pays for it
         plugin = json.loads((Path(__file__).resolve().parents[1] / "hooks/hooks.json").read_text(encoding="utf-8"))
         self.assertIn("hook subagent-start", json.dumps(plugin["hooks"]["SubagentStart"]))
         codex = json.loads((Path(__file__).resolve().parents[1] / "hooks/codex-hooks.json").read_text(encoding="utf-8"))
         self.assertEqual(set(codex["hooks"]), {"SessionStart"})  # Codex gets no event it may not know
-        from gcn_zkit.install import install
+        from zkit.install import install
         repo = Path(self.temp.name) / "repo"
         repo.mkdir()
         install(self.project, "claude", repo)
@@ -236,7 +237,7 @@ class Wait(unittest.TestCase):
         return str(path)
 
     def test_waits_for_a_build_then_settles(self):
-        from gcn_zkit.activity import wait_idle
+        from zkit.activity import wait_idle
         build = self.spawn([self.fake("ninja"), "1.2"], self.decomp)
         time.sleep(0.2)
         data = wait_idle(self.project, "decomp", timeout=20, settle=0.3, poll=0.1)
@@ -246,7 +247,7 @@ class Wait(unittest.TestCase):
         self.assertEqual(data["locked_build"], "flock build/.lock <command>")
 
     def test_held_lock_blocks_and_times_out(self):
-        from gcn_zkit.activity import wait_idle
+        from zkit.activity import wait_idle
         holder = self.spawn([sys.executable, "-c", "import fcntl,sys,time; f=open(sys.argv[1],'a'); "
                              "fcntl.flock(f, fcntl.LOCK_EX); time.sleep(30)", str(self.decomp / "build/.lock")], "/")
         time.sleep(0.4)
@@ -256,7 +257,7 @@ class Wait(unittest.TestCase):
         self.assertEqual(data["still_busy"][0]["lock"], "build/.lock")
 
     def test_shell_wrappers_and_other_checkouts_do_not_block(self):
-        from gcn_zkit.activity import wait_idle
+        from zkit.activity import wait_idle
         self.spawn(["sh", "-c", "sleep 5; echo ninja"], self.decomp)  # another agent's `wait && ninja` wrapper
         self.spawn([self.fake("ninja"), "5"], self.native)  # a build in a different repo
         time.sleep(0.2)
@@ -267,8 +268,8 @@ class Wait(unittest.TestCase):
         self.assertEqual(data["waited_on"], [])
 
     def test_cli_and_mcp(self):
-        from gcn_zkit import cli
-        from gcn_zkit.server import create_server
+        from zkit import cli
+        from zkit.server import create_server
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = cli.main(["--project", str(self.manifest), "wait", "decomp", "--settle", "0.1"])

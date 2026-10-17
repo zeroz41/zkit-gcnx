@@ -1,4 +1,4 @@
-"""Ghidra decompiler worker. Runs in its own process (`python -m gcn_zkit.ghidra_worker REQUEST.json`), never in
+"""Ghidra decompiler worker. Runs in its own process (`python -m zkit.ghidra_worker REQUEST.json`), never in
 the MCP server: the JVM costs ~3 s to start and ~1 GB to hold.
 
 The DOL is mapped here from its header; no Ghidra loader runs, because the GameCube Loader's DOL importer opens
@@ -46,7 +46,7 @@ def main(request_path: str) -> int:
         language = DefaultLanguageService.getLanguageService().getLanguage(LanguageID(LANGUAGE))
     except Exception:
         out.write_text(json.dumps({"error": f"Ghidra has no {LANGUAGE} language: install the GameCube Loader "
-                                            "extension (see `gcn-zkit doctor`)"}) + "\n", encoding="utf-8")
+                                            "extension (see `zkit doctor`)"}) + "\n", encoding="utf-8")
         return 2
     program = ProgramDB("dol", language, language.getCompilerSpecByID(CompilerSpecID("default")), Object())
     address = program.getAddressFactory().getDefaultAddressSpace().getAddress

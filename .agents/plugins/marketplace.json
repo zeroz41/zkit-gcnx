@@ -1,8 +1,8 @@
 {
-  "name": "gcn-zkit",
-  "interface": {"displayName": "gcn-zkit (local)"},
+  "name": "zkit",
+  "interface": {"displayName": "zkit (local)"},
   "plugins": [
-    {"name": "gcn-zkit", "source": {"source": "local", "path": "./"},
+    {"name": "zkit", "source": {"source": "local", "path": "./"},
      "policy": {"installation": "AVAILABLE", "authentication": "ON_USE"}, "category": "Developer Tools"}
   ]
 }

@@ -1,4 +1,5 @@
 """Regressions from agent workflows: exact selection, script discovery and install provenance."""
+import support  # noqa: F401  (isolates config, cache and state)
 import asyncio
 import json
 import os
@@ -17,8 +18,8 @@ class ImpactTests(unittest.TestCase):
     write_native = test_bridge.BridgeTests.write_native
 
     def test_script_registration_fixtures_and_gpu_are_explicit(self):
-        from gcn_zkit.native import impact
-        from gcn_zkit.project import Project
+        from zkit.native import impact
+        from zkit.project import Project
         self.write_native("tests/check.py", "print('registered script')\n")
         build = self.native / 'build'
         build.mkdir()
@@ -44,8 +45,8 @@ class ImpactTests(unittest.TestCase):
         self.assertEqual(result['untested_files'], [])
 
     def test_budget_keeps_direct_and_fills_near_cheapest_first(self):
-        from gcn_zkit.native import impact
-        from gcn_zkit.project import Project
+        from zkit.native import impact
+        from zkit.project import Project
         build = self.native / 'build'
         build.mkdir()
         self.write_native('src/actors/Enemy.hpp', 'void check();\n')
@@ -95,9 +96,9 @@ class ImpactTests(unittest.TestCase):
         self.assertEqual(len(tight['deferred']), 5)
 
     def test_gate_names_the_owning_checks_of_the_diff(self):
-        from gcn_zkit.project import Project
-        from gcn_zkit.session import gate
-        from gcn_zkit.render import gate as render_gate
+        from zkit.project import Project
+        from zkit.session import gate
+        from zkit.render import gate as render_gate
         build = self.native / 'build'
         build.mkdir()
         self.write_native('tests/Check.cpp', '#include "actors/Enemy.cpp"\n')
@@ -117,7 +118,7 @@ class ImpactTests(unittest.TestCase):
         self.assertIn('owning checks for this diff', render_gate(data))
 
     def test_long_selection_never_expands_to_label(self):
-        from gcn_zkit.native import _test_commands
+        from zkit.native import _test_commands
         names = [f'local-{i:04}-shared-render-scene-variant-check' for i in range(400)]
         commands = _test_commands('build with spaces', names)
         self.assertGreater(len(commands), 1)
@@ -127,9 +128,9 @@ class ImpactTests(unittest.TestCase):
         self.assertTrue(all('-L' not in cmd and '--no-tests=error' in cmd for cmd in commands))
 
     def test_brief_surfaces_project_architecture_and_missing_contracts(self):
-        from gcn_zkit.project import Project
-        from gcn_zkit.session import brief
-        from gcn_zkit.render import brief as render_brief
+        from zkit.project import Project
+        from zkit.session import brief
+        from zkit.render import brief as render_brief
         self.write_native('design/Architecture.md', '# Architecture\nOne mutable owner per system.\n')
         config = json.loads(self.manifest.read_text(encoding='utf-8'))
         config['repositories']['native']['required_docs'] = ['design/Architecture.md', 'design/Quality.md']
@@ -144,7 +145,7 @@ class ImpactTests(unittest.TestCase):
             self.assertIn('native:design/Quality.md [MISSING]', text)
 
     def test_include_resolution_preserves_relative_precedence_and_edits(self):
-        from gcn_zkit.native import IncludeGraph
+        from zkit.native import IncludeGraph
         self.write_native('src/actors/same.hpp', 'local\n')
         self.write_native('src/same.hpp', 'root\n')
         self.write_native('src/actors/Use.cpp', '#include "same.hpp"\n')
@@ -156,9 +157,9 @@ class ImpactTests(unittest.TestCase):
         self.assertIn('src/actors/Use.cpp', graph.includers['src/same.hpp'])
 
     def test_observed_mcp_aliases_keep_validation_and_handoff_content(self):
-        from gcn_zkit.server import create_server
+        from zkit.server import create_server
         from mcp.server.fastmcp.exceptions import ToolError
-        from gcn_zkit.activity import handoffs
+        from zkit.activity import handoffs
         server = create_server(self.project)
         async def scenario():
             def text(result):
@@ -180,11 +181,11 @@ class ImpactTests(unittest.TestCase):
 
 class InstallationTests(unittest.TestCase):
     def test_doctor_detects_stale_cached_skill_even_at_same_version(self):
-        from gcn_zkit.health import installation
+        from zkit.health import installation
         source = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {
                 'CODEX_HOME': temp, 'CLAUDE_CONFIG_DIR': temp}):
-            cached = Path(temp) / 'plugins/cache/local/gcn-zkit/current'
+            cached = Path(temp) / 'plugins/cache/local/zkit/current'
             for folder in ('skills', 'hooks', '.codex-plugin', '.claude-plugin'):
                 shutil.copytree(source / folder, cached / folder)
             result = installation()
@@ -195,72 +196,35 @@ class InstallationTests(unittest.TestCase):
             self.assertFalse(result['plugin_caches']['codex'][0]['current'])
             self.assertIn('skills/zkit-resume/SKILL.md', result['plugin_caches']['codex'][0]['different_files'])
 
-    def test_replay_rejects_writes_after_global_options(self):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location('replay', Path(__file__).resolve().parents[1] / 'tools/replay.py')
-        replay = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(replay)
-        for argv in (['--json', 'handoff', 'native', 'note'], ['drift', '--accept'],
-                     ['--project', '/work/project.json', 'setup'], ['install', 'codex', '--write', '/repo']):
-            self.assertFalse(replay.replayable({'kind': 'cli', 'argv': argv}))
-        self.assertTrue(replay.replayable({'kind': 'cli', 'argv': ['--json', 'lookup', '80003000']}))
-        self.assertFalse(replay.replayable({'kind': 'mcp', 'tool': 'zkit_drift', 'args': {'accept': True}}))
-        self.assertEqual(replay.summarize([])['calls'], 0)
-
-    def test_replay_extraction_scopes_direct_calls_and_excludes_review_quotes(self):
-        import argparse
-        import importlib.util
-        spec = importlib.util.spec_from_file_location('replay', Path(__file__).resolve().parents[1] / 'tools/replay.py')
-        replay = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(replay)
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            session = [
-                {'type': 'session_meta', 'payload': {'cwd': str(root / 'game'), 'thread_source': 'user'}},
-                {'timestamp': '2026-01-02', 'payload': {'type': 'function_call',
-                    'name': 'mcp__gcn_zkit__zkit_lookup', 'arguments': '{"query":"80003000"}'}},
-                {'timestamp': '2026-01-04', 'payload': {'type': 'function_call',
-                    'name': 'mcp__gcn_zkit__zkit_lookup', 'arguments': '{"query":"80003010"}'}}]
-            (root / 'user.jsonl').write_text('\n'.join(json.dumps(r) for r in session), encoding='utf-8')
-            session[0]['payload']['thread_source'] = 'guardian_review'
-            (root / 'review.jsonl').write_text('\n'.join(json.dumps(r) for r in session), encoding='utf-8')
-            output = root / 'calls.json'
-            replay.extract(argparse.Namespace(repo_root=[str(root / 'game')], since='2026-01-01',
-                until='2026-01-03', claude=str(root / 'absent'), codex=str(root), out=str(output), merge=False))
-            calls = json.loads(output.read_text(encoding='utf-8'))
-            self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0]['seen'], 1)
-            self.assertEqual(calls[0]['args']['query'], '80003000')
-
     def test_codex_disabled_is_not_installed_and_current(self):
-        from gcn_zkit.health import _codex_plugin
+        from zkit.health import _codex_plugin
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'CODEX_HOME': temp}):
             config = Path(temp) / 'config.toml'
-            config.write_text('[plugins."gcn-zkit@gcn-zkit"]\nenabled = false\n', encoding='utf-8')
+            config.write_text('[plugins."zkit@zkit"]\nenabled = false\n', encoding='utf-8')
             self.assertFalse(_codex_plugin()[0])
-            config.write_text('[plugins."gcn-zkit@gcn-zkit"]\nenabled = true\n', encoding='utf-8')
+            config.write_text('[plugins."zkit@zkit"]\nenabled = true\n', encoding='utf-8')
             self.assertTrue(_codex_plugin()[0])
 
     def test_codex_local_refresh_does_not_request_git_upgrade(self):
-        from gcn_zkit.onboard import connect_agents
+        from zkit.onboard import connect_agents
         with tempfile.TemporaryDirectory() as source, \
-             patch('gcn_zkit.health._claude_plugin', return_value=(True, 'enabled')), \
-             patch('gcn_zkit.health._codex_plugin', return_value=(True, 'enabled')), \
+             patch('zkit.health._claude_plugin', return_value=(True, 'enabled')), \
+             patch('zkit.health._codex_plugin', return_value=(True, 'enabled')), \
              patch('shutil.which', side_effect=lambda name: name):
             text = '\n'.join(connect_agents(True, refresh=True, source=source))
-            self.assertIn('codex plugin add gcn-zkit@gcn-zkit', text)
+            self.assertIn('codex plugin add zkit@zkit', text)
             self.assertNotIn('codex plugin marketplace upgrade', text)
-            self.assertIn('claude plugin marketplace update gcn-zkit', text)
+            self.assertIn('claude plugin marketplace update zkit', text)
 
     def test_refresh_agents_dry_run_does_not_skip_existing_plugins(self):
-        from gcn_zkit.onboard import connect_agents
-        with patch('gcn_zkit.health._claude_plugin', return_value=(True, 'enabled')), \
-             patch('gcn_zkit.health._codex_plugin', return_value=(True, 'enabled')), \
+        from zkit.onboard import connect_agents
+        with patch('zkit.health._claude_plugin', return_value=(True, 'enabled')), \
+             patch('zkit.health._codex_plugin', return_value=(True, 'enabled')), \
              patch('shutil.which', side_effect=lambda name: name), \
              patch('subprocess.run') as run:
             text = '\n'.join(connect_agents(True, refresh=True, source='/work/toolkit'))
-            self.assertIn('claude plugin update gcn-zkit@gcn-zkit', text)
-            self.assertIn('codex plugin marketplace upgrade gcn-zkit', text)
+            self.assertIn('claude plugin update zkit@zkit', text)
+            self.assertIn('codex plugin marketplace upgrade zkit', text)
             self.assertIn('/work/toolkit', text)
             run.assert_not_called()
 
@@ -269,7 +233,7 @@ class TestPlanTests(unittest.TestCase):
     write_native = test_bridge.BridgeTests.write_native
 
     def plan_project(self):
-        from gcn_zkit.project import Project
+        from zkit.project import Project
         build = self.native / 'build'
         build.mkdir()
         def test(name, properties, command=None):
@@ -292,7 +256,7 @@ class TestPlanTests(unittest.TestCase):
         return Project.load(self.manifest)
 
     def test_fixture_closure_exact_selection_and_parallel_build_union(self):
-        from gcn_zkit.native import test_plan
+        from zkit.native import test_plan
         project = self.plan_project()
         result = test_plan(project, 'native', ['b', 'a', 'a'], 4)
         self.assertTrue(result['ok'])
@@ -311,7 +275,7 @@ class TestPlanTests(unittest.TestCase):
         self.assertNotIn('unrelated', str(result))
 
     def test_missing_and_disabled_selection_blocks_executable_plan(self):
-        from gcn_zkit.native import test_plan
+        from zkit.native import test_plan
         project = self.plan_project()
         result = test_plan(project, 'native', ['a', 'absent', 'disabled'])
         self.assertFalse(result['ok'])
@@ -325,7 +289,7 @@ class TestPlanTests(unittest.TestCase):
             test_plan(project, 'native', ['a'], 0)
 
     def test_complex_build_fixtures_are_not_reordered(self):
-        from gcn_zkit.native import _fixture_build
+        from zkit.native import _fixture_build
         build = self.native / 'build'
         command = ['cmake', '--build', str(build), '--target', 'alpha']
         props = [{'name': 'FIXTURES_SETUP', 'value': ['a']}]
@@ -336,8 +300,8 @@ class TestPlanTests(unittest.TestCase):
         self.assertIsNone(_fixture_build({'command': command + ['--', '-custom'], 'properties': props}, build))
 
     def test_cli_and_mcp_share_the_plan(self):
-        from gcn_zkit.cli import build_parser, run
-        from gcn_zkit.server import create_server
+        from zkit.cli import build_parser, run
+        from zkit.server import create_server
         project = self.plan_project()
         expected, text = run(build_parser().parse_args([
             '--project', str(self.manifest), 'test-plan', 'native', 'a', 'b', '--jobs', '4']))

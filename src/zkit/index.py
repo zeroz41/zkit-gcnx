@@ -90,7 +90,8 @@ def _remember_modules(db: sqlite3.Connection) -> None:
 
 
 def cache_path(project: Project) -> Path:
-    base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "gcn-zkit"
+    from .paths import cache_home
+    base = cache_home()
     key = hashlib.sha256(str(project.path).encode()).hexdigest()[:12]
     safe = re.sub(r"[^\w.-]", "_", project.config["id"])
     path = base / f"{safe}-{key}.sqlite"
@@ -98,7 +99,7 @@ def cache_path(project: Project) -> Path:
         return path
     # Sandboxed clients (Codex) may only write the workspace and /tmp: fall back to a private temp cache.
     user = os.getuid() if hasattr(os, "getuid") else re.sub(r"\W", "_", os.environ.get("USERNAME", "user"))
-    fallback = Path(tempfile.gettempdir()) / f"gcn-zkit-{user}" / f"{safe}-{key}.sqlite"
+    fallback = Path(tempfile.gettempdir()) / f"zkit-{user}" / f"{safe}-{key}.sqlite"
     return fallback
 
 
@@ -604,6 +605,8 @@ def _refresh(project: Project, repos: Iterable[str] | None, force: bool, started
         stats["analyzed"] = True
     if not _MODULE_NAMES:
         _remember_modules(db)
+    if work or analyze:
+        _checkpoint(db, base)
     mark = time.monotonic()
     for key in due + (["@targets"] if targets_due else []):
         _FRESH[(base, key)] = mark
@@ -633,6 +636,71 @@ def _apply(project: Project, db: sqlite3.Connection, repo: str, changed: list, r
     for rel in removed:
         _forget(db, repo, rel)
         stats["files_removed"] += 1
+
+
+WAL_LIMIT = 64 << 20
+
+
+def _checkpoint(db: sqlite3.Connection, base: str) -> None:
+    """Fold a large write-ahead log back into the database (readers in other sessions can hold it open, so a
+    WAL that is never truncated grows to the size of every rewrite since)."""
+    wal = Path(base + "-wal")
+    try:
+        if wal.stat().st_size > WAL_LIMIT:
+            with _LOCK:
+                db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except (OSError, sqlite3.Error):
+        pass
+
+
+def _cache_base() -> Path:
+    from .paths import cache_home
+    return cache_home()
+
+
+def cache_inventory() -> dict:
+    """The toolkit's cache files, grouped per index, and whether a registered project still uses each."""
+    from .onboard import registered
+    base = _cache_base()
+    live = {hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:12] for path in registered()}
+    groups: dict[str, dict] = {}
+    if base.is_dir():
+        for path in base.iterdir():
+            if not path.is_file():
+                continue
+            stem = re.sub(r"(-ghidra)?\.sqlite(-wal|-shm|-journal)?$|\.marshal$|\.partial$", "", path.name)
+            entry = groups.setdefault(stem, {"name": stem, "files": [], "bytes": 0, "modified": 0.0})
+            info = path.stat()
+            entry["files"].append(path.name)
+            entry["bytes"] += info.st_size
+            entry["modified"] = max(entry["modified"], info.st_mtime)
+    now = time.time()
+    for entry in groups.values():
+        key = entry["name"].rsplit("-", 1)[-1]
+        if entry["name"].startswith("symbols-"):
+            entry["live"] = now - entry["modified"] < 30 * 86400  # keyed by a symbols path: keep while recently used
+        else:
+            entry["live"] = key in live
+        entry["age_days"] = round((now - entry["modified"]) / 86400, 1)
+    rows = sorted(groups.values(), key=lambda e: (e["live"], -e["bytes"]))
+    return {"cache": str(base), "entries": rows, "bytes": sum(e["bytes"] for e in rows),
+            "stale_bytes": sum(e["bytes"] for e in rows if not e["live"])}
+
+
+def prune_cache(dry_run: bool = False) -> dict:
+    """Delete caches no registered project uses (old manifest locations, test runs, retired projects)."""
+    inventory = cache_inventory()
+    base = Path(inventory["cache"])
+    removed = []
+    close_connections()
+    for entry in inventory["entries"]:
+        if entry["live"]:
+            continue
+        for name in entry["files"]:
+            if not dry_run:
+                (base / name).unlink(missing_ok=True)
+            removed.append(name)
+    return {"removed": removed, "bytes": inventory["stale_bytes"], "dry_run": dry_run}
 
 
 def report_age_hours(project: Project, target: str) -> float | None:

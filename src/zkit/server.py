@@ -64,7 +64,7 @@ def create_server(project: Project) -> FastMCP:
             rels = "REL functions are written module+0xOFFSET (e.g. mymodule+0x124). "
     except Exception:  # noqa: BLE001 - an index that is not built yet just means no REL hint
         pass
-    mcp = FastMCP("gcn-zkit", instructions=(
+    mcp = FastMCP("zkit", instructions=(
         f"Evidence for a GameCube matching decomp{port} ({project.config['id']}). Start with zkit_brief. "
         "zkit_lookup/zkit_names/zkit_xrefs/zkit_asm/zkit_data replace symbols.txt greps and ad-hoc DOL scripts; "
         "they take several addresses at once. zkit_decompile gives Ghidra's C for an original function, a second "
@@ -198,13 +198,66 @@ def create_server(project: Project) -> FastMCP:
         data = bridge.renamed(p, since, target(p))
         return out(data, render.renamed(data), response_format)
 
+    @tool(enabled=any(t.get("report") for t in project.config.get("targets", {}).values()))
+    def zkit_progress(since: str | None = None, response_format: Format = "text") -> str:
+        """objdiff progress: code and data bytes matched and linked, exact functions, linked units, per category
+        and module. since="session" (this session's start, saved automatically), "latest", a saved name or a
+        report path: what changed by original address (renames and folds are not losses), with every lost match,
+        unlinked function or lost data range listed. Use it to report results instead of hand-counting."""
+        from . import progress
+        p = current()
+        if since:
+            name = None if since == "latest" else since
+            if since == "session":
+                start = session.session_start(p)
+                name = (start or {}).get("baselines", {}).get(target(p))
+                if not name:
+                    raise ValueError("No start record for this session; use since='latest'")
+            data = progress.since(p, target(p), name)
+            return out(data, render.delta(data), response_format)
+        data = progress.progress(p, target(p))
+        return out(data, render.progress(data), response_format)
+
+    @tool()
+    def zkit_quality(repo: str | None = None, paths: Paths = None, at: str | None = None, since: str | None = None,
+                     files: int = 15, response_format: Format = "text") -> str:
+        """Decompiler debt left in a decomp's source: hand-mangled names, raw pointer+offset accesses, fake
+        vtables and filler virtuals, m2c/Ghidra temporaries, address-named types/data/functions, #define
+        re-typings, inline asm. at=REV measures a git revision; since=REV compares it with the working tree (or
+        with at). Measure cleanup with this, never with a tool's own summary line."""
+        from . import quality
+        p, key = scoped(repo, (bridge.role_repos(current(), "decomp") or [None])[0])
+        if key is None:
+            raise ValueError("Pass repo")
+        if since:
+            data = quality.compare(p, key, since, at, _paths(paths))
+            return out(data, render.quality_compare(data), response_format)
+        data = quality.audit(p, key, _paths(paths), at, max(0, min(files, 100)))
+        return out(data, render.quality(data), response_format)
+
+    @tool()
+    def zkit_hygiene(repo: str | None = None, since: str | None = None, limit: int = 30,
+                     parts: list[Literal["commits", "files", "tree"]] | None = None,
+                     response_format: Format = "text") -> str:
+        """What must not be committed or left behind, per the repo's hygiene rules: AI-only docs, dated session
+        logs, orphan or stale docs, scripts nothing uses, original game files, local paths; commit subjects,
+        bodies, AI co-author trailers and identity (since=REV judges REV..HEAD); uncommitted files, stashes,
+        unmerged branches and worktrees."""
+        from . import hygiene
+        p, key = scoped(repo, (bridge.role_repos(current(), "decomp") or list(current().config["repositories"]))[0])
+        data = hygiene.audit(p, key, f"{since}..HEAD" if since else None, max(1, min(limit, 500)),
+                             tuple(parts or ("commits", "files", "tree")))
+        return out(data, render.hygiene(data), response_format)
+
     @tool(enabled=has_native)
     def zkit_port_plan(query: str | None = None, depth: int = 2, repo: str | None = None,
                        address: str | None = None, response_format: Format = "text",
                        entry: str | None = None) -> str:
-        """Before implementing original behavior natively: the original direct-call tree under a function,
-        each node marked reuse (port already cites it — extend that owner), decompile-first (decomp not exact),
-        shared-port (many original callers) or port; bctrl counts flag vtable dispatch the tree cannot follow."""
+        """Before implementing original behavior natively: the original direct-call tree under a function, each
+        node marked reuse (port cites it and the decomp is clean — extend that owner), reuse-unverified (port cites
+        it but the decomp is not clean), decompile-first (not exact), clean-first (exact but still decompiler
+        output or placeholder-named), shared-port (many original callers) or port. Port only port/shared-port/
+        reuse nodes; the rest is decomp work first. bctrl counts flag vtable dispatch the tree cannot follow."""
         query = query or address or entry
         if not query:
             raise ValueError("Pass query (an address or name)")
@@ -334,9 +387,10 @@ def create_server(project: Project) -> FastMCP:
 
     @tool()
     def zkit_check(repo: str | None = None, base: str = "HEAD", response_format: Format = "text") -> str:
-        """Lint a repo's working-tree change (repo may be a worktree path): citations that do not resolve or point
-        at unmatched decomp, new functions without an original address, forbidden patterns (an edited line that
-        already violated a rule is reported as debt, not as a new error), near-miss/folded constants."""
+        """Lint a repo's working-tree change (repo may be a worktree path). Port: citations that do not resolve or
+        cite decomp that is not ready (hold-until-clean), new functions without an original address, forbidden
+        patterns, near-miss/folded constants. Decomp: added lines that bring in decompiler debt (hand-mangled
+        names, raw offsets, temporaries, placeholders). An edited line that already had the problem is debt, not new."""
         p, key = scoped(repo, native_default(current()))
         data = bridge.check(p, key, base, None, target(p))
         return out(data, render.check(data), response_format)
@@ -405,10 +459,10 @@ def create_server(project: Project) -> FastMCP:
 
     @tool(enabled=has_native)
     def zkit_tiers(repo: str | None = None, paths: Paths = None, path: str | None = None) -> str:
-        """Native port fidelity tiers set by the owner: EXACT (behavior, combat, movement, enemies, items, NPC chat,
-        quests, sound, data: match the decomp), EQUIVALENT (rendering: same observable result, different
-        implementation), LIBERTY (UI/menus/graphics features: owner design, never changes gameplay),
-        INFRASTRUCTURE (SDL/platform plumbing). Pass paths to see each file's tier. Unlisted code is EXACT."""
+        """Native port fidelity tiers set by the owner: EXACT (game behavior and data: reproduce the decomp),
+        EQUIVALENT (presentation such as rendering and audio: any implementation, but with enhancements off the
+        output must match the original), LIBERTY (owner-designed additions, opt-in, never changing behavior),
+        INFRASTRUCTURE (platform plumbing). Pass paths to see each file's tier. Unlisted code is EXACT."""
         from .tiers import summary
         p, key = scoped(repo, native_default(current()))
         return _cap(render.tiers(summary(p, key, _paths(paths, path))))
@@ -566,14 +620,14 @@ def serve(project: Project) -> None:
 
 def serve_unconfigured() -> None:
     """Started outside any configured decomp: one tool that says how to set it up, instead of a failed server."""
-    mcp = FastMCP("gcn-zkit", instructions="gcn-zkit has no project for this folder yet; call zkit_setup for the steps.")
+    mcp = FastMCP("zkit", instructions="zkit has no project for this folder yet; call zkit_setup for the steps.")
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True,
                                           openWorldHint=False), structured_output=False)
     def zkit_setup() -> str:
-        """How to point gcn-zkit at a GameCube decomp repository."""
-        return ("No gcn-zkit project covers this folder. In a terminal run `gcn-zkit init <path to the decomp repo>` "
+        """How to point zkit at a GameCube decomp repository."""
+        return ("No zkit project covers this folder. In a terminal run `zkit init <path to the decomp repo>` "
                 "(a decomp-toolkit project; build it once first for match data), then restart this session inside "
-                "that repo. `gcn-zkit doctor` checks the setup.")
+                "that repo. `zkit doctor` checks the setup.")
 
     mcp.run(transport="stdio")

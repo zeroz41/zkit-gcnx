@@ -1,5 +1,6 @@
 """Split units, cross-unit data references and vtable class evidence on a hand-assembled DOL."""
 
+import support  # noqa: F401  (isolates config, cache and state)
 import json
 import os
 from pathlib import Path
@@ -37,7 +38,7 @@ class StructureTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        from gcn_zkit.index import close_connections
+        from zkit.index import close_connections
         self.addCleanup(close_connections)
         base = Path(self.temp.name)
         for var in ("XDG_CACHE_HOME", "XDG_STATE_HOME"):
@@ -76,11 +77,11 @@ class StructureTests(unittest.TestCase):
             "targets": {"t": {"repository": "decomp", "module": "main", "report": "build/report.json",
                               "symbols": "config/symbols.txt", "splits": "config/splits.txt",
                               "original": "orig.dol"}}}), encoding="utf-8")
-        from gcn_zkit.project import Project
+        from zkit.project import Project
         self.project = Project.load(self.manifest)
 
     def test_unit_lists_ranges_and_cross_unit_references(self):
-        from gcn_zkit.structure import unit
+        from zkit.structure import unit
         for query in ("game/Enemy", "game/Enemy.cpp", "main/game/Enemy", "0x80003104", "update__6TEnemyFv"):
             self.assertEqual(unit(self.project, query)["unit"], "game/Enemy.cpp", query)
         enemy = unit(self.project, "game/Enemy")
@@ -98,7 +99,7 @@ class StructureTests(unittest.TestCase):
         self.assertIn("auto-generated unit", missing["hint"])
 
     def test_blocked_lists_exact_unlinked_units_with_reasons(self):
-        from gcn_zkit.structure import blocked
+        from zkit.structure import blocked
         data = blocked(self.project)
         self.assertEqual([u["unit"] for u in data["units"]], ["game/Enemy.cpp"])
         self.assertEqual(data["linked_units"], 1)
@@ -106,7 +107,7 @@ class StructureTests(unittest.TestCase):
         self.assertTrue(any("literal" in r for r in data["units"][0]["reasons"]))
 
     def test_classes_flags_contradicted_and_unclaimed_virtuals(self):
-        from gcn_zkit.structure import classes
+        from zkit.structure import classes
         data = classes(self.project)
         self.assertEqual(data["counts"], {"consistent": 1, "contradicted_strong": 1, "unclaimed": 1})
         wrong = data["contradicted"][0]
@@ -117,7 +118,7 @@ class StructureTests(unittest.TestCase):
         self.assertEqual(classes(self.project, name="TOther")["contradicted_total"], 0)
 
     def test_data_lookup_and_name_range_show_owner_and_data(self):
-        from gcn_zkit.bridge import lookup, names
+        from zkit.bridge import lookup, names
         found = lookup(self.project, "0x80003200")
         self.assertEqual(found["owner_unit"]["unit"], "game/Player.cpp")
         rows = names(self.project, start=0x80003100, end=0x80003204)["rows"]
@@ -128,14 +129,14 @@ class StructureTests(unittest.TestCase):
 
     def test_cli_and_mcp_agree(self):
         env = dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1] / "src"))
-        cli = subprocess.run([sys.executable, "-m", "gcn_zkit.cli", "--project", str(self.manifest), "--json",
+        cli = subprocess.run([sys.executable, "-m", "zkit.cli", "--project", str(self.manifest), "--json",
                               "unit", "game/Enemy"], capture_output=True, text=True, env=env, check=True)
         self.assertEqual(json.loads(cli.stdout)["unit"], "game/Enemy.cpp")
-        text = subprocess.run([sys.executable, "-m", "gcn_zkit.cli", "--project", str(self.manifest), "classes"],
+        text = subprocess.run([sys.executable, "-m", "zkit.cli", "--project", str(self.manifest), "classes"],
                               capture_output=True, text=True, env=env, check=True).stdout
         self.assertIn("[strong] 0x80003010 TPlayer__sub_80003010", text)
         import anyio
-        from gcn_zkit.server import create_server
+        from zkit.server import create_server
         server = create_server(self.project)
 
         async def call(name, arguments):

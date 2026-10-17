@@ -9,7 +9,7 @@ MCP server (server.py) ── CLI (cli.py) ── SessionStart hook (`hook sessi
         │ thin; text by default, --json / response_format=json for data
 bridge.py  structure.py  session.py  activity.py  inspect_dol.py      ← answers
         │
-index.py (SQLite + FTS5, ~/.cache/gcn-zkit/<id>-<hash>.sqlite)
+index.py (SQLite + FTS5, ~/.cache/zkit/<id>-<hash>.sqlite)
         │ functions · calls · cites · lines · files
 gc.py (DOL or .iso/.gcm, bl decode, dtk symbols/splits/asm)   native.py (include graph, CTest)   project.py (manifest, safe paths)
 onboard.py (init: dtk config.yml -> project file, project selection by folder)
@@ -17,7 +17,7 @@ onboard.py (init: dtk config.yml -> project file, project selection by folder)
 repos named in the manifest + the original executable
 ```
 
-All game knowledge lives in the project file (`gcn-zkit init` writes it; see [manifest.md](manifest.md)) and an
+All game knowledge lives in the project file (`zkit init` writes it; see [manifest.md](manifest.md)) and an
 optional lessons folder. The code works for any dtk/objdiff GameCube project, with or without REL modules, with or
 without a native port, and for a non-GameCube project without `targets` (then only docs, search, activity,
 handoffs and gates apply). [manifest.md](manifest.md) has a full example with a native port.
@@ -130,5 +130,5 @@ it does not remove duplicate checkouts. A setup dry run with an existing manifes
 - **Lessons live in the toolkit repo, not in agent memory.** Claude's memory directory depends
   on the launch directory, and Codex has its own. A checked-in folder is visible to every
   client and can be reviewed.
-- **Installed as a normal command.** `uv tool install` puts `gcn-zkit` on PATH on every OS; the plugins call it by
+- **Installed as a normal command.** `uv tool install` puts `zkit` on PATH on every OS; the plugins call it by
   name (no shell scripts), and the hooks never fail a session start.

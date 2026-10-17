@@ -1,4 +1,4 @@
-"""`gcn-zkit init`: write a project manifest for a decomp-toolkit (dtk) repository, so nobody writes JSON by hand.
+"""`zkit init`: write a project manifest for a decomp-toolkit (dtk) repository, so nobody writes JSON by hand.
 
 The manifest goes to the toolkit's own config directory (never into the repository) and is registered there,
 so the CLI, the MCP server and the session hook pick the right project from the working directory.
@@ -22,7 +22,8 @@ NATIVE_CODE = ["include", "src", "source", "tests", "tools", "CMakeLists.txt"]
 
 
 def config_home() -> Path:
-    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "gcn-zkit"
+    from .paths import config_home
+    return config_home()
 
 
 def projects_dir() -> Path:
@@ -46,7 +47,7 @@ def registered() -> list[Path]:
 
 
 def register(manifest: Path) -> Path:
-    """Remember a manifest kept elsewhere (`gcn-zkit use`) without copying it."""
+    """Remember a manifest kept elsewhere (`zkit use`) without copying it."""
     manifest = manifest.resolve()
     folder = projects_dir()
     if manifest.parent == folder:
@@ -176,7 +177,7 @@ def manifest_for(decomp: Path, version: str | None = None, native: Path | None =
         target["splits"] = config["splits"]
     if original:
         target["original"] = original
-    manifest = {"schema_version": 1, "id": project_id, "generated_by": "gcn-zkit init",
+    manifest = {"schema_version": 1, "id": project_id, "generated_by": "zkit init",
                 "repositories": repositories, "targets": {version.lower(): target}}
     return manifest, notes
 
@@ -228,7 +229,7 @@ def project_for(directory: Path, candidates: list[Path]) -> Path | None:
 
 
 def connect_agents(dry_run: bool = False, refresh: bool = False, source: str | None = None) -> list[str]:
-    """Add and install the gcn-zkit plugin in Claude Code and Codex, for whichever is installed.
+    """Add and install the zkit plugin in Claude Code and Codex, for whichever is installed.
 
     Runs the same commands the README lists, by full path (works for .exe and .cmd shims on Windows)."""
     import shutil
@@ -236,8 +237,8 @@ def connect_agents(dry_run: bool = False, refresh: bool = False, source: str | N
     from . import REPOSITORY
     from .health import _claude_plugin, _codex_plugin
     origin = source or REPOSITORY
-    steps = {"claude": [["plugin", "marketplace", "add", origin], ["plugin", "install", "gcn-zkit@gcn-zkit"]],
-             "codex": [["plugin", "marketplace", "add", origin], ["plugin", "add", "gcn-zkit@gcn-zkit"]]}
+    steps = {"claude": [["plugin", "marketplace", "add", origin], ["plugin", "install", "zkit@zkit"]],
+             "codex": [["plugin", "marketplace", "add", origin], ["plugin", "add", "zkit@zkit"]]}
     already = {"claude": _claude_plugin()[0], "codex": _codex_plugin()[0]}
     said = []
     for client, commands in steps.items():
@@ -250,9 +251,9 @@ def connect_agents(dry_run: bool = False, refresh: bool = False, source: str | N
             continue
         if refresh:
             commands = [["plugin", "marketplace", "add", origin],
-                        ["plugin", "marketplace", "update" if client == "claude" else "upgrade", "gcn-zkit"],
+                        ["plugin", "marketplace", "update" if client == "claude" else "upgrade", "zkit"],
                         ["plugin", "update" if client == "claude" and already[client] else
-                         "install" if client == "claude" else "add", "gcn-zkit@gcn-zkit"]]
+                         "install" if client == "claude" else "add", "zkit@zkit"]]
             if client == "codex" and Path(origin).expanduser().is_dir():
                 commands.pop(1)  # local marketplaces have no Git snapshot to upgrade
         for args in commands:
@@ -267,6 +268,6 @@ def connect_agents(dry_run: bool = False, refresh: bool = False, source: str | N
             if not ok:
                 break
         else:
-            said.append(f"{client}: restart it to load gcn-zkit" + (" (accept the startup-hook prompt once)"
+            said.append(f"{client}: restart it to load zkit" + (" (accept the startup-hook prompt once)"
                                                                     if client == "codex" else ""))
     return said

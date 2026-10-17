@@ -11,8 +11,10 @@ from pathlib import Path
 
 from . import render
 
-CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "gcn-zkit" / "project"
-NO_PROJECT = ("No gcn-zkit project for this folder. Run `gcn-zkit init <path to your decomp repo>` once, "
+from .paths import config_home
+
+CONFIG = config_home() / "project"
+NO_PROJECT = ("No zkit project for this folder. Run `zkit init <path to your decomp repo>` once, "
               "then run commands inside that repo (or pass --project).")
 
 
@@ -25,7 +27,7 @@ def default_manifest() -> Path | None:
 
 def find_manifest(explicit: Path | None, strict: bool = False) -> Path | None:
     """--project, $ZKIT_PROJECT, zkit.project.json above cwd, a registered project containing cwd, then the
-    default project (`gcn-zkit use`), then the only registered project. strict: only a project that contains
+    default project (`zkit use`), then the only registered project. strict: only a project that contains
     cwd (or an explicit one); None when there is none."""
     from .onboard import project_for, registered
     if explicit:
@@ -57,9 +59,9 @@ def address_arg(value: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="gcn-zkit", description="Cross-repo evidence for decomp + native-port work")
+    parser = argparse.ArgumentParser(prog="zkit", description="Cross-repo evidence for decomp + native-port work")
     from . import __version__
-    parser.add_argument("--version", action="version", version=f"gcn-zkit {__version__}")
+    parser.add_argument("--version", action="version", version=f"zkit {__version__}")
     parser.add_argument("--project", type=Path, help="Project file (default: the project whose repo you are in)")
     parser.add_argument("--json", action="store_true", help="Machine-readable output")
     parser.add_argument("--target", help="Target name when the manifest has several")
@@ -216,10 +218,39 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--role")
     c = add("gate", help="Canonical finish gate and where repo copies disagree")
     c.add_argument("repo", nargs="?")
+    c = add("progress", help="objdiff progress (code/data matched and linked, functions, categories, modules); "
+                             "--since compares with a saved baseline by original address")
+    c.add_argument("--since", nargs="?", const="latest",
+                   help="baseline to compare with: latest (default), session, a saved name or label, or a report file")
+    c.add_argument("--save", action="store_true", help="save the current report as a baseline")
+    c.add_argument("--list", action="store_true", help="list saved baselines")
+    c.add_argument("--check", action="store_true", help="with --since: exit 1 on any lost match, link or data")
+    c = add("report", help="Write a browsable offline HTML page from the objdiff reports")
+    c.add_argument("--out", type=Path, default=Path("build/progress"), help="folder for index.html")
+    c.add_argument("--title", help="page title (default: the project's title or id)")
+    c.add_argument("--targets", nargs="*", help="targets to include (default: every target with a report)")
+    c = add("quality", help="Decompiler debt left in the source (hand-mangled names, raw offsets, fake vtables, "
+                            "temporaries, placeholder names), at the working tree or a revision")
+    c.add_argument("repo", nargs="?")
+    c.add_argument("paths", nargs="*")
+    c.add_argument("--at", help="measure this git revision instead of the working tree")
+    c.add_argument("--since", help="compare this git revision with the working tree (or with --at)")
+    c.add_argument("--files", type=int, default=15, help="how many of the worst files to list")
+    c = add("hygiene", help="What must not be committed or left behind: AI-only docs, session logs, unused scripts, "
+                            "original files, commit message/identity rules, stray branches and worktrees")
+    c.add_argument("repo", nargs="?")
+    c.add_argument("--since", help="judge the commits in SINCE..HEAD (default: the last --limit commits)")
+    c.add_argument("--limit", type=int, default=30)
+    c.add_argument("--only", choices=["commits", "files", "tree"], action="append", help="run only these parts")
+    c = add("commit-msg", help="Check a commit message file against the repo's commit rules (the commit-msg hook)")
+    c.add_argument("file", type=Path)
     c = add("cites", help="Native citations that resolve to nothing in the target")
     c.add_argument("--limit", type=int, default=50)
     c.add_argument("--unresolved", action="store_true", help=argparse.SUPPRESS)  # what cites always lists
     add("index", help="Refresh the cross-repo index and print its stats")
+    c = add("cache", help="The toolkit's cache files and their size; --prune deletes those no project uses")
+    c.add_argument("--prune", action="store_true")
+    c.add_argument("--dry-run", action="store_true")
     add("doctor", help="Self-check of the whole setup, with the exact fix for each problem")
     c = add("recipes", help="List fidelity recipes")
     c.add_argument("repository", nargs="?")
@@ -259,8 +290,8 @@ def _ready(project, notes: list[str], said: str, plugins_next: bool = True) -> s
     for target, (total, rel) in counts.items():
         lines.append(f"{target}: {total or 0} functions indexed" + (f" ({rel} in REL modules)" if rel else ""))
     lines.append(f"index: {stats['files_reindexed']} files in {stats['seconds']} s")
-    lines.append("next: `gcn-zkit setup` connects Claude Code / Codex (or see the README)" if plugins_next else
-                 "next: start your agent in this folder; `gcn-zkit doctor` checks everything")
+    lines.append("next: `zkit setup` connects Claude Code / Codex (or see the README)" if plugins_next else
+                 "next: start your agent in this folder; `zkit doctor` checks everything")
     return "\n".join(lines)
 
 
@@ -320,8 +351,19 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             rows.append({"id": config["id"], "manifest": str(path), "here": here == path, "default": default_manifest() == path,
                          "repositories": {n: r["root"] for n, r in config["repositories"].items()}})
         text = "\n".join(f"{'*' if r.get('here') else ' '} {r.get('id', '?'):<32} {r['manifest']}"
-                         + (" (default)" if r.get("default") else "") for r in rows) or "no projects yet: gcn-zkit init <decomp repo>"
+                         + (" (default)" if r.get("default") else "") for r in rows) or "no projects yet: zkit init <decomp repo>"
         return rows, text + ("\n* = the project for this folder" if any(r.get("here") for r in rows) else "")
+    if args.command == "cache":
+        from .index import cache_inventory, prune_cache
+        if args.prune:
+            data = prune_cache(args.dry_run)
+            return data, (f"{'would remove' if args.dry_run else 'removed'} {len(data['removed'])} file(s), "
+                          f"{data['bytes'] / 1e6:.0f} MB")
+        data = cache_inventory()
+        lines = [f"{data['cache']}: {data['bytes'] / 1e6:.0f} MB, {data['stale_bytes'] / 1e6:.0f} MB unused"]
+        lines += [f"  {'in use' if e['live'] else 'unused'}  {e['bytes'] / 1e6:8.1f} MB  {e['age_days']:5.1f} d  {e['name']}"
+                  for e in data["entries"]]
+        return data, "\n".join(lines) + ("\n`zkit cache --prune` deletes the unused ones" if data["stale_bytes"] else "")
     if args.command == "hook":
         manifest = find_manifest(args.project, strict=True)
         if manifest is None:
@@ -344,7 +386,7 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
     target = bridge.default_target(project, args.target) if project.config.get("targets") else None
     command = "check-recipe" if args.command == "recipe-preflight" else args.command
     native_only = ("impact", "grounding", "consts", "suspects", "tiers", "stale")
-    path_commands = ("check",) + native_only
+    path_commands = ("check", "quality") + native_only
     here, worktree = project.locate(Path.cwd())
     if getattr(args, "repo", None):
         try:
@@ -355,7 +397,7 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             if command not in path_commands:
                 raise
             args.paths, args.repo = [args.repo, *args.paths], None
-    if getattr(args, "repo", "unset") is None and command in path_commands + ("reuse", "gate", "brief", "recipes", "wait"):
+    if getattr(args, "repo", "unset") is None and command in path_commands + ("reuse", "gate", "brief", "recipes", "wait", "hygiene"):
         if here is not None:
             args.repo = here
             project = project.with_overlay(here, worktree)  # a git worktree reads its own files
@@ -530,6 +572,55 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
     if command == "gate":
         data = session.gate(project, args.repo)
         return data, render.gate(data)
+    if command == "progress":
+        from . import progress
+        if target is None:
+            raise ValueError("The project has no targets with an objdiff report")
+        if args.list:
+            rows = progress.baselines(project, target)
+            return rows, "\n".join(f"{r['name']}  {r.get('label', '')}  report {r.get('report_time', '')}" for r in rows) \
+                or "no saved baselines"
+        if args.save:
+            meta = progress.save_baseline(project, target, "manual", only_if_changed=False)
+            if meta is None:
+                raise ValueError("No complete report to save")
+            return meta, f"saved baseline {meta['name']} ({meta['label']})"
+        if args.since:
+            data = progress.since(project, target, None if args.since == "latest" else args.since)
+            if not args.check:
+                data["regression_free"] = data.pop("ok")
+            return data, render.delta(data)
+        data = progress.progress(project, target)
+        return data, render.progress(data)
+    if command == "report":
+        from . import progress
+        targets = args.targets or [t for t, c in project.config.get("targets", {}).items() if c.get("report")]
+        if not targets:
+            raise ValueError("The project has no targets with an objdiff report")
+        index = progress.write_page(project, targets, args.out.expanduser().resolve(), args.title)
+        return {"index": str(index)}, f"wrote {index}"
+    if command == "quality":
+        from . import quality
+        repo = args.repo or (bridge.role_repos(project, "decomp") or [None])[0]
+        if repo is None:
+            raise ValueError("Name the repository to measure")
+        if args.since:
+            data = quality.compare(project, repo, args.since, args.at, args.paths or None)
+            return data, render.quality_compare(data)
+        data = quality.audit(project, repo, args.paths or None, args.at, args.files)
+        return data, render.quality(data)
+    if command == "hygiene":
+        from . import hygiene
+        repo = args.repo or (bridge.role_repos(project, "decomp") or list(project.config["repositories"]))[0]
+        revisions = f"{args.since}..HEAD" if args.since else None
+        data = hygiene.audit(project, repo, revisions, args.limit, tuple(args.only or ("commits", "files", "tree")))
+        return data, render.hygiene(data)
+    if command == "commit-msg":
+        from .hygiene import message
+        repo = here or (bridge.role_repos(project, "decomp") or list(project.config["repositories"]))[0]
+        data = message(project, repo, args.file.read_text(encoding="utf-8", errors="replace"))
+        return data, "" if data["ok"] else ("commit message refused:\n  " + "\n  ".join(data["problems"]) +
+                                             "\n(one short line in plain words; `git commit --no-verify` skips this once)")
     if command == "cites":
         refresh(project)
         data = bridge.unresolved_cites(project, target, args.limit)
@@ -576,10 +667,14 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
     if command == "hook":
         repo, worktree = project.locate(Path.cwd())
         try:
+            session.record_start(project)  # what this session starts from, for its finish gate
+        except Exception:  # noqa: BLE001 - never block a session start
+            pass
+        try:
             text = render.brief(session.brief(project.with_overlay(repo, worktree) if repo else project, repo),
                                 compact=True)
         except Exception as error:  # noqa: BLE001 - the session must still start, and say why the brief is missing
-            text = f"# zkit brief unavailable: {type(error).__name__}: {error}\nRun `gcn-zkit doctor`."
+            text = f"# zkit brief unavailable: {type(error).__name__}: {error}\nRun `zkit doctor`."
         payload = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}
         return payload, json.dumps(payload)
     if command == "install":

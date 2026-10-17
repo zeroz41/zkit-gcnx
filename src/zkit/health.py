@@ -1,4 +1,4 @@
-"""`gcn-zkit doctor`: is everything set up, and if not, the exact command that fixes it.
+"""`zkit doctor`: is everything set up, and if not, the exact command that fixes it.
 
 Every check is local and read-only (it never starts a client, a build or the network).
 """
@@ -16,7 +16,9 @@ from pathlib import Path
 
 from .project import Project, digest
 
-CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "gcn-zkit"
+from .paths import config_home
+
+CONFIG = config_home()
 
 
 def _row(status: str, check: str, detail: str = "", fix: str = "") -> dict:
@@ -33,7 +35,7 @@ def _claude_plugin() -> tuple[bool | None, str]:
                 enabled.update(json.loads(path.read_text(encoding="utf-8")).get("enabledPlugins", {}))
             except ValueError:
                 continue
-    found = [k for k, v in enabled.items() if k.startswith("gcn-zkit@") and v]
+    found = [k for k, v in enabled.items() if k.startswith("zkit@") and v]
     if found:
         return True, ", ".join(found)
     return (False, "not enabled") if settings.is_dir() else (None, "Claude Code config not found")
@@ -47,13 +49,13 @@ def _codex_plugin() -> tuple[bool | None, str]:
         config = tomllib.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError) as error:
         return False, f"cannot read config: {error}"
-    plugins = [v for k, v in config.get("plugins", {}).items() if k.startswith("gcn-zkit@")]
+    plugins = [v for k, v in config.get("plugins", {}).items() if k.startswith("zkit@")]
     if any(p.get("enabled", True) for p in plugins):
         return True, "plugin enabled in user config (restart to load updates)"
     if plugins:
         return False, "plugin disabled in user config"
-    if "gcn-zkit" in config.get("mcp_servers", {}):
-        enabled = config["mcp_servers"]["gcn-zkit"].get("enabled", True)
+    if "zkit" in config.get("mcp_servers", {}):
+        enabled = config["mcp_servers"]["zkit"].get("enabled", True)
         return enabled, "MCP server entry (no plugin)" if enabled else "MCP server disabled"
     return False, "not configured"
 
@@ -63,7 +65,7 @@ def installation() -> dict:
     from . import __version__
     package = Path(__file__).resolve().parent
     try:
-        distribution_version = importlib.metadata.version("gcn-zkit")
+        distribution_version = importlib.metadata.version("zkit")
     except importlib.metadata.PackageNotFoundError:
         distribution_version = None
     source = package.parent.parent
@@ -74,7 +76,7 @@ def installation() -> dict:
         ("codex", Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")), ".codex-plugin"),
     ):
         copies = []
-        for path in sorted((base / "plugins" / "cache").glob(f"*/gcn-zkit/*/{marker}/plugin.json")):
+        for path in sorted((base / "plugins" / "cache").glob(f"*/zkit/*/{marker}/plugin.json")):
             try:
                 manifest = json.loads(path.read_text(encoding="utf-8"))
                 root = path.parent.parent
@@ -96,7 +98,7 @@ def installation() -> dict:
     legacy = CONFIG / "home"
     return {"version": __version__, "distribution_version": distribution_version,
             "package": str(package), "checkout": str(checkout) if checkout else None,
-            "launcher": shutil.which("gcn-zkit"), "plugin_caches": clients,
+            "launcher": shutil.which("zkit"), "plugin_caches": clients,
             "legacy_home": legacy.read_text(encoding="utf-8").strip() if legacy.is_file() else None,
             "limits": "Cache inventory and user config only; project overrides and running clients may differ. "
                       "Restart clients after updating. The legacy home setting is unused."}
@@ -104,17 +106,50 @@ def installation() -> dict:
 
 from . import REPOSITORY
 
-INSTALL = f"uv tool install --force git+https://github.com/{REPOSITORY}   (or from a clone: uv tool install --force ./gcn-zkit)"
+INSTALL = f"uv tool install --force git+https://github.com/{REPOSITORY}   (or from a clone: uv tool install --force ./zkit)"
+
+
+def _attribution() -> dict:
+    """Claude Code signs commits as an AI co-author unless its attribution setting is empty."""
+    import json
+    path = Path.home() / ".claude" / "settings.json"
+    if not path.is_file():
+        return _row("info", "commit attribution", "no ~/.claude/settings.json (Claude Code not configured here)")
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _row("warn", "commit attribution", f"cannot read {path}")
+    attribution = settings.get("attribution")
+    if isinstance(attribution, dict) and attribution.get("commit") == "" and attribution.get("pr", "") == "":
+        return _row("ok", "commit attribution", "Claude Code adds no AI co-author or PR footer")
+    if attribution is None and settings.get("includeCoAuthoredBy") is False:
+        return _row("ok", "commit attribution", "Claude Code adds no AI co-author (legacy includeCoAuthoredBy)")
+    return _row("warn", "commit attribution", "Claude Code adds a Co-Authored-By trailer to every commit",
+                f'add "attribution": {{"commit": "", "pr": ""}} to {path}')
+
+
+def _identity(project: Project, name: str) -> dict:
+    from .hygiene import policy, _identity as resolved
+    wanted = policy(project, name).get("identity")
+    actual = resolved(project.root(name), None)
+    if wanted and actual and wanted != actual:
+        return _row("warn", f"{name}: commit identity", f"git would commit as {actual}, the project wants {wanted}",
+                    f'git -C {project.root(name)} config user.name "{wanted.split(" <")[0]}" && git -C '
+                    f'{project.root(name)} config user.email "{wanted.split("<")[-1].rstrip(">")}"')
+    if not actual:
+        return _row("warn", f"{name}: commit identity", "no git identity configured",
+                    "set hygiene.identity in the project file and git config user.name/user.email")
+    return _row("ok", f"{name}: commit identity", actual + ("" if wanted else " (hygiene.identity not set)"))
 
 
 def doctor(project: Project) -> dict:
     from . import __version__
-    rows = [_row("ok", "gcn-zkit", f"{__version__} (Python {'.'.join(map(str, __import__('sys').version_info[:3]))})")]
+    rows = [_row("ok", "zkit", f"{__version__} (Python {'.'.join(map(str, __import__('sys').version_info[:3]))})")]
     rows.append(_row("ok" if importlib.util.find_spec("mcp") else "fail", "MCP package",
                      "installed" if importlib.util.find_spec("mcp") else "missing (the plugin's MCP server needs it)",
                      INSTALL))
-    on_path = shutil.which("gcn-zkit")
-    rows.append(_row("ok" if on_path else "fail", "gcn-zkit on PATH", on_path or "not found (plugins call it by name)",
+    on_path = shutil.which("zkit")
+    rows.append(_row("ok" if on_path else "fail", "zkit on PATH", on_path or "not found (plugins call it by name)",
                      f"{INSTALL}   # then `uv tool update-shell` and reopen the terminal"))
     provenance = installation()
     rows.append(_row("info", "loaded Python package", provenance["package"]))
@@ -125,21 +160,23 @@ def doctor(project: Project) -> dict:
             current = [c for c in copies if c["current"]]
             detail = "; ".join(f"{c['path']} ({'current' if c['current'] else 'differs'})" for c in copies)
             rows.append(_row("ok" if current else "warn", f"{client}: plugin cache", detail,
-                             "gcn-zkit setup <project.json> --refresh-agents --plugin-source <checkout>"))
+                             "zkit setup <project.json> --refresh-agents --plugin-source <checkout>"))
     if provenance["legacy_home"]:
         rows.append(_row("info", "legacy home (unused)", provenance["legacy_home"]))
     claude, detail = _claude_plugin()
     rows.append(_row({True: "ok", False: "warn", None: "info"}[claude], "Claude Code plugin", detail,
-                     f"claude plugin marketplace add {REPOSITORY} && claude plugin install gcn-zkit@gcn-zkit"))
+                     f"claude plugin marketplace add {REPOSITORY} && claude plugin install zkit@zkit"))
     codex, detail = _codex_plugin()
     rows.append(_row({True: "ok", False: "warn", None: "info"}[codex], "Codex plugin", detail,
-                     f"codex plugin marketplace add {REPOSITORY} && codex plugin add gcn-zkit@gcn-zkit"))
+                     f"codex plugin marketplace add {REPOSITORY} && codex plugin add zkit@zkit"))
+    rows.append(_attribution())
     for name, repo in project.config["repositories"].items():
         root = project.root(name)
         if not root.is_dir():
             rows.append(_row("fail", f"{name}: repository", str(root), f"fix `root` in {project.path}"))
             continue
         rows.append(_row("ok", f"{name}: repository", str(root)))
+        rows.append(_identity(project, name))
         missing = [d for d in repo.get("required_docs", []) if not project.file(name, d).is_file()]
         if missing:
             rows.append(_row("warn", f"{name}: required docs", "missing " + ", ".join(missing)))
@@ -161,7 +198,7 @@ def doctor(project: Project) -> dict:
         if original is None or not original.is_file():
             rows.append(_row("warn", f"{name}: original executable", str(original or "not configured"),
                              "put the disc image in orig/<GAMEID>/ and build once (dtk extracts sys/main.dol), "
-                             "then rerun `gcn-zkit init`"))
+                             "then rerun `zkit init`"))
         elif target.get("sha256") and original.suffix.lower() == ".dol":
             same = digest(original) == target["sha256"]
             rows.append(_row("ok" if same else "fail", f"{name}: original executable",
@@ -189,7 +226,7 @@ def doctor(project: Project) -> dict:
             continue
         baseline = state_dir(project) / f"drift-{name}.json"
         rows.append(_row("ok" if baseline.is_file() else "info", f"{name}: drift baseline",
-                         "recorded" if baseline.is_file() else "none yet", "gcn-zkit drift --accept   # records one"))
+                         "recorded" if baseline.is_file() else "none yet", "zkit drift --accept   # records one"))
     if project.config.get("targets"):
         from .decompile import budget, status as ghidra_status
         ghidra = ghidra_status()
@@ -203,20 +240,25 @@ def doctor(project: Project) -> dict:
                         f"keeps {plan['reserve_mb']} MB free"))
         rows.append(_row("info" if ghidra.get("problem") else "ok", "Ghidra decompile (optional)", detail,
                          ghidra.get("fix", "")))
+    from .index import cache_inventory
+    cache = cache_inventory()
+    rows.append(_row("ok" if cache["stale_bytes"] < 50e6 else "warn", "cache",
+                     f"{cache['bytes'] / 1e6:.0f} MB, {cache['stale_bytes'] / 1e6:.0f} MB used by no project",
+                     "zkit cache --prune"))
     try:
         from .index import refresh
         stats = refresh(project)
         rows.append(_row("ok", "index", f"refreshed {stats['files_reindexed']} file(s) in {stats['seconds']} s"))
     except Exception as error:  # noqa: BLE001 - report any index failure with its message
         from .index import cache_path
-        rows.append(_row("fail", "index", str(error), f"delete {cache_path(project)} and run `gcn-zkit index`"))
+        rows.append(_row("fail", "index", str(error), f"delete {cache_path(project)} and run `zkit index`"))
     from .session import gate
     for name, repo in project.config["repositories"].items():
         if repo.get("finish_sources"):
             drift = [d["source"] for d in gate(project, name)["drift"]]
             if drift:
                 rows.append(_row("info", f"{name}: finish-gate copies disagree", ", ".join(drift),
-                                 f"gcn-zkit gate {name}   # AGENTS.md is the contract"))
+                                 f"zkit gate {name}   # AGENTS.md is the contract"))
     return {"project": project.config["id"], "manifest": str(project.path), "checks": rows,
             "installation": provenance,
             "ok": not any(r["status"] == "fail" for r in rows)}
@@ -224,7 +266,7 @@ def doctor(project: Project) -> dict:
 
 def render(data: dict) -> str:
     marks = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL", "info": "info"}
-    out = [f"gcn-zkit doctor — {data['project']} ({data['manifest']})"]
+    out = [f"zkit doctor — {data['project']} ({data['manifest']})"]
     for row in data["checks"]:
         out.append(f"{marks[row['status']]}  {row['check']:<34} {row['detail']}")
         if row["status"] in ("warn", "fail") and row["fix"]:

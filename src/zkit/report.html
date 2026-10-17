@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__ progress</title>
+<style>
+:root{color-scheme:dark;--bg:#181b20;--panel:#242930;--line:#3a414b;--text:#eceff2;--muted:#adb6c1;--link:#9ec9f5;--matched:#468bd2;--linked:#3b984c;--track:#414750}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,sans-serif}
+main{max-width:1440px;margin:auto;padding:24px}h1{font-size:24px;margin:0}h2{font-size:16px;margin:22px 0 8px}
+.muted,small{color:var(--muted)}button,select,input{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:6px 9px}
+button{cursor:pointer}button:hover{background:#38414c}:focus-visible{outline:2px solid #91c4fb;outline-offset:2px}
+.numbers{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:18px 0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:10px 12px}
+.card strong{display:block;font-size:22px}.card div{color:var(--muted);font-size:12px}
+.controls{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin:18px 0}label{display:grid;gap:3px;color:var(--muted);font-size:12px}
+#search{min-width:240px}.tablewrap{overflow:auto;border:1px solid var(--line)}
+table{border-collapse:collapse;width:100%;font-size:13px;text-align:right}th,td{padding:7px 10px;border-bottom:1px solid #30363f;white-space:nowrap}
+th{background:var(--panel);position:sticky;top:0}th button{padding:0;background:none;border:0}th:first-child,td:first-child{text-align:left}
+td:first-child{max-width:560px;white-space:normal;overflow-wrap:anywhere}td button{color:var(--link);padding:0;background:none;border:0;text-align:left}
+td small{display:block}.meter{display:block;height:4px;background:var(--track);margin:4px 0}.meter span{display:block;height:100%;background:var(--matched)}
+.linked span{background:var(--linked)}tbody tr:hover{background:#252d37}#pager{display:flex;gap:12px;align-items:center;margin:14px 0}
+#crumbs{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}#crumbs button{padding:3px 8px}
+details{margin-top:18px;color:var(--muted)}footer{margin-top:20px;color:var(--muted);font-size:12px}
+@media(max-width:700px){main{padding:12px}.card strong{font-size:18px}#search{min-width:170px}}
+</style></head><body><main>
+<h1 id="title"></h1><p id="subtitle" class="muted"></p>
+<div class="controls">
+<label>Report<select id="report"></select></label>
+<label>Module<select id="module"></select></label>
+<label>Category<select id="category"></select></label>
+</div>
+<div id="numbers" class="numbers" aria-live="polite"></div>
+<div id="categories"></div>
+<div class="controls">
+<label>Measure<select id="metric"><option value="code">Code</option><option value="data">Data</option></select></label>
+<label>View<select id="view"><option value="units">Objects</option><option value="entries">Functions</option></select></label>
+<label>Show<select id="filter"><option value="all">Everything</option><option value="unmatched">Not matched</option><option value="unlinked">Not linked</option><option value="exact-unlinked">Matched, not linked</option></select></label>
+<label>Search<input id="search" type="search" placeholder="Symbol, object, source file or address"></label>
+<button id="reset">Reset</button>
+</div>
+<nav id="crumbs" aria-label="Selected object"></nav>
+<p id="shown" class="muted"></p>
+<div class="tablewrap"><table><thead><tr>
+<th><button data-sort="name">Object / function</button></th><th><button data-sort="address">Address</button></th>
+<th><button data-sort="total">Bytes</button></th><th><button data-sort="matched">Matched</button></th>
+<th><button data-sort="linked">Linked</button></th><th><button data-sort="remaining">Unmatched bytes ↓</button></th><th>Exact functions</th>
+</tr></thead><tbody id="rows"></tbody></table></div>
+<div id="pager"><button id="prev">Previous</button><span id="page"></span><button id="next">Next</button></div>
+<details><summary>What the numbers mean</summary>
+<p>Every number is objdiff's own counter from the build's report. Matched bytes compare exactly with the original. Linked bytes come from units the build links from source (objdiff's "complete" units). Data counts every non-code section, including zero-initialized ones.</p>
+<p>Objects are the build's current units. Their names and count are not proof of the original translation units; folding units changes ownership, not the totals.</p>
+</details>
+<footer id="footer"></footer>
+</main><script id="data" type="application/json">__DATA__</script><script>
+'use strict';
+const D=JSON.parse(document.getElementById('data').textContent),$=id=>document.getElementById(id);
+const fmt=n=>Number(n||0).toLocaleString('en-US'),pct=(n,d)=>d?(100*n/d).toFixed(2)+'%':'—';
+const hex=n=>n===null||n===undefined?'—':'0x'+Number(n).toString(16).toUpperCase().padStart(8,'0');
+function el(tag,text,attrs={}){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);return n;}
+let R,units,selected=null,metric='code',view='units',filter='all',query='',sort='remaining',desc=true,page=0;const size=100;
+function sum(list){const m={};for(const u of list)for(const[k,v]of Object.entries(u.measures))m[k]=(m[k]||0)+v;m.complete_units=list.filter(u=>u.linked).length;m.total_units=list.length;return m;}
+function amount(n,kind){const m=n.measures;return kind==='total'?m['total_'+metric]||0:kind==='linked'?m['complete_'+metric]||0:m['matched_'+metric]||0;}
+function entries(u){
+ if(metric==='code')return u.functions.map(f=>({kind:'function',name:f.display||f.name,symbol:f.name,address:f.address,owner:u,
+  measures:{total_code:f.size,matched_code:f.match===100?f.size:0,complete_code:u.linked?f.size:0,total_functions:1,matched_functions:f.match===100?1:0},match:f.match}));
+ return u.sections.filter(s=>s.kind!=='code').map(s=>({kind:'section',name:s.name+(s.kind==='bss'?' (zero-initialized)':''),address:s.address,owner:u,
+  measures:{total_data:s.size,matched_data:s.match===100?s.size:0,complete_data:u.linked?s.size:0},match:s.match}));
+}
+function keep(n){const t=amount(n,'total');if(!t)return false;const m=amount(n,'matched'),l=amount(n,'linked');
+ return filter==='all'||filter==='unmatched'&&m<t||filter==='unlinked'&&l<t||filter==='exact-unlinked'&&m===t&&l<t;}
+function hit(n){return !query||[n.name,n.symbol,n.source,n.owner&&n.owner.name,hex(n.address)].join(' ').toLowerCase().includes(query);}
+function scope(){const mod=$('module').value,cat=$('category').value;return units.filter(u=>(!mod||u.module===mod)&&(!cat||u.categories.includes(cat)));}
+function rows(){const list=selected?[selected]:scope(),out=[];
+ for(const u of list){if(selected||view==='entries'){out.push(...entries(u).filter(n=>keep(n)&&hit(n)));continue;}
+  if(keep(u)&&hit(u)){out.push(u);continue;}if(query)out.push(...entries(u).filter(n=>keep(n)&&hit(n)));}
+ return out;}
+function card(label,n,d,unit){const c=el('div',undefined,{class:'card'});c.append(el('strong',pct(n,d)),el('span',label),el('div',fmt(n)+' / '+fmt(d)+(unit?' '+unit:'')));return c;}
+function numbers(){const m=selected?selected.measures:sum(scope());$('numbers').replaceChildren(
+ card('Code matched',m.matched_code,m.total_code,'bytes'),card('Code linked',m.complete_code,m.total_code,'bytes'),
+ card('Data matched',m.matched_data,m.total_data,'bytes'),card('Data linked',m.complete_data,m.total_data,'bytes'),
+ card('Functions exact',m.matched_functions,m.total_functions),card('Objects linked',selected?(selected.linked?1:0):m.complete_units,selected?1:m.total_units));}
+function categories(){const box=$('categories');box.replaceChildren();const cats=R.summary.categories;if(!cats.length||selected)return;
+ box.append(el('h2','Categories'));const w=el('div',undefined,{class:'tablewrap'}),t=el('table'),h=el('tr');
+ for(const x of['Category','Code matched','Code linked','Data matched','Data linked','Functions exact'])h.append(el('th',x));t.append(h);
+ for(const c of cats){const m=c.measures,tr=el('tr');tr.append(el('td',c.name),el('td',pct(m.matched_code,m.total_code)),el('td',pct(m.complete_code,m.total_code)),
+  el('td',pct(m.matched_data,m.total_data)),el('td',pct(m.complete_data,m.total_data)),el('td',fmt(m.matched_functions)+' / '+fmt(m.total_functions)));t.append(tr);}
+ w.append(t);box.append(w);}
+function meter(n,kind){const td=el('td',pct(amount(n,kind),amount(n,'total'))),m=el('span',undefined,{class:'meter'+(kind==='linked'?' linked':'')}),f=el('span');
+ f.style.width=(amount(n,'total')?100*amount(n,kind)/amount(n,'total'):0)+'%';m.append(f);td.append(m,el('small',fmt(amount(n,kind))+' bytes'));return td;}
+function render(){
+ numbers();categories();
+ $('crumbs').replaceChildren();if(selected){const b=el('button',R.label);b.onclick=()=>{selected=null;page=0;render();};$('crumbs').append(b,el('span','/'),el('span',selected.name));}
+ const list=rows(),value=n=>sort==='address'?(n.address??Number.MAX_SAFE_INTEGER):sort==='remaining'?amount(n,'total')-amount(n,'matched'):sort==='total'?amount(n,'total'):amount(n,sort)/(amount(n,'total')||1);
+ list.sort((a,b)=>((sort==='name'?String(a.name).localeCompare(String(b.name)):value(a)-value(b))*(desc?-1:1))||((a.address??0)-(b.address??0)));
+ const pages=Math.max(1,Math.ceil(list.length/size));page=Math.min(page,pages-1);$('page').textContent=(page+1)+' / '+pages;$('prev').disabled=page===0;$('next').disabled=page+1===pages;
+ $('shown').textContent=fmt(list.length)+' rows · '+fmt(list.reduce((s,n)=>s+amount(n,'total'),0))+' bytes'+(query||filter!=='all'?' (filtered)':'');
+ const body=$('rows');body.replaceChildren();
+ for(const n of list.slice(page*size,(page+1)*size)){const tr=el('tr'),name=el('td'),b=el('button',n.name);
+  b.onclick=()=>{if(n.functions){selected=n;query='';$('search').value='';page=0;render();}};name.append(b);
+  if(n.source)name.append(el('small',n.source));else if(n.owner)name.append(el('small',n.owner.name+(n.match!==undefined&&n.match<100?' · '+n.match.toFixed(1)+'%':'')));
+  tr.append(name,el('td',hex(n.address)),el('td',fmt(amount(n,'total'))),meter(n,'matched'),meter(n,'linked'),el('td',fmt(amount(n,'total')-amount(n,'matched'))),
+   el('td',n.measures.total_functions?fmt(n.measures.matched_functions||0)+' / '+fmt(n.measures.total_functions):'—'));body.append(tr);}
+ $('view').disabled=!!selected;$('view').options[1].textContent=metric==='code'?'Functions':'Data sections';}
+function pick(i){R=D.reports[i];units=R.units;selected=null;page=0;
+ const mods=[...new Set(units.map(u=>u.module))].sort();$('module').replaceChildren(el('option','All modules',{value:''}),...mods.map(m=>el('option',m,{value:m})));
+ const cats=R.summary.categories;$('category').replaceChildren(el('option','All categories',{value:''}),...cats.map(c=>el('option',c.name,{value:c.id})));
+ $('category').disabled=!cats.length;render();}
+$('title').textContent=D.title;$('subtitle').textContent=D.subtitle||'';$('footer').textContent='Generated '+D.generated+' from objdiff report.json';
+D.reports.forEach((r,i)=>$('report').append(el('option',r.label,{value:i})));$('report').onchange=()=>pick(Number($('report').value));
+for(const id of['module','category'])$(id).onchange=()=>{selected=null;page=0;render();};
+for(const id of['metric','view','filter'])$(id).onchange=()=>{metric=$('metric').value;view=$('view').value;filter=$('filter').value;page=0;render();};
+$('search').oninput=()=>{query=$('search').value.trim().toLowerCase();page=0;render();};
+$('reset').onclick=()=>{for(const[id,v]of[['metric','code'],['view','units'],['filter','all'],['module',''],['category','']])$(id).value=v;metric='code';view='units';filter='all';query='';$('search').value='';selected=null;page=0;render();};
+$('prev').onclick=()=>{page--;render();};$('next').onclick=()=>{page++;render();};
+document.querySelectorAll('[data-sort]').forEach(b=>b.onclick=()=>{const k=b.dataset.sort;desc=sort===k?!desc:!['name','address'].includes(k);sort=k;page=0;
+ document.querySelectorAll('[data-sort]').forEach(x=>x.textContent=x.textContent.replace(/ [↑↓]$/,''));b.textContent+=' '+(desc?'↓':'↑');render();});
+if(D.reports.length)pick(0);
+</script></body></html>

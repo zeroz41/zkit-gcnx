@@ -47,7 +47,8 @@ OBJDUMP_NAMES = ("powerpc-eabi-objdump", "powerpc-linux-gnu-objdump", "powerpc-e
 
 def saved_objdump_path() -> Path:
     import os
-    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "gcn-zkit" / "objdump"
+    from .paths import config_home
+    return config_home() / "objdump"
 
 
 def _objdump(project: Project) -> str | None:
@@ -247,7 +248,7 @@ def _readable(project: Project, target: str, dol: Dol, address: int, width: int)
     bss_start, bss_size = dol.bss
     if bss_start <= address < bss_start + bss_size or (symbol and "bss" in symbol["section"]):
         raise ValueError(f"0x{address:08X}{where} is zero-initialized .bss: the executable has no bytes for it; "
-                         "its runtime value comes from code. `gcn-zkit xrefs` lists who writes it.")
+                         "its runtime value comes from code. `zkit xrefs` lists who writes it.")
     raise ValueError(f"0x{address:08X}+{width}{where} is not inside one section of the executable")
 
 

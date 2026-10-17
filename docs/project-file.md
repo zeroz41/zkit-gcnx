@@ -1,18 +1,18 @@
 # The project file
 
-`gcn-zkit init` writes one JSON file per decomp to `~/.config/gcn-zkit/projects/<id>.json` (Windows:
-`%USERPROFILE%\.config\gcn-zkit\projects`). You rarely need to touch it. Edit it to add your repo's rules, its finish
+`zkit init` writes one JSON file per decomp to `~/.config/zkit/projects/<id>.json` (Windows:
+`%USERPROFILE%\.config\zkit\projects`). You rarely need to touch it. Edit it to add your repo's rules, its finish
 steps, lint checks or a native port. Running `init` again refreshes what it detected and keeps your edits.
 
-gcn-zkit picks the project from the folder you are in, using the first match:
+zkit picks the project from the folder you are in, using the first match:
 
 1. `--project <file>`
 2. `$ZKIT_PROJECT`
 3. a `zkit.project.json` in this folder or a parent (to keep the file in the repo)
 4. a registered project whose repository, or a git worktree of it, contains this folder
-5. the default project (`gcn-zkit use <file>`)
+5. the default project (`zkit use <file>`)
 
-`gcn-zkit projects` lists them and marks the one in use. The session hook only speaks inside a registered repo.
+`zkit projects` lists them and marks the one in use. The session hook only speaks inside a registered repo.
 
 ## Minimal example
 
@@ -63,7 +63,7 @@ disassembly (`build/<GAMEID>/<module>/asm/`). DOL lookups therefore list REL cal
 | `rules` | Short rules shown in every brief. Keep them short; the repo's `AGENTS.md` stays the contract. |
 | `start`, `finish` | Commands shown in the brief. `finish` is the gate `zkit-finish` runs. |
 | `finish_sources` | `[{path, after, until}]` sections of docs that must list the same finish commands (`gate` reports drift). |
-| `checks` | Lint for `gcn-zkit check`: `source_globs`, `require_citation`, `citation_exempt`, `forbidden: [{pattern, paths, message}]`. |
+| `checks` | Lint for `zkit check`: `source_globs`, `require_citation`, `citation_exempt`, `forbidden: [{pattern, paths, message}]`. |
 | `locks`, `builders` | Build lock files and extra build-tool regexes that `wait` and `activity` watch. |
 | `gate_commands` | Extra regexes for your own tools, so `gate` can compare the finish steps your docs list. |
 | `router` | `{brief, lane_stats}`: JSON files your own work router writes (`{"next": {"lane", "commands"}}`); the brief shows its lane. |
@@ -75,7 +75,7 @@ disassembly (`build/<GAMEID>/<module>/asm/`). DOL lookups therefore list REL cal
 
 | Field | Meaning |
 | --- | --- |
-| `knowledge` | Folder of lesson notes (`*.md` with `title/applies/kind` front matter) for `gcn-zkit lessons`. |
+| `knowledge` | Folder of lesson notes (`*.md` with `title/applies/kind` front matter) for `zkit lessons`. |
 | `variants` | Named groups of sibling names for `reuse --variants`. |
 | `processes` | Extra program names (regexes) that `activity` reports, such as your emulator or test runner. |
 | `long_running` | Regexes for processes the brief warns about after 45 minutes. |
@@ -130,12 +130,12 @@ disassembly (`build/<GAMEID>/<module>/asm/`). DOL lookups therefore list REL cal
 `lookup --body` and `drift` leave them out.
 
 Keep a project file with your own rules, lessons and evals outside this repo (for example next to your decomp), and
-point `knowledge` at your lessons folder. `gcn-zkit setup <file>` registers it, indexes, and connects Claude Code and
-Codex (`gcn-zkit use <file>` only registers it).
+point `knowledge` at your lessons folder. `zkit setup <file>` registers it, indexes, and connects Claude Code and
+Codex (`zkit use <file>` only registers it).
 
 ## Native-port architecture and inventory audits
 
-`gcn-zkit architecture native src/simulation` checks a selected system; omit paths to check changed source
+`zkit architecture native src/simulation` checks a selected system; omit paths to check changed source
 files or use `--all` for configured roots. It checks literal C/C++ includes, including conditional branches,
 and reports explicit exceptions, unresolved headers and macro includes. It is not a compiler or semantic
 architecture proof. It does not apply native design refactors to matching decomp.
@@ -155,7 +155,7 @@ architecture proof. It does not apply native design refactors to matching decomp
 }
 ```
 
-`gcn-zkit coverage native effects` compares identities read from current project files at every call.
+`zkit coverage native effects` compares identities read from current project files at every call.
 Reference and stage inventories support `regex` with a named `id` capture, or `json` selecting an array
 with `pointer` and each identity with `id_pointer` (empty pointers select the whole value). Files may be
 repository-relative paths or globs; optional `repo` selects another configured repository. String and

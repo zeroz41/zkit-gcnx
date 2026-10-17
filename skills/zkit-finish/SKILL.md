@@ -1,6 +1,6 @@
 ---
 name: zkit-finish
-description: End a session on a gcn-zkit project correctly - run the repo's finish gate, lint the diff, commit as the repo requires, and leave a handoff note. Use before stopping, when the user says wrap up, or when usage/time is about to run out.
+description: End a session on a zkit project correctly - run the repo's finish gate, lint the diff, commit as the repo requires, and leave a handoff note. Use before stopping, when the user says wrap up, or when usage/time is about to run out.
 ---
 
 # Finish a session

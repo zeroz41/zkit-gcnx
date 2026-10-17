@@ -1,5 +1,5 @@
 {
-  "name": "gcn-zkit",
+  "name": "zkit",
   "version": "0.8.1",
   "description": "For agents decompiling GameCube games with decomp-toolkit and porting them to PC with matching behavior: session brief, lookup with callers across DOL and RELs, original asm/data, port planning, behavior-drift checks, test impact, handoffs.",
   "author": {
@@ -9,15 +9,15 @@
   "skills": "./skills/",
   "hooks": "./hooks/codex-hooks.json",
   "mcpServers": {
-    "gcn-zkit": {
-      "command": "gcn-zkit",
+    "zkit": {
+      "command": "zkit",
       "args": [
         "serve"
       ]
     }
   },
   "interface": {
-    "displayName": "gcn-zkit",
+    "displayName": "zkit",
     "shortDescription": "GameCube decomp and port toolkit",
     "longDescription": "Local, read-only index of a decomp-toolkit GameCube decomp, its original executable and RELs, and an optional PC port that must match it. Session brief, lookup, disassembly, xrefs, port planning, drift and constant checks, test impact and handoffs.",
     "developerName": "zeroz",

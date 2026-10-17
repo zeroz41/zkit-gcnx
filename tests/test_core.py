@@ -1,3 +1,4 @@
+import support  # noqa: F401  (isolates config, cache and state)
 import copy
 import hashlib
 import json
@@ -7,17 +8,17 @@ import subprocess
 import tempfile
 import unittest
 
-from gcn_zkit.evidence import address, lookup, read_document, report_status, search
-from gcn_zkit.project import Project, check_snapshot, snapshot
-from gcn_zkit.recipes import check_recipe
-from gcn_zkit.workflows import command_plan, doctor
+from zkit.evidence import address, lookup, read_document, report_status, search
+from zkit.project import Project, check_snapshot, snapshot
+from zkit.recipes import check_recipe
+from zkit.workflows import command_plan, doctor
 
 
 class ProjectTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        from gcn_zkit.index import close_connections
+        from zkit.index import close_connections
         self.addCleanup(close_connections)  # runs first: Windows cannot delete an open database
         self.base = Path(self.temp.name)
         self.root = self.base / "game"
