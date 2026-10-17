@@ -151,6 +151,12 @@ def build_parser() -> argparse.ArgumentParser:
                              "differing words with both disassemblies")
     c.add_argument("query", help="address, name, or a unit name from objdiff.json")
     c.add_argument("--limit", type=int, default=24)
+    c = add("try", help="Compile a candidate (outside the tree) with its unit's exact command and compare the "
+                        "function with the original; records the attempt (cap 4 per address)")
+    c.add_argument("query", help="the function's address or name")
+    c.add_argument("candidate", type=Path, help="source file: the function and the includes it needs, or a unit copy")
+    c.add_argument("--force", action="store_true", help="past the attempt cap (say why in your notes)")
+    c.add_argument("--keep", type=Path, help="also copy the compiled object here")
     c = add("objects", help="Prove a change kept the code: --save copies every built object, --compare (after the "
                             "build) checks each against its copy modulo intended renames")
     c.add_argument("--save", action="store_true")
@@ -515,6 +521,10 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
     if command == "compiled":
         data = bridge.compiled(project, args.query, target, args.limit)
         return data, render.compiled(data)
+    if command == "try":
+        from .candidate import check
+        data = check(project, target, args.query, args.candidate, args.force, args.keep)
+        return data, render.candidate(data)
     if command == "objects":
         from . import objects
         if args.save:

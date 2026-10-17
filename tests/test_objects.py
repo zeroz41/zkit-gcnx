@@ -70,3 +70,23 @@ class ObjectTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CandidateCommandTests(unittest.TestCase):
+    def test_restage_mwcc_and_clang(self):
+        from zkit.candidate import _restage
+        root = Path("/repo")
+        mwcc = ["build/tools/wibo", "build/compilers/GC/2.6/mwcceppc.exe", "-O4,p", "-i", "include", "-MMD",
+                "-c", "src/game/a.cpp", "-o", "build/G/src/game"]
+        argv, expected = _restage(mwcc, "src/game/a.cpp", root / "build/t/a.cpp", root / "build/t",
+                                  root / "src/game", root)
+        self.assertEqual(argv[:4], ["build/tools/wibo", "build/compilers/GC/2.6/mwcceppc.exe", "-i", "src/game"])
+        self.assertIn("build/t/a.cpp", argv)
+        self.assertEqual(argv[argv.index("-o") + 1], "build/t")
+        self.assertNotIn("-MMD", argv)
+        clang = ["clang++", "-O3", "-MD", "-MF", "a.d", "-c", "/repo/src/a.cpp", "-o", "obj/a.o"]
+        argv, expected = _restage(clang, "/repo/src/a.cpp", root / "build/t/a.cpp", root / "build/t",
+                                  root / "src", root)
+        self.assertEqual(argv[:2], ["clang++", "-Isrc"])
+        self.assertEqual(argv[argv.index("-o") + 1], "build/t/a.o")
+        self.assertNotIn("-MF", argv)

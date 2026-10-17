@@ -884,6 +884,22 @@ def compiled(data: dict) -> str:
     return "\n".join(out)
 
 
+def candidate(data: dict) -> str:
+    head = f"{data['address']} {data['function']} — attempt {data['attempt']}/{data['cap']}: "
+    if not data.get("compiled"):
+        return head + "does not compile\n" + data.get("errors", "")
+    if data.get("exact"):
+        out = [head + "IDENTICAL to the original" + ("" if data.get("bankable") else " (not bankable yet)")]
+    else:
+        body = compiled({**data, "unit": data.get("unit")})
+        out = [head + body.split(": ", 1)[1].split("\n", 1)[0]] + body.split("\n")[1:]
+    for item in data.get("debt", []):
+        out.append(f"  debt: {item}")
+    if data.get("bank_note"):
+        out.append(f"  {data['bank_note']}")
+    return "\n".join(out)
+
+
 def objects_compare(data: dict) -> str:
     out = [f"objects vs saved copy {data['label']} ({data['saved']['time']}): {data['identical']} identical, "
            f"{data['changed_count']} changed, {len(data['new'])} new, {len(data['gone'])} gone"
