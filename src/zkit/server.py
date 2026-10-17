@@ -381,6 +381,15 @@ def create_server(project: Project) -> FastMCP:
         data = bridge.batch(wanted, one)
         return out(data, render.data_rows(data), response_format)
 
+    @tool(enabled=bool(project.config.get("targets")))
+    def zkit_compiled(query: str, limit: int = 24, repo: str | None = None, response_format: Format = "text") -> str:
+        """A function compiled vs the original (from the unit's objects in objdiff.json): identical, or each
+        differing word with relocations and both disassemblies side by side; a unit name lists every function of the
+        unit. Exact checks from the objects the build already wrote; objdiff's report stays the match authority."""
+        p = decomp(repo)
+        data = bridge.compiled(p, query, target(p), max(1, min(limit, 200)))
+        return out(data, render.compiled(data), response_format)
+
     @tool()
     def zkit_refs(query: str, repo: str | None = None, limit: int = 60, response_format: Format = "text") -> str:
         """Where an original function or global is defined, declared and used in the source of every configured

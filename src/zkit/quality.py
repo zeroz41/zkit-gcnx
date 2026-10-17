@@ -168,6 +168,7 @@ def _revision_files(root: Path, revision: str, roots: list[str], exclude: list[r
         process.stdout.read(1)
         yield rel, data.decode("utf-8", errors="replace")
     feeder.join()
+    process.stdout.close()
     process.wait()
 
 
