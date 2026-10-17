@@ -381,18 +381,31 @@ def agent_identity() -> str:
     return "agent"
 
 
+REPLACE_WITHIN_S = 1800
+
+
 def write_handoff(project: Project, repo: str, text: str, author: str | None = None) -> dict:
-    """Append a short note for the next session. The repo state is captured automatically."""
+    """Leave a short note for the next session; the repo state is captured automatically. A session's newer
+    note within half an hour replaces its previous one, so checkpoints do not bury the real handoff."""
     if not text.strip() or len(text) > 4000:
         raise ValueError(f"Handoff text must be 1..4000 characters (got {len(text)}); keep the next command, "
                          "commit ids and blockers, and point at a file for the rest")
     state = repository(project, repo, dirty_limit=30)
-    row = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"), "repo": repo,
-           "author": author or agent_identity(), "text": text.strip(),
+    who = author or agent_identity()
+    now = datetime.now(timezone.utc)
+    row = {"time": now.isoformat(timespec="seconds"), "repo": repo, "author": who, "text": text.strip(),
            "head": state.get("head"), "branch": state.get("branch"), "worktree": project.worktree(repo),
            "dirty": [d["path"] for d in state.get("dirty", [])]}
-    with (state_dir(project) / "handoff.jsonl").open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps(row) + "\n")
+    path = state_dir(project) / "handoff.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] \
+        if path.is_file() else []
+    last = next((r for r in reversed(rows) if r.get("repo") == repo), None)
+    if last and last.get("author") == who and who != "agent" and \
+            (now - datetime.fromisoformat(last["time"])).total_seconds() < REPLACE_WITHIN_S:
+        rows.remove(last)
+        row["replaced"] = last["time"]
+    rows.append(row)
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows[-500:]), encoding="utf-8")
     return row
 
 

@@ -16,6 +16,17 @@ def _fn(info: dict, native: bool = True) -> str:
     return f"{info['address']} {label} [{status_word(info)}]{extra}"
 
 
+def _excerpt(text: str, limit: int, repo: str | None = None) -> str:
+    """A note shortened at a sentence or word boundary, saying where the full text is."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    stop = max(cut.rfind(". "), cut.rfind("; "))
+    cut = cut[:stop + 1] if stop > limit // 2 else cut[:cut.rfind(" ")]
+    return cut + f" … (full note: `zkit handoff {repo or '<repo>'}`)"
+
+
 def _process_summary(procs: list[dict]) -> list[str]:
     agents = [p for p in procs if re.split(r"[/\\]", p["cmd"].split()[0])[-1].removesuffix(".exe") in ("claude", "codex")]
     tools = [p for p in procs if p not in agents]
@@ -64,7 +75,7 @@ def brief(data: dict, compact: bool = False) -> str:
         for branch in repo.get("unmerged_branches", [])[:5]:
             out.append(f"- branch {branch['branch']} +{branch['unmerged_commits']} unmerged ({branch['last']})")
         for note in repo.get("handoffs", []):
-            out.append(f"- handoff {note['time']} ({note['author']}): {note['text'][:400]}")
+            out.append(f"- handoff {note['time']} ({note['author']}): {_excerpt(note['text'], 700, name)}")
         nxt = repo.get("next")
         if nxt:
             flag = " STALE (report newer; rerun the repo's router)" if nxt["stale_vs_report"] else ""
@@ -154,7 +165,7 @@ def _brief_compact(data: dict) -> str:
             out.append(f"- {len(repo['unmerged_branches'])} unmerged branch(es): " + ", ".join(
                 b["branch"] for b in repo["unmerged_branches"][:3]))
         for note in repo.get("handoffs", [])[:1]:
-            out.append(f"- last handoff {note['time']} ({note['author']}): {note['text'][:300]}")
+            out.append(f"- last handoff {note['time']} ({note['author']}): {_excerpt(note['text'], 500, name)}")
         nxt = repo.get("next")
         if nxt:
             own = (repo.get("lane_yield_last3") or {}).get(nxt["lane"])
@@ -180,8 +191,12 @@ def _brief_compact(data: dict) -> str:
         t = demand["totals"]
         out.append(f"\n## Port waiting on decomp — {t.get('cited_functions')} cited, {t.get('exact')} exact, "
                    f"{t.get('provisional_name')} provisional names (`zkit demand`)")
-        for row in demand["top"][:3]:
-            out.append(f"- {row['address']} {row['name']} needs {'+'.join(row['need'])} ({row['native_files']} native files)")
+        if demand.get("unchanged_since"):
+            out.append(f"- the top of the list has not changed since {demand['unchanged_since']} "
+                       f"({', '.join(r['address'] for r in demand['top'][:3])}); `zkit demand --offset 3` for others")
+        else:
+            for row in demand["top"][:3]:
+                out.append(f"- {row['address']} {row['name']} needs {'+'.join(row['need'])} ({row['native_files']} native files)")
     return "\n".join(out)
 
 
@@ -244,6 +259,11 @@ def lookup(data: dict) -> str:
     age = f" (report {data['report_age_h']}h old)" if data.get("report_age_h") is not None else ""
     out = [f"{_fn(f)} size 0x{f['size']:X}" + (f" (+0x{data['offset']:X})" if data.get("offset") else "") + age,
            f"  unit {f.get('unit')}  ->  decomp:{where}"]
+    stale = data.get("report_stale") or {}
+    if stale.get("sources_newer"):
+        out.insert(0, f"STALE: {stale['sources_newer']} source file(s) changed after the report was written "
+                      f"({stale['age_h']}h ago, e.g. {stale['examples'][0]}); match and link state may be out of date "
+                      "until the decomp is rebuilt")
     callers = data["callers"]
     shown = callers["rows"][:20]
     out.append(f"callers ({callers['count']}" + (f", showing {len(shown)}" if callers["count"] > len(shown) else "") + "):")
@@ -393,7 +413,7 @@ def activity(data: dict) -> str:
                           f"{len(w.get('modified', []))} modified + {len(w.get('untracked', []))} new "
                           + ", ".join((w.get("modified", []) + w.get("untracked", []))[:4])))
     for note in data["handoffs"]:
-        out.append(f"handoff {note['time']} [{note['repo']}] {note['author']}: {note['text'][:300]}")
+        out.append(f"handoff {note['time']} [{note['repo']}] {note['author']}: {_excerpt(note['text'], 300, note['repo'])}")
     return "\n".join(out)
 
 
@@ -438,6 +458,8 @@ def gate(data: dict) -> str:
             out.append("  leaves behind: " + "; ".join(tree["problems"][:8]))
         elif tree:
             out.append("  working tree clean")
+        for proc in review.get("processes", [])[:8]:
+            out.append(f"  still running since this session started: pid {proc['pid']} ({proc['age_min']}m) {proc['cmd']}")
     return "\n".join(out)
 
 
@@ -824,6 +846,18 @@ def _bytes(part: int, whole: int) -> str:
     return f"{100.0 * part / whole:.2f}% ({part:,}/{whole:,})" if whole else "0% (0/0)"
 
 
+def refs(data: dict) -> str:
+    f = data.get("function")
+    head = f"refs for {data['query']}" + (f" ({_fn(f)})" if f else "") + f": {data['total']} line(s); spellings " + \
+        ", ".join(data["spellings"])
+    out = [head]
+    for row in data["rows"]:
+        out.append(f"  {row['kind']:<11} {row['ref']}  {row['text'][:150]}")
+    if data["total"] > len(data["rows"]):
+        out.append(f"  ... {data['total'] - len(data['rows'])} more (--limit)")
+    return "\n".join(out)
+
+
 def progress(data: dict) -> str:
     m = data["overall"]
     out = [f"progress {data.get('target', '')} (report {data.get('report_age_h')}h old; objdiff counters)",
@@ -918,6 +952,9 @@ def hygiene(data: dict) -> str:
                 out.append(f"  {f['severity']:<7} {kind:<16} {f['path']}: {f['message']}")
             if len(rows) > 6:
                 out.append(f"  ... {len(rows) - 6} more {kind}")
+    for row in (files or {}).get("history", []):
+        out.append(f"  history  {row['path']} is in {row['commits']} commit(s) since {row['first']}: it stays in every "
+                   "clone; keep agent files local (.git/info/exclude)")
     tree = data.get("tree")
     if tree:
         out.append("working tree: " + ("clean" if not tree["problems"] else "; ".join(tree["problems"])))

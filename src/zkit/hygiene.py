@@ -173,6 +173,29 @@ def _read(root: Path, rel: str, limit: int = 1_500_000) -> str:
         return ""
 
 
+def _git_ok(root: Path, *args: str) -> str:
+    try:
+        return _git(root, *args)
+    except ValueError:
+        return ""
+
+
+def history(project: Project, repo: str) -> list[dict]:
+    """Agent-only files that were ever committed (they stay in every clone even after deletion)."""
+    rules = policy(project, repo)
+    if rules["agent_docs"] != "forbid":
+        return []
+    root = project.root(repo)
+    names = [*AGENT_DOCS, *(d.rstrip("/") for d in AGENT_DIRS)]
+    out = []
+    for name in names:
+        listing = _git_ok(root, "log", "--all", "--format=%h", "--", name, f"**/{name}")
+        commits = [c for c in listing.split() if c]
+        if commits:
+            out.append({"path": name, "commits": len(commits), "first": commits[-1]})
+    return out
+
+
 def files(project: Project, repo: str) -> dict[str, Any]:
     """Tracked content that the rules say should not be committed."""
     rules = policy(project, repo)
@@ -265,7 +288,15 @@ def tree(project: Project, repo: str) -> dict[str, Any]:
     """What a finished session must not leave: uncommitted files, stashes, unmerged branches, stray worktrees."""
     from .activity import repository
     state = repository(project, repo, dirty_limit=40)
+    root = project.root(repo)
     problems = []
+    main = project.config["repositories"][repo].get("main_branch") or next(
+        (b for b in ("main", "master") if _git_ok(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{b}")), None)
+    if main:
+        merged = [b.strip().lstrip("*+ ").strip() for b in _git_ok(root, "branch", "--merged", main).splitlines()]
+        for branch in merged:
+            if branch and branch not in (main, state.get("branch")) and not branch.startswith("("):
+                problems.append(f"branch {branch} is merged into {main} but still exists (git branch -d {branch})")
     if state.get("dirty_count"):
         problems.append(f"{state['dirty_count']} uncommitted or untracked file(s)")
     if state.get("stashes"):
@@ -286,6 +317,7 @@ def audit(project: Project, repo: str, revisions: str | None = None, limit: int 
         out["commits"] = commits(project, repo, revisions, limit)
     if "files" in parts:
         out["files"] = files(project, repo)
+        out["files"]["history"] = history(project, repo)
     if "tree" in parts:
         out["tree"] = tree(project, repo)
     errors = len(out.get("commits", {}).get("problems", [])) + \
