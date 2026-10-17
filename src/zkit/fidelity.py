@@ -32,7 +32,11 @@ from .index import address_text, connect, containing, is_dol_unit, refresh
 from .project import Project, under as _under
 
 LITERAL = re.compile(r"(?<![\w.])(\d+\.\d*(?:[eE][-+]?\d+)?|\d*\.\d+(?:[eE][-+]?\d+)?|\d+[eE][-+]?\d+)[fF]?(?![\w.])")
-ADDRESS = re.compile(r"(?<![0-9A-Fa-f])(?:0x)?(8[01][0-9A-Fa-f]{6})(?![0-9A-Fa-f])")
+def _cited(text: str) -> list[int]:
+    """Original addresses cited in text, for the active platform."""
+    from .index import platform
+    current = platform()
+    return [current.cite_value(a) for a in re.findall(current.cite_pattern(), text)]
 DEFINITION = re.compile(r"^[A-Za-z_][\w:<>,\s\*&~]*\([^;]*\)\s*(?:const\s*)?(?:noexcept\s*)?\{?\s*$")
 TRIVIAL = {0.0, 1.0, 0.5, 2.0, 0.25, 10.0, 100.0}
 
@@ -175,7 +179,7 @@ def constant_audit(project: Project, repo: str, paths: list[str] | None = None, 
         inside = {n for lo, _, end in blocks for n in range(lo, end + 1)}
         for lo, _, end in blocks + list(_constant_blocks(lines, inside)):
             block = lines[lo:end + 1]
-            cited = [int(a, 16) for a in ADDRESS.findall("\n".join(block))]
+            cited = _cited("\n".join(block))
             pool: set[float] = set()
             code_cites = 0
             for address in cited:

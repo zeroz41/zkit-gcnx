@@ -22,7 +22,7 @@ class DecompileTests(unittest.TestCase):
         language.write_text("Gekko_Broadway", encoding="utf-8")
         calls = []
 
-        def worker(info, dol, sda, boundaries, addresses, threads):
+        def worker(info, dol, sda, boundaries, addresses, threads, platform="gamecube", base=0):
             calls.append(list(addresses))
             self.assertEqual(sda, {2: 0x80003100, 13: 0x80003100})  # decoded from __init_registers
             self.assertIn(TEXT + 0x10, dict(boundaries))
@@ -31,7 +31,7 @@ class DecompileTests(unittest.TestCase):
                                            f"fRam80003106 = 2; DAT_80003100 = 3; f(0x80003104, 0x80000000); }}"} for a in addresses], {}
 
         info = {"install": "/ghidra", "version": "12.1.2 PUBLIC", "language": str(language), "python": "python"}
-        return calls, mock.patch.multiple("zkit.decompile", status=lambda: info, _run_worker=worker)
+        return calls, mock.patch.multiple("zkit.decompile", status=lambda platform="gamecube": info, _run_worker=worker)
 
     def test_cache_names_and_boundaries(self):
         from zkit.decompile import decompile
@@ -81,7 +81,7 @@ class DecompileTests(unittest.TestCase):
             module.decompile(self.project, "t", [TEXT])
         language = Path(self.temp.name) / "lang" / "gekko.ldefs"
         info = {"install": "/ghidra", "version": "12.1.2 PUBLIC", "language": str(language), "python": "python"}
-        with mock.patch.multiple(module, status=lambda: info, _memory_mb=lambda: (65536, 7000), _agent_mb=lambda: 0):
+        with mock.patch.multiple(module, status=lambda platform="gamecube": info, _memory_mb=lambda: (65536, 7000), _agent_mb=lambda: 0):
             self.assertTrue(module.decompile(self.project, "t", [TEXT])["results"][0]["cached"])
             with self.assertRaisesRegex(ValueError, "Not starting Ghidra: 7000 MB of 65536 MB available"):
                 module.decompile(self.project, "t", [TEXT + 0x10])

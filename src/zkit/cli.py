@@ -51,13 +51,6 @@ def find_manifest(explicit: Path | None, strict: bool = False) -> Path | None:
     raise ValueError(NO_PROJECT)
 
 
-def address_arg(value: str) -> int:
-    text = value.lower().removeprefix("0x")
-    if len(text) != 8 or any(c not in "0123456789abcdef" for c in text):
-        raise argparse.ArgumentTypeError("use an 8-digit hex address, e.g. 0x800F780C or 800F780C")
-    return int(text, 16)
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="zkit", description="Cross-repo evidence for decomp + native-port work")
     from . import __version__
@@ -412,7 +405,8 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         project = Project.load(find_manifest(args.project))
     from . import bridge, inspect_dol, session
     from .activity import activity, write_handoff
-    from .index import refresh
+    from .index import refresh, use_platform
+    use_platform(project)
 
     target = bridge.default_target(project, args.target) if project.config.get("targets") else None
     command = "check-recipe" if args.command == "recipe-preflight" else args.command

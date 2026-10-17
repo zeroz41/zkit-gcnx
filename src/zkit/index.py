@@ -32,7 +32,8 @@ import time
 from pathlib import Path
 from typing import Iterable, Iterator
 
-from .gc import Dol, asm_functions, asm_references, direct_calls, read_symbols, track_addresses
+from .gc import asm_functions, asm_references, read_symbols
+from .platform import GameCube, Platform, for_target
 from .project import Project
 
 SCHEMA = 7
@@ -43,16 +44,36 @@ MAX_FILE = 2 * 1024 * 1024
 WINDOW = 6
 def _ttl() -> float:
     return float(os.environ.get("ZKIT_REFRESH_TTL", "3"))
-IMAGE = (0x80000000, 0x81800000)
-# GameCube main RAM. Repositories may override with "address_pattern".
-# Hex-delimited, so glued forms such as Original801977D4 or Foo_80011824 count.
-DEFAULT_ADDRESS = r"(?<![0-9A-Fa-f])(?:0x)?(8[01][0-9A-Fa-f]{6})(?![0-9A-Fa-f])"
-DEFAULT_PROVISIONAL = r"^(fn|FUN|func|sub|lbl|text)_[0-9A-Fa-f]{8}$|__sub_[0-9A-Fa-f]{8}$|^zz_|^@"
+# Cited addresses follow the platform (GameCube main RAM 8[01]xxxxxx, Switch 71xxxxxxxx); repositories may override
+# with "address_pattern". Hex-delimited, so glued forms such as Original801977D4 or Foo_80011824 count.
+DEFAULT_PROVISIONAL = r"^(fn|FUN|func|sub|lbl|text)_[0-9A-Fa-f]{8,16}$|__sub_[0-9A-Fa-f]{8,16}$|^zz_|^@"
 # REL modules have no fixed load address. Their functions are keyed (module_id << 32) | module-relative address,
 # so DOL addresses (module 0) keep their plain values and every module gets its own range.
 MODULE_SHIFT = 32
 MODULE_ADDRESS = re.compile(r"^([A-Za-z_][\w.-]*?)[+:](?:0x)?([0-9A-Fa-f]{1,8})$")
 _MODULE_NAMES: dict[int, str] = {}
+# The platform of the project this process is answering for; address text and parsing follow it.
+_PLATFORM: Platform = GameCube()
+
+
+def use_platform(project: Project) -> Platform:
+    """Make the project's (first target's) platform the one addresses are written and read in."""
+    global _PLATFORM
+    targets = list(project.config.get("targets", {}).values())
+    _PLATFORM = for_target(targets[0]) if targets else GameCube()
+    return _PLATFORM
+
+
+def platform() -> Platform:
+    return _PLATFORM
+
+
+def parse_address(text: str) -> int | None:
+    """An address as written (0x80012345, 80012345, 0x7100123456, mymodule+0x1D0) -> its key, or None."""
+    keyed = module_address(text)
+    if keyed is not None:
+        return keyed
+    return _PLATFORM.parse(text)
 
 
 def is_dol_unit(meta: dict, module: str | None) -> bool:
@@ -63,9 +84,9 @@ def is_dol_unit(meta: dict, module: str | None) -> bool:
 
 
 def address_text(value: int) -> str:
-    """0x80012345 for the DOL, mymodule+0x124 for a REL function."""
+    """0x80012345 for the DOL, mymodule+0x124 for a REL function, 0x7100123456 on Switch."""
     if value < 1 << MODULE_SHIFT:
-        return f"0x{value:08X}"
+        return _PLATFORM.text(value)
     module = value >> MODULE_SHIFT
     return f"{_MODULE_NAMES.get(module, f'module{module}')}+0x{value & 0xFFFFFFFF:X}"
 
@@ -148,6 +169,7 @@ TABLES = ("functions", "calls", "cites", "mentions", "lines", "files", "meta", "
 
 def connect(project: Project) -> sqlite3.Connection:
     """One connection per cache file, process and thread (the MCP server answers calls in threads)."""
+    use_platform(project)
     path = cache_path(project)
     key = (str(path), os.getpid(), threading.get_ident())
     if key in _CONNECTIONS:
@@ -268,10 +290,59 @@ def _target_file(project: Project, target: dict, field: str) -> Path | None:
 
 
 def _function_source(project: Project, target: dict) -> tuple[Path | None, Path | None, Path | None]:
+    """Where function boundaries and names come from, best first: the objdiff report, a function list (dtk
+    symbols.txt, or a CSV such as nx-decomp-tools'), or the original executable itself (its symbols, or its
+    unwind table when stripped)."""
     report = _target_file(project, target, "report")
-    symbols = _target_file(project, target, "symbols")
-    source = report if report and report.is_file() else symbols if symbols and symbols.is_file() else None
-    return source, report, symbols
+    symbols = _target_file(project, target, "symbols") or _target_file(project, target, "functions")
+    original = _target_file(project, target, "original")
+    for candidate in (report, symbols):
+        if candidate and candidate.is_file():
+            return candidate, report, symbols
+    if original and original.is_file() and for_target(target).name == "switch":
+        return original, report, symbols
+    return None, report, symbols
+
+
+def _functions_csv(path: Path, target: str, platform: Platform, pattern: re.Pattern) -> list[tuple]:
+    """A function list in CSV: address, then (optionally) status, size and name columns, as nx-decomp-tools
+    writes (`Address,Quality,Size,Name`). Rows without a size or name are skipped."""
+    import csv
+    rows = []
+    with path.open(encoding="utf-8", errors="replace", newline="") as stream:
+        reader = csv.reader(stream)
+        header = next(reader, [])
+        columns = {name.strip().lower(): index for index, name in enumerate(header)}
+        if "address" not in columns:
+            stream.seek(0)
+            reader = csv.reader(stream)
+            columns = {"address": 0, "quality": 1, "size": 2, "name": 3}
+        for row in reader:
+            try:
+                address = platform.parse(row[columns["address"]])
+                size = int(row[columns.get("size", 2)], 0)
+            except (IndexError, ValueError, TypeError):
+                continue
+            if address is None or not size:
+                continue
+            fname = row[columns["name"]].strip() if columns.get("name") is not None and len(row) > columns["name"] else ""
+            fname = fname or f"fn_{platform.text(address)[2:]}"
+            quality = row[columns["quality"]].strip() if columns.get("quality") is not None and len(row) > columns["quality"] else ""
+            match = {"O": 100.0, "m": 99.0, "M": 50.0}.get(quality)
+            rows.append((target, address, size, fname, None, match, None, None, 0, int(bool(pattern.search(fname)))))
+    return rows
+
+
+def _functions_from_image(path: Path, target: str, platform: Platform, pattern: re.Pattern) -> list[tuple]:
+    """Boundaries from the executable: its symbols where it has them, else the unwind table (every function
+    clang compiled), named fn_<address> until a decomp names them."""
+    image = platform.open(path)
+    rows = []
+    starts = dict(image.functions()) if hasattr(image, "functions") else {}
+    for start, size in sorted(starts.items()):
+        fname = image.symbols.get(start) or f"fn_{platform.text(start)[2:]}"
+        rows.append((target, start, size, fname, None, None, None, None, 0, int(bool(pattern.search(fname)))))
+    return rows
 
 
 def _functions_changed(project: Project, db: sqlite3.Connection, name: str, target: dict) -> bool:
@@ -288,8 +359,11 @@ def _load_functions(project: Project, db: sqlite3.Connection, name: str, target:
     if _meta(db, f"functions:{name}") == stamp:
         return False
     pattern = provisional_pattern(project, name)
+    platform = for_target(target)
     rows = []
     modules: dict[int, str] = {}
+    if source is None:
+        return False
     if source == report:
         try:
             data = json.loads(report.read_bytes())
@@ -310,10 +384,17 @@ def _load_functions(project: Project, db: sqlite3.Connection, name: str, target:
                 if info.get("virtual_address") is None:
                     continue
                 fname = function["name"]
-                rows.append((name, base + int(info["virtual_address"]), int(function.get("size", 0)), fname,
+                value = int(info["virtual_address"])
+                if not base and platform.base and value >= platform.base:
+                    value -= platform.base
+                rows.append((name, base + value, int(function.get("size", 0)), fname,
                              info.get("demangled_name") or cw_demangle(fname), function.get("fuzzy_match_percent"),
                              unit["name"], meta.get("source_path"), int(bool(meta.get("complete"))),
                              int(bool(pattern.search(fname)))))
+    elif source.suffix.lower() == ".csv":
+        rows = _functions_csv(source, name, platform, pattern)
+    elif source == _target_file(project, target, "original"):
+        rows = _functions_from_image(source, name, platform, pattern)
     else:
         best: dict[int, object] = {}
         for symbol in read_symbols(symbols):
@@ -325,7 +406,9 @@ def _load_functions(project: Project, db: sqlite3.Connection, name: str, target:
     db.execute("DELETE FROM functions WHERE target=?", (name,))
     db.executemany("INSERT OR REPLACE INTO functions VALUES(?,?,?,?,?,?,?,?,?,?)", rows)
     _set_meta(db, f"functions:{name}", stamp)
-    _set_meta(db, f"functions_source:{name}", "objdiff-report" if source == report else "symbols.txt")
+    _set_meta(db, f"functions_source:{name}", "objdiff-report" if source == report else
+              "functions-csv" if source.suffix.lower() == ".csv" else
+              "symbols.txt" if source == symbols else "original executable")
     _set_meta(db, f"functions_loaded:{name}", str(time.time()))
     _set_meta(db, f"modules:{name}", json.dumps(modules))
     _MODULE_NAMES.update(modules)
@@ -348,23 +431,22 @@ def _load_calls(project: Project, db: sqlite3.Connection, name: str, target: dic
     if stamp is None or _meta(db, f"calls:{name}") == stamp:
         return
     original = _target_file(project, target, "original")
+    platform = for_target(target)
     try:
-        dol = Dol.load(original)
+        image = platform.open(original)
     except ValueError:
         return
-    from .inspect_dol import sda_bases
-    sda = sda_bases(project, name, dol)
+    context = {}
+    if platform.name == "gamecube":
+        from .inspect_dol import sda_bases
+        context["sda"] = sda_bases(project, name, image)
     calls, xrefs = [], []
     functions = db.execute("SELECT address, size FROM functions WHERE target=? AND address<?",
                            (name, 1 << MODULE_SHIFT)).fetchall()
     for address, size in functions:
-        calls.extend((name, address, site, callee) for site, callee in direct_calls(dol, address, size))
-        try:
-            words = dol.words(address, size)
-        except ValueError:
-            continue
-        for pc, (value, kind) in track_addresses(words, address, sda).items():
-            if IMAGE[0] <= value < IMAGE[1] and not address <= value < address + size:
+        calls.extend((name, address, site, callee) for site, callee in platform.calls(image, address, size))
+        for pc, value, kind in platform.addresses(image, address, size, context):
+            if platform.in_image(image, value) and not address <= value < address + size:
                 xrefs.append((name, address, pc, value, kind))
     db.execute("DELETE FROM calls WHERE target=? AND caller<?", (name, 1 << MODULE_SHIFT))
     db.executemany("INSERT INTO calls VALUES(?,?,?,?)", calls)
@@ -372,14 +454,7 @@ def _load_calls(project: Project, db: sqlite3.Connection, name: str, target: dic
     db.executemany("INSERT INTO xrefs VALUES(?,?,?,?,?)", xrefs)
     # Pointer-sized words in data sections that point into the image: vtable slots, callback and
     # jump tables, pointers to strings and objects.
-    refs = []
-    for section in dol.sections:
-        if section.kind != "data":
-            continue
-        raw = dol.raw[section.offset:section.offset + section.size - section.size % 4]
-        for index, word in enumerate(struct.unpack(f">{len(raw) // 4}I", raw)):
-            if IMAGE[0] <= word < IMAGE[1]:
-                refs.append((name, word, section.address + index * 4))
+    refs = [(name, pointee, holder) for holder, pointee in platform.data_pointers(image)]
     db.execute("DELETE FROM refs WHERE target=?", (name,))
     db.executemany("INSERT INTO refs VALUES(?,?,?)", refs)
     _set_meta(db, f"calls:{name}", stamp)
@@ -523,6 +598,7 @@ def _index_file(db: sqlite3.Connection, repo: str, rel: str, path: str, cite: bo
     except UnicodeDecodeError:
         text = raw.decode("latin-1")
     lines = text.splitlines()
+    hint = _PLATFORM.cite_hint
     # Overlapping windows let a phrase that spans a line break still match.
     step = WINDOW // 2
     first = (db.execute("SELECT max(rowid) FROM lines").fetchone()[0] or 0) + 1
@@ -531,10 +607,10 @@ def _index_file(db: sqlite3.Connection, repo: str, rel: str, path: str, cite: bo
     db.executemany("INSERT INTO lines(rowid, repo, path, line, body) VALUES(?,?,?,?,?)", windows)
     rows = []
     for number, line in enumerate(lines, 1):
-        if "8" not in line:
+        if hint not in line:
             continue
         for match in address.finditer(line):
-            rows.append((int(match.group(1), 16), repo, rel, number, line.strip()[:240]))
+            rows.append((_PLATFORM.cite_value(match.group(1)), repo, rel, number, line.strip()[:240]))
     db.executemany(f"INSERT INTO {'cites' if cite else 'mentions'} VALUES(?,?,?,?,?)", rows)
     return (first, first + len(windows) - 1) if windows else (None, None)
 
@@ -618,7 +694,7 @@ def _refresh(project: Project, repos: Iterable[str] | None, force: bool, started
 def _apply(project: Project, db: sqlite3.Connection, repo: str, changed: list, removed: list, stats: dict) -> None:
     config = project.config["repositories"][repo]
     root = str(project.index_root(repo))
-    address = re.compile(config.get("address_pattern", DEFAULT_ADDRESS))
+    address = re.compile(config.get("address_pattern", _PLATFORM.cite_pattern()))
     cite_prefixes = [p.rstrip("/") for p in _cite_paths(project, repo)]
     current = {row[0]: (row[1], row[2]) for row in
                db.execute("SELECT path, mtime, size FROM files WHERE repo=?", (repo,))}

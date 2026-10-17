@@ -7,6 +7,7 @@ import json
 import re
 from typing import Any
 
+from .index import address_text
 from .project import Project, digest
 
 
@@ -85,7 +86,7 @@ def lookup(project: Project, target_name: str, value: str | int) -> dict[str, An
             if start <= pc < start + size:
                 source = metadata.get("source_path")
                 found.append({
-                    "address": f"0x{start:08X}", "offset": pc - start, "size": size,
+                    "address": address_text(start), "offset": pc - start, "size": size,
                     "name": function["name"], "demangled_name": info.get("demangled_name"),
                     "unit": unit["name"], "source": source,
                     "source_exists": bool(source) and project.file(target["repository"], source).is_file(),
