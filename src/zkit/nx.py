@@ -217,18 +217,28 @@ def _from_elf(raw: bytes) -> Module:
     end = max(v + m for v, _, _, m, _ in loads) - base if loads else 0
     image = bytearray(end)
     segments = []
-    names = iter(("text", "rodata", "data"))
     for vaddr, offset, filesz, memsz, flags in sorted(loads):
         image[vaddr - base:vaddr - base + filesz] = raw[offset:offset + filesz]
-        name = next(names, "data") if filesz else "bss"
-        segments.append(Segment(name, vaddr - base, filesz or memsz, "code" if flags & 1 else "data"))
-        if memsz > filesz and filesz:
+        name = "text" if flags & 1 else "data" if flags & 2 else "rodata"  # PF_X, PF_W
+        if filesz:
+            segments.append(Segment(name, vaddr - base, filesz, "code" if flags & 1 else "data"))
+        if memsz > filesz:
             segments.append(Segment("bss", vaddr - base + filesz, memsz - filesz, "data"))
     module = Module(image, segments)
     for symbol in elf.symbols:
         if symbol.name and 0 < symbol.section < 0xFF00 and symbol.kind in ("func", "object"):
             module.symbols.setdefault(symbol.value - base, symbol.name)
+            module.sizes.setdefault(symbol.value - base, symbol.size)
+            module.kinds.setdefault(symbol.value - base, symbol.kind)
     _read_mod0(module)
+    if not module.pointers:  # a plain ELF: its PT_DYNAMIC holds the same tables MOD0 points at
+        for i in range(phnum):
+            kind, _, offset, vaddr, *_ = struct.unpack_from("<IIQQQQQQ", raw, phoff + i * phentsize)
+            if kind == 2:
+                _read_dynamic(module, vaddr - base)
+            elif kind == 0x6474E550 and module.eh_frame_hdr is None:  # PT_GNU_EH_FRAME
+                filesz = struct.unpack_from("<Q", raw, phoff + i * phentsize + 32)[0]
+                module.eh_frame_hdr = (vaddr - base, vaddr - base + filesz)
     return module
 
 
@@ -241,9 +251,13 @@ def _read_mod0(module: Module) -> None:
     if image[mod0:mod0 + 4] != b"MOD0":
         return
     dynamic, bss_start, bss_end, eh_start, eh_end, _ = struct.unpack_from("<iiiiii", image, mod0 + 4)
-    dynamic += mod0
     if eh_end > eh_start:
         module.eh_frame_hdr = (mod0 + eh_start, mod0 + eh_end)
+    _read_dynamic(module, dynamic + mod0)
+
+
+def _read_dynamic(module: Module, dynamic: int) -> None:
+    image = module.image
     tags: dict[int, int] = {}
     position = dynamic
     while position + 16 <= len(image):
