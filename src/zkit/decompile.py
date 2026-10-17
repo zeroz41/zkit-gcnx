@@ -387,13 +387,27 @@ def _namer(project: Project, target: str, db):
             seen["fn", address] = row["name"] if row and row["address"] == address else None
         return seen["fn", address] or match[0]
 
+    module = None
+    if current.name == "switch":
+        from .inspect_dol import _dol
+        module = _dol(project, target)
+
     def data(match: re.Match) -> str:
         address = key(match[1])
         if ("data", address) not in seen:
-            symbol = _symbol_lookup(project, target, address)
             name = None
-            if symbol:
-                name = symbol["name"] + (f".unk{symbol['offset']:X}" if symbol["offset"] else "")
+            pointee = module.pointers.get(address) if module is not None else None
+            if pointee is not None:  # a GOT or table slot: name what it points to
+                symbol = _symbol_lookup(project, target, pointee)
+                row = function_at(db, target, pointee)
+                if row is not None and row["address"] == pointee:
+                    name = f"&{row['name']}"
+                elif symbol:
+                    name = "&" + symbol["name"] + (f"+0x{symbol['offset']:X}" if symbol["offset"] else "")
+            if name is None:
+                symbol = _symbol_lookup(project, target, address)
+                if symbol:
+                    name = symbol["name"] + (f".unk{symbol['offset']:X}" if symbol["offset"] else "")
             seen["data", address] = name
         return seen["data", address] or match[0]
 
