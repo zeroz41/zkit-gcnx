@@ -68,9 +68,6 @@ class ObjectTests(unittest.TestCase):
             self.assertEqual((unit["exact"], unit["total"]), (1, 2))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class CandidateCommandTests(unittest.TestCase):
     def test_restage_mwcc_and_clang(self):
@@ -90,3 +87,7 @@ class CandidateCommandTests(unittest.TestCase):
         self.assertEqual(argv[:2], ["clang++", "-Isrc"])
         self.assertEqual(argv[argv.index("-o") + 1], "build/t/a.o")
         self.assertNotIn("-MF", argv)
+
+
+if __name__ == "__main__":
+    unittest.main()
