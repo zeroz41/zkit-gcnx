@@ -18,6 +18,20 @@ DEFAULT_BASE = 0x7100000000
 R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE = 257, 1025, 1026, 1027
 DT_NULL, DT_PLTRELSZ, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ, DT_STRSZ, DT_JMPREL = 0, 2, 5, 6, 7, 8, 10, 23
 DT_INIT_ARRAY, DT_INIT_ARRAYSZ = 25, 27
+DT_RELRSZ, DT_RELR = 35, 36
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+
+def _decompress(chunk: bytes, size: int) -> bytes:
+    """A segment's bytes: LZ4 (every NSO so far) or zstd (newer SDKs), by the data's own magic."""
+    if chunk[:4] == ZSTD_MAGIC:
+        try:
+            import zstandard
+        except ImportError as error:
+            raise ValueError("This module's segments are zstd-compressed: install the `zstandard` Python package "
+                             "(uv tool install --with zstandard zkit)") from error
+        return zstandard.ZstdDecompressor().decompress(chunk, max_output_size=size)
+    return lz4_block(chunk, size)
 
 
 def lz4_block(source: bytes, size: int) -> bytes:
@@ -176,7 +190,7 @@ def _from_nso(raw: bytes) -> Module:
     segments = []
     for index, ((file_offset, memory, size), stored, name) in enumerate(zip(headers, packed, ("text", "rodata", "data"))):
         chunk = raw[file_offset:file_offset + stored]
-        data = lz4_block(chunk, size) if flags & (1 << index) else chunk[:size]
+        data = _decompress(chunk, size) if flags & (1 << index) else chunk[:size]
         image[memory:memory + size] = data
         segments.append(Segment(name, memory, size, "code" if name == "text" else "data"))
     data_end = headers[2][1] + headers[2][2]
@@ -270,6 +284,24 @@ def _read_mod0(module: Module) -> None:
                     module.pointers[offset] = value + addend
                 else:
                     module.imports[offset] = name if not addend else f"{name}+0x{addend:X}"
+    start, size = tags.get(DT_RELR), tags.get(DT_RELRSZ)
+    if start is not None and size:  # packed relative relocations: an address, then bitmaps of the next 63 words
+        where = 0
+        for i in range(size // 8):
+            entry = struct.unpack_from("<Q", image, start + i * 8)[0]
+            if entry & 1 == 0:
+                where = entry
+                if where + 8 <= len(image):
+                    module.pointers[where] = struct.unpack_from("<Q", image, where)[0]
+                where += 8
+            else:
+                bits = entry >> 1
+                for bit in range(63):
+                    if bits >> bit & 1:
+                        slot = where + bit * 8
+                        if slot + 8 <= len(image):
+                            module.pointers[slot] = struct.unpack_from("<Q", image, slot)[0]
+                where += 63 * 8
     start, size = tags.get(DT_INIT_ARRAY), tags.get(DT_INIT_ARRAYSZ)
     if start is not None and size:
         module.init_array = [module.u64(start + i * 8) for i in range(size // 8)]
