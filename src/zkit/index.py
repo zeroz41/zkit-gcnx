@@ -712,6 +712,23 @@ def report_age_hours(project: Project, target: str) -> float | None:
     return round((time.time() - report.stat().st_mtime) / 3600, 2)
 
 
+SOURCE_PATH = re.compile(r"\.(c|cc|cp|cpp|cxx|h|hh|hpp|inc|inl|s)$", re.I)
+
+
+def report_staleness(project: Project, target: str) -> dict | None:
+    """How many indexed source files of the target's repository changed after its report was written."""
+    config = project.target(target)
+    report = _target_file(project, config, "report")
+    if report is None or not report.is_file():
+        return None
+    written = report.stat().st_mtime_ns
+    db = connect(project)
+    newer = [path for path, mtime in db.execute("SELECT path, mtime FROM files WHERE repo=? AND mtime>?",
+                                                (config["repository"], written)) if SOURCE_PATH.search(path)]
+    return {"age_h": round((time.time() - report.stat().st_mtime) / 3600, 1), "sources_newer": len(newer),
+            "examples": sorted(newer)[:3]}
+
+
 def function_at(db: sqlite3.Connection, target: str, address: int) -> sqlite3.Row | None:
     return db.execute("SELECT * FROM functions WHERE target=? AND address<=? ORDER BY address DESC LIMIT 1",
                       (target, address)).fetchone() if address is not None else None

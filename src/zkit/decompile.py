@@ -85,6 +85,36 @@ def _user_settings(version: str, release: str) -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "ghidra" / name
 
 
+def _writable_ghidra_settings(info: dict) -> dict[str, str]:
+    """When Ghidra's user folder cannot be written (a sandboxed agent), point XDG_CONFIG_HOME at a private copy
+    whose Extensions link to the real ones, so Ghidra can save its settings and still finds the Gekko language."""
+    if sys.platform in ("win32", "darwin"):
+        return {}
+    install = Path(info["install"])
+    props = _properties(install)
+    real = _user_settings(props.get("application.version", ""), props.get("application.release.name", ""))
+    probe = real if real.exists() else real.parent
+    try:  # a sandbox can refuse writes that the permission bits allow, so try one
+        probe.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=probe):
+            pass
+        return {}
+    except OSError:
+        pass
+    from .paths import cache_home
+    base = cache_home() / "ghidra-config"
+    mirror = base / "ghidra" / real.name
+    mirror.mkdir(parents=True, exist_ok=True)
+    for item in ("Extensions", "preferences"):
+        source, link = real / item, mirror / item
+        if source.exists() and not link.exists():
+            try:
+                link.symlink_to(source, target_is_directory=source.is_dir())
+            except OSError:
+                pass
+    return {"XDG_CONFIG_HOME": str(base)}
+
+
 def gekko_language(install: Path) -> Path | None:
     """The .ldefs that defines PowerPC:BE:32:Gekko_Broadway (paired singles), installed or per user."""
     props = _properties(install)
@@ -308,6 +338,7 @@ def _run_worker(info: dict, dol: Path, sda: dict[int, int], boundaries: list[tup
                                        "output": str(output)}), encoding="utf-8")
         env = dict(os.environ, PYTHONPATH=os.pathsep.join(filter(None, [str(Path(__file__).resolve().parents[1]),
                                                                          os.environ.get("PYTHONPATH")])))
+        env.update(_writable_ghidra_settings(info))
         result = subprocess.run([info["python"], "-m", "zkit.ghidra_worker", str(request)], env=env,
                                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                                 timeout=180 + len(addresses) // 4)
@@ -315,7 +346,13 @@ def _run_worker(info: dict, dol: Path, sda: dict[int, int], boundaries: list[tup
     if rows and "error" in rows[0] and "address" not in rows[0]:
         raise ValueError(rows[0]["error"])
     if result.returncode != 0 or not rows or "timing" not in rows[-1]:
-        tail = "\n".join(result.stderr.strip().splitlines()[-6:])
+        lines = result.stderr.strip().splitlines()
+        cause = next((l.strip() for l in reversed(lines) if re.search(r"(Error|Exception)\b.*:", l)), None)
+        if "LaunchSupport" in result.stderr:
+            cause = ("Ghidra could not find or save its Java settings (a sandbox that forbids writing the Ghidra "
+                     "user folder causes this): run `zkit decompile` outside the sandbox once, or set JAVA_HOME. "
+                     + (cause or ""))
+        tail = cause or "\n".join(lines[-6:])
         raise ValueError(f"Ghidra worker failed (exit {result.returncode}): {tail}")
     return rows[:-1], rows[-1]["timing"]
 

@@ -53,6 +53,31 @@ def _cap(text: str, limit: int = TEXT_CAP) -> str:
     return text[:limit] + f"\n… output truncated at {limit} of {len(text)} chars; narrow the query or use response_format=json"
 
 
+JSON_CAP = 60000
+
+
+def _shorten(value, keep: int):
+    """Lists longer than keep are cut to keep items plus a note; nested values likewise."""
+    if isinstance(value, list):
+        items = [_shorten(v, keep) for v in value[:keep]]
+        if len(value) > keep:
+            items.append(f"... {len(value) - keep} more (narrow the query, or use the CLI with --json)")
+        return items
+    if isinstance(value, dict):
+        return {k: _shorten(v, keep) for k, v in value.items()}
+    return value
+
+
+def _json(data) -> str:
+    """JSON within what a client accepts: long lists are shortened step by step until it fits."""
+    text = json.dumps(data, ensure_ascii=False, default=str)
+    keep = 200
+    while len(text) > JSON_CAP and keep >= 5:
+        text = json.dumps(_shorten(data, keep), ensure_ascii=False, default=str)
+        keep //= 2
+    return text if len(text) <= JSON_CAP else _cap(text, JSON_CAP)
+
+
 def create_server(project: Project) -> FastMCP:
     has_native = bool(bridge.role_repos(project, "native"))
     has_recipes = any(r.get("recipes") for r in project.config["repositories"].values())
@@ -102,7 +127,7 @@ def create_server(project: Project) -> FastMCP:
         return scoped(repo)[0] if repo else current()
 
     def out(data, text: str, response_format: Format) -> str:
-        return json.dumps(data, ensure_ascii=False, default=str) if response_format == "json" else _cap(text)
+        return _json(data) if response_format == "json" else _cap(text)
 
     def native_default(p: Project) -> str | None:
         natives = bridge.role_repos(p, "native")
@@ -120,13 +145,13 @@ def create_server(project: Project) -> FastMCP:
     @tool()
     def zkit_lookup(query: str | None = None, body: bool = False, repo: str | None = None,
                     addresses: list[str] | str | None = None, response_format: Format = "text",
-                    address: str | None = None) -> str:
+                    address: str | None = None, addrs: list[str] | str | None = None) -> str:
         """Original function(s) by address, name or Class::method fragment; several addresses or names separated by
         spaces/commas are looked up in one call. Shows match/link/name state, owning TU file:line (body=true adds
         the decomp source), every caller with a per-class count, callees, vtable slots with the owning tables and
         a shared-slot verdict, native/doc cites with their text. A data address shows its symbol and xrefs."""
         p = decomp(repo)
-        wanted = " ".join(bridge.query_list(addresses) + bridge.query_list(address))
+        wanted = " ".join(bridge.query_list(addresses) + bridge.query_list(address) + bridge.query_list(addrs))
         if not (query or wanted):
             raise ValueError("Pass query (address(es), name or Class::method)")
         data = bridge.lookup(p, " ".join(x for x in (query, wanted) if x), target(p), body=body)
@@ -277,7 +302,8 @@ def create_server(project: Project) -> FastMCP:
     @tool()
     def zkit_asm(query: str | None = None, size: Number = None, repo: str | None = None,
                  addresses: list[str] | str | None = None, response_format: Format = "text",
-                 addrs: list[str] | str | None = None) -> str:
+                 addrs: list[str] | str | None = None, address: str | None = None, length: Number = None,
+                 lines: Number = None, max_instructions: Number = None) -> str:
         """Disassemble ORIGINAL bytes. query: address or name (several separated by spaces for a batch). With size
         (int or hex string), disassembly starts exactly at the given address, also mid-function. Branch targets,
         r2/r13 and lis/addi references are resolved to symbols; lfs/lfd show the constant."""
@@ -287,18 +313,21 @@ def create_server(project: Project) -> FastMCP:
             addrs = json.loads(addrs)
             if not isinstance(addrs, list) or not all(isinstance(a, str) for a in addrs):
                 raise ValueError("addrs must contain address strings")
-        queries = bridge.query_list(query) + bridge.query_list(addresses) + bridge.query_list(addrs)
+        queries = bridge.query_list(query) + bridge.query_list(addresses) + bridge.query_list(addrs) + \
+            bridge.query_list(address)
         if not queries:
             raise ValueError("Pass query (address or name; several separated by spaces)")
+        size = _int(size) or _int(length)
+        cap = _int(lines) or _int(max_instructions) or 400
         for q in queries[:20]:
-            start = bridge.resolve_address(p, q, target(p)) if _int(size) else None
+            start = bridge.resolve_address(p, q, target(p)) if size else None
             found = [start] if start is not None else bridge.resolve(p, q, target(p))
             if not found:
                 results.append({"text": f"no function matches {q}", "address": q, "size": 0})
                 continue
             exact = bridge.HEX.match(q.strip())
-            address = int(exact[1], 16) if exact else found[0]
-            results.append(inspect_dol.disasm(p, target(p), address, _int(size)))
+            at = int(exact[1], 16) if exact else found[0]
+            results.append(inspect_dol.disasm(p, target(p), at, size, max_lines=max(1, min(cap, 4000))))
         data = results[0] if len(results) == 1 else {"batch": results}
         return out(data, render.disasm(data) if "text" not in data or data.get("size") else data["text"],
                    response_format)
@@ -327,7 +356,7 @@ def create_server(project: Project) -> FastMCP:
     def zkit_data(address: str | None = None, type: str = "u32", count: Number = None, fields: str | None = None,
                   stride: Number = None, query: str | None = None, size: Number = None,
                   addresses: list[str] | str | None = None, repo: str | None = None,
-                  response_format: Format = "text") -> str:
+                  response_format: Format = "text", length: Number = None) -> str:
         """Typed reads of ORIGINAL data at an address or symbol name (lbl_*, jumptable_*, __vt__*); several
         addresses (space separated, or addresses=[...]) read in one call. type: u8 s8 u16 s16 u32 s32 f32 f64 ptr
         str (count = number of strings). count defaults to 16, or size (bytes) / element size. Tables: fields like
@@ -338,8 +367,10 @@ def create_server(project: Project) -> FastMCP:
         if not wanted:
             raise ValueError("Pass address (hex or symbol name)")
         layout = fields.split(",") if fields else None
-        n = _int(count) or (inspect_dol.count_for_size(_int(size), type, layout, _int(stride))
-                            if _int(size) and type != "str" else 16)
+        type = bridge.data_type(type)
+        size = _int(size) or _int(length)
+        n = _int(count) or (inspect_dol.count_for_size(size, type, layout, _int(stride))
+                            if size and type != "str" else 16)
 
         def one(q: str) -> dict:
             q, kind, rows = bridge.typed_query(q, type, n)  # `0x804CCE50:ptr:12` shorthand
@@ -349,6 +380,15 @@ def create_server(project: Project) -> FastMCP:
             return inspect_dol.read_data(p, target(p), value, kind, rows, _int(stride), layout)
         data = bridge.batch(wanted, one)
         return out(data, render.data_rows(data), response_format)
+
+    @tool()
+    def zkit_refs(query: str, repo: str | None = None, limit: int = 60, response_format: Format = "text") -> str:
+        """Where an original function or global is defined, declared and used in the source of every configured
+        repo, under all its spellings (mangled, Class::method, method beside its class, address in a placeholder
+        name). Use instead of grepping src/ and include/."""
+        p = current()
+        data = bridge.refs(p, query, target(p), p.repo_key(repo) if repo else None, max(1, min(limit, 400)))
+        return out(data, render.refs(data), response_format)
 
     @tool()
     def zkit_search(words: str | None = None, repo: str | None = None, path: str | None = None, limit: int = 12,
@@ -438,12 +478,15 @@ def create_server(project: Project) -> FastMCP:
         return out(data, render.architecture(data), response_format)
 
     @tool(enabled=any(r.get("coverage") for r in project.config["repositories"].values()))
-    def zkit_coverage(repo: str, name: str, response_format: Format = "text") -> str:
+    def zkit_coverage(repo: str, name: str | None = None, response_format: Format = "text") -> str:
         """Compare a configured reference inventory with import/integration/verification inventories. Discovers
         identities from project files on every call; reports missing/duplicate/out-of-order records and provenance.
         Presence is not valid import, runtime behavior or completed systems. Executes no converters."""
         from .coverage import audit
         p, key = scoped(repo)
+        if not name:
+            names = sorted(p.config["repositories"][key].get("coverage", {}))
+            return out(names, "inventories: " + (", ".join(names) or "none configured"), response_format)
         data = audit(p, key, name)
         return out(data, render.coverage(data), response_format)
 
@@ -458,14 +501,16 @@ def create_server(project: Project) -> FastMCP:
         return out(data, render.grounding(data), response_format)
 
     @tool(enabled=has_native)
-    def zkit_tiers(repo: str | None = None, paths: Paths = None, path: str | None = None) -> str:
+    def zkit_tiers(repo: str | None = None, paths: Paths = None, path: str | None = None,
+                   response_format: Format = "text") -> str:
         """Native port fidelity tiers set by the owner: EXACT (game behavior and data: reproduce the decomp),
         EQUIVALENT (presentation such as rendering and audio: any implementation, but with enhancements off the
         output must match the original), LIBERTY (owner-designed additions, opt-in, never changing behavior),
         INFRASTRUCTURE (platform plumbing). Pass paths to see each file's tier. Unlisted code is EXACT."""
         from .tiers import summary
         p, key = scoped(repo, native_default(current()))
-        return _cap(render.tiers(summary(p, key, _paths(paths, path))))
+        data = summary(p, key, _paths(paths, path))
+        return out(data, render.tiers(data), response_format)
 
     @tool(enabled=has_native)
     def zkit_suspects(repo: str | None = None, paths: Paths = None, limit: int = 20, path: str | None = None,
@@ -534,30 +579,40 @@ def create_server(project: Project) -> FastMCP:
         return out(data, render.wait(data), response_format)
 
     @tool(writes)
-    def zkit_handoff(repo: str, text: str | None = None, note: str | None = None) -> str:
-        """Leave a note for the next session (≤4000 chars; the brief shows the newest notes first): what is verified
-        (commit id), what is staged, what failed, the exact next command. repo may be a worktree path; its HEAD and
-        branch are recorded. Stored in the toolkit's state directory; never touches the repo."""
+    def zkit_handoff(repo: str | None = None, text: str | None = None, note: str | None = None, limit: int = 1,
+                     response_format: Format = "text") -> str:
+        """Leave a note for the next session (≤4000 chars): what is verified (commit id), what is in progress, what
+        failed, the exact next command. Without text: the latest notes in full (limit). A session's newer note within
+        30 minutes replaces its previous one. Stored in the toolkit's state directory; never touches the repo."""
         if text is not None and note is not None and text != note:
             raise ValueError("Pass text or note, not conflicting notes")
         text = text if text is not None else note
+        p, key = scoped(repo, native_default(current()) or (bridge.role_repos(current(), "decomp") or [None])[0])
+        if key is None:
+            raise ValueError("Pass repo")
         if not text or not text.strip():
-            raise ValueError("Pass text (the handoff note)")
-        p, key = scoped(repo)
+            from .activity import handoffs
+            rows = handoffs(p, key, limit=max(1, min(limit, 20)))
+            return out(rows, "\n\n".join(f"{r['time']} {r['author']} @ {r.get('head')}\n{r['text']}" for r in rows)
+                       or f"no handoff notes for {key}", response_format)
         row = write_handoff(p, key, text)
-        return f"saved {row['time']} {key} @ {row['head']}" + (f" (worktree {row['worktree']})" if row.get("worktree") else "")
+        return f"saved {row['time']} {key} @ {row['head']}" + (f" (worktree {row['worktree']})" if row.get("worktree") else "") \
+            + (f"; replaced this session's note from {row['replaced']}" if row.get("replaced") else "")
 
     @tool()
-    def zkit_doctor() -> str:
+    def zkit_doctor(response_format: Format = "text") -> str:
         """Self-check: toolkit install, plugins, repos, original executable, report age, disassembler, test
         build, tiers, index. Each problem comes with the exact command that fixes it."""
         from .health import doctor, render as render_doctor
-        return render_doctor(doctor(current()))
+        data = doctor(current())
+        return out(data, render_doctor(data), response_format)
 
     @tool()
-    def zkit_lessons(id: str | None = None, role: str | None = None) -> str:
+    def zkit_lessons(id: str | None = None, role: str | None = None, response_format: Format = "text") -> str:
         """Curated project gotchas and rules (symptom -> cause -> fix). Without id: the list; id may name several."""
         rows = session.lessons(current(), role)
+        if response_format == "json":
+            return json.dumps([r for r in rows if not id or r["id"] in re.split(r"[\s,]+", id)], ensure_ascii=False)
         if id:  # one id, or several separated by spaces/commas
             wanted = [w.strip(".;:()`'\"\\") for w in re.split(r"[\s,]+", id) if w.strip(".;:()`'\"\\")]
             parts = [f"# {r['title']}\n\n{r['body']}" for w in wanted for r in rows if r["id"] == w]
@@ -566,10 +621,13 @@ def create_server(project: Project) -> FastMCP:
         return "\n".join(f"{r['id']}: {r['title']}" for r in rows)
 
     @tool()
-    def zkit_gate(repo: str | None = None) -> str:
-        """The repo's canonical finish gate (commands to run before ending), plus copies that disagree."""
+    def zkit_gate(repo: str | None = None, response_format: Format = "text") -> str:
+        """Before ending: the repo's finish gate (commands to run), copies that disagree, and what THIS session
+        changed: progress delta since its start (by address), commits that break the commit rules, and what it
+        leaves behind (uncommitted files, stashes, branches, worktrees)."""
         p, key = scoped(repo, native_default(current()))
-        return render.gate(session.gate(p, key))
+        data = session.gate(p, key)
+        return out(data, render.gate(data), response_format)
 
     @tool(enabled=has_recipes)
     def zkit_recipes(repo: str | None = None, query: str = "", limit: int = 20, repository: str | None = None) -> str:

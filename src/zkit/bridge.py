@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Any
 
 from .gc import Symbol, read_symbols
-from .index import MODULE_SHIFT, address_text, cache_path, connect, containing, fts_query, module_address, refresh, report_age_hours
+from .index import (MODULE_SHIFT, address_text, cache_path, connect, containing, fts_query, module_address, refresh,
+                    report_age_hours, report_staleness)
 from .project import Project
 
 HEX = re.compile(r"^(?:0x)?([0-9A-Fa-f]{8})$")
@@ -50,11 +51,9 @@ def split_queries(text: str) -> list[str]:
     `0x8013E990 0x8013E998`, `8013E990,8013E998` and `lbl_805DE138 lbl_805DE13C` are batches;
     `TEnemy::update` or a phrase with spaces that is not all names stays one query."""
     tokens = [t for t in QUERY_SPLIT.split(text.strip()) if t]
-    if len(tokens) > 1 and all(HEX.match(t) or MODULE_TOKEN.fullmatch(t) or re.fullmatch(r"[A-Za-z_][\w:~]*", t)
+    if len(tokens) > 1 and all(HEX.match(t) or MODULE_TOKEN.fullmatch(t) or re.fullmatch(r"[A-Za-z_~][\w:~]*", t)
                                for t in tokens):
-        # Addresses and plain symbol names (lbl_*, fn_*, mangled) split, mixed or not; a `Class::method` phrase stays whole.
-        if not any("::" in t for t in tokens):
-            return tokens
+        return tokens  # addresses, symbols and Class::method names, mixed or not, are looked up one by one
     return [text.strip()]
 
 
@@ -73,15 +72,28 @@ def query_list(value: str | list | None) -> list[str]:
     return split_queries(value) if value.strip() else []
 
 
-DATA_TYPES = ("u8", "s8", "u16", "s16", "u32", "s32", "f32", "f64", "ptr", "str")
+DATA_TYPES = ("u8", "s8", "u16", "s16", "u32", "s32", "u64", "s64", "f32", "f64", "ptr", "str")
+TYPE_ALIASES = {"string": "str", "char": "str", "hex": "u8", "bytes": "u8", "byte": "u8", "short": "s16",
+                "ushort": "u16", "int": "s32", "uint": "u32", "word": "u32", "long": "s32", "float": "f32",
+                "double": "f64", "pointer": "ptr", "addr": "ptr", "address": "ptr", "quad": "u64"}
+
+
+def data_type(kind: str) -> str:
+    """A data type name as agents write it (string, hex, float, ...) -> one of DATA_TYPES."""
+    kind = (kind or "u32").strip().lower()
+    kind = TYPE_ALIASES.get(kind, kind)
+    if kind not in DATA_TYPES:
+        raise ValueError(f"Unknown type {kind!r}; use one of {', '.join(DATA_TYPES)}")
+    return kind
 
 
 def typed_query(query: str, kind: str, count: int) -> tuple[str, str, int]:
     """`ADDR:type[:count]` (as agents write it) -> (ADDR, type, count); anything else unchanged."""
-    match = re.fullmatch(rf"(.+?):({'|'.join(DATA_TYPES)})(?::(\d+))?", query.strip())
+    names = "|".join([*DATA_TYPES, *TYPE_ALIASES])
+    match = re.fullmatch(rf"(.+?):({names})(?::(\d+))?", query.strip(), re.I)
     if not match:
-        return query, kind, count
-    return match[1], match[2], int(match[3]) if match[3] else count
+        return query, data_type(kind), count
+    return match[1], data_type(match[2]), int(match[3]) if match[3] else count
 
 
 def batch(queries: list[str], answer, limit: int = 20) -> dict[str, Any]:
@@ -660,6 +672,7 @@ def lookup(project: Project, query: str, target: str | None = None, fresh: bool 
         "query": query, "found": True, "target": target, "function": info,
         "offset": requested - row["address"],
         "report_age_h": report_age_hours(project, target),
+        "report_stale": report_staleness(project, target),
         "callers": {"count": len(callers), "rows": [edge(r, c[0]) for r, c in zip(caller_rows, callers)],
                     "by_class": by_class.most_common(12)},
         "callees": [edge(r, c[0]) for r, c in zip(callee_rows, callees)],
@@ -1448,3 +1461,75 @@ def reuse(project: Project, repo: str, terms: list[str] | None = None, min_files
             "enumeration_sites": {"terms": terms or [], "files": len(sites), "rows": sites[:limit]},
             "limits": "Textual: identical normalized bodies of free functions up to 40 lines, and files naming "
                       "several variants. It finds candidates for sharing, not proof that sharing is correct."}
+
+
+# ----------------------------------------------------------------------------
+# References in source: where a function or global is defined, declared and used.
+
+def refs(project: Project, query: str, target: str | None = None, repo: str | None = None,
+         limit: int = 60) -> dict[str, Any]:
+    """Every source line that spells a function or data symbol (mangled name, Class::method, the bare method name
+    beside its class, or the address in a placeholder name), classified as definition, declaration or use."""
+    target = default_target(project, target) if project.config.get("targets") else None
+    repos = [repo] if repo else list(project.config["repositories"])
+    spellings: set[str] = set()
+    function = None
+    if target:
+        refresh(project)
+        db = connect(project)
+        found = resolve(project, query, target, limit=2)
+        if len(found) == 1:
+            row = containing(db, target, found[0])
+            if row is not None:
+                function = _status(row)
+                spellings.add(row["name"])
+                base = (row["demangled"] or "").split("(")[0].strip()
+                if base:
+                    spellings.add(base)
+                    spellings.add(base.rsplit("::", 1)[-1])
+            else:
+                symbol = _symbol_lookup(project, target, found[0])
+                if symbol:
+                    spellings.add(symbol["name"])
+            spellings.add(f"{found[0]:08X}" if found[0] < 1 << 32 else f"{found[0] & 0xFFFFFFFF:X}")
+    if not spellings:
+        spellings.add(query.strip())
+    bare = {s for s in spellings if "::" not in s}
+    method = next((s.rsplit("::", 1)[-1] for s in spellings if "::" in s), None)
+    owner = next((s.rsplit("::", 1)[0].rsplit("::", 1)[-1] for s in spellings if "::" in s), None)
+    rows, total = [], 0
+    for name in repos:
+        config = project.config["repositories"][name]
+        root = project.root(name)
+        paths = config.get("index_paths", config.get("search_paths", []))
+        if not paths:
+            continue
+        args = ["grep", "-n", "-I", "--no-color", "-F"] + [x for s in sorted(spellings) for x in ("-e", s)] + ["--", *paths]
+        result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=60)
+        for line in result.stdout.splitlines():
+            path, _, rest = line.partition(":")
+            number, _, text = rest.partition(":")
+            words = set(re.findall(r"[A-Za-z_~][\w:~]*|[0-9A-Fa-f]{8}", text))
+            hit = [s for s in spellings if s in words or any(w.endswith(s) and s[:1].isdigit() for w in words)
+                   or s in text and "::" in s]
+            if not hit:
+                continue
+            if method and hit == [method] and owner and owner not in text and "->" not in text and "." not in text:
+                continue  # the bare method name, with no sign of its class: another class's member
+            total += 1
+            stripped = text.strip()
+            kind = "use"
+            if re.search(r"\)\s*(const\s*)?\{?\s*$", stripped) and not stripped.endswith(";") and \
+                    not re.match(r"(if|while|for|switch|return)\b", stripped):
+                kind = "definition"
+            elif stripped.endswith(";") and re.search(r"\w[\w\s\*&:<>,]*\s+[\w:~]+\s*\([^)]*\)\s*(const\s*)?;$", stripped) \
+                    and "=" not in stripped and "return" not in stripped:
+                kind = "declaration"
+            if len(rows) < limit:
+                rows.append({"ref": f"{name}:{path}:{number}", "kind": kind, "text": stripped[:200]})
+    order = {"definition": 0, "declaration": 1, "use": 2}
+    rows.sort(key=lambda r: (order[r["kind"]], r["ref"]))
+    return {"query": query, "function": function, "spellings": sorted(spellings), "rows": rows, "total": total,
+            "limits": "Text matches in tracked files (git grep), classified by line shape. Calls through pointers, "
+                      "macros and vtables are not seen; `lookup` lists the original's direct callers."}

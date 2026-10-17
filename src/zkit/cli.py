@@ -134,17 +134,23 @@ def build_parser() -> argparse.ArgumentParser:
     c = add("asm", help="Disassemble original bytes with symbol/SDA/lis resolution")
     c.add_argument("query", nargs="+")
     c.add_argument("--size", type=lambda v: int(v, 0))
+    c.add_argument("--lines", type=int, default=400, help="at most this many instructions per function")
     c = add("decompile", help="Ghidra C for original functions, a second reading next to m2c (cached)")
     c.add_argument("query", nargs="*", help="address(es) or name(s)")
     c.add_argument("--all", action="store_true", help="fill the cache for every DOL function (~40 s for 27k)")
     c.add_argument("--threads", type=int)
     c = add("data", help="Typed reads of original data (f32, u32, ptr, str, tables) by address or symbol")
     c.add_argument("address", nargs="+", help="address(es) or symbol name(s) (lbl_*, jumptable_*, __vt__*)")
-    c.add_argument("--type", default="u32", choices=["u8", "s8", "u16", "s16", "u32", "s32", "f32", "f64", "ptr", "str"])
+    c.add_argument("--type", default="u32", help="u8 s8 u16 s16 u32 s32 u64 s64 f32 f64 ptr str "
+                                              "(also string, hex, bytes, float, double, int, pointer)")
     c.add_argument("--count", type=int, help="elements, records or strings (default 16, or --size / element size)")
     c.add_argument("--size", type=lambda v: int(v, 0), help="bytes to cover instead of --count")
     c.add_argument("--fields", help="Record layout, e.g. u32,f32,ptr,pad4")
     c.add_argument("--stride", type=lambda v: int(v, 0))
+    c = add("refs", help="Where a function or global is defined, declared and used in the source (any spelling)")
+    c.add_argument("query", nargs="+")
+    c.add_argument("--repo")
+    c.add_argument("--limit", type=int, default=60)
     c = add("search", help="Ranked full-text search over every configured repo")
     c.add_argument("words", nargs="+")
     c.add_argument("--repo")
@@ -210,9 +216,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("repo", nargs="?", help="repo or worktree path (default: the checkout you are in)")
     c.add_argument("--timeout", type=float, default=600, help="seconds before giving up (exit 1)")
     c.add_argument("--settle", type=float, default=3, help="seconds that must stay quiet (bridges chained commands)")
-    c = add("handoff", help="Leave a note for the next session (repo state captured automatically)")
+    c = add("handoff", help="Leave a note for the next session (repo state captured automatically); without text, "
+                            "print the latest notes in full")
     c.add_argument("repo")
-    c.add_argument("text", nargs="+")
+    c.add_argument("text", nargs="*")
+    c.add_argument("--list", type=int, default=1, metavar="N", help="without text: how many notes to print")
     c = add("lessons", help="Curated gotchas/rules; give one or more ids to print them")
     c.add_argument("id", nargs="*")
     c.add_argument("--role")
@@ -458,7 +466,8 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             if not found:
                 raise ValueError(f"No function matches {query}")
             exact = bridge.HEX.match(query.strip())
-            results.append(inspect_dol.disasm(project, target, int(exact[1], 16) if exact else found[0], args.size))
+            results.append(inspect_dol.disasm(project, target, int(exact[1], 16) if exact else found[0], args.size,
+                                              max_lines=max(1, args.lines)))
         data = results[0] if len(results) == 1 else {"batch": results}
         return data, render.disasm(data)
     if command == "decompile":
@@ -485,13 +494,17 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
                                if args.size and args.type != "str" else 16)
 
         def one(query: str) -> dict:
-            query, kind, n = bridge.typed_query(query, args.type, count)  # `0x804CCE50:ptr:12` shorthand
+            query, kind, n = bridge.typed_query(query, bridge.data_type(args.type), count)  # `0x804CCE50:ptr:12` shorthand
             address = bridge.resolve_address(project, query, target)
             if address is None:
                 raise ValueError(f"No address or symbol matches {query}")
             return inspect_dol.read_data(project, target, address, kind, n, args.stride, fields)
         data = bridge.batch(bridge.query_list(" ".join(args.address)), one)
         return data, render.data_rows(data)
+    if command == "refs":
+        data = bridge.refs(project, " ".join(args.query), target, project.repo_key(args.repo) if args.repo else None,
+                           args.limit)
+        return data, render.refs(data)
     if command == "search":
         data = bridge.search(project, " ".join(args.words), args.repo, args.path, args.limit)
         return data, render.search(data)
@@ -556,8 +569,14 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         data = wait_idle(project, args.repo, overlay, args.timeout, args.settle)
         return data, render.wait(data)
     if command == "handoff":
+        if not args.text:
+            from .activity import handoffs
+            rows = handoffs(project, args.repo, limit=max(1, args.list))
+            return rows, "\n\n".join(f"{r['time']} {r['author']} @ {r.get('head')}\n{r['text']}" for r in rows) \
+                or f"no handoff notes for {args.repo}"
         data = write_handoff(project, args.repo, " ".join(args.text))
-        return data, f"handoff saved for {args.repo} at {data['time']} ({data['head']})"
+        return data, (f"handoff saved for {args.repo} at {data['time']} ({data['head']})"
+                      + (f"; replaced this session's note from {data['replaced']}" if data.get("replaced") else ""))
     if command == "lessons":
         rows = session.lessons(project, args.role)
         if args.id:

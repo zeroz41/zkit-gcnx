@@ -287,12 +287,31 @@ def brief(project: Project, repo: str | None = None, demand_rows: int = 5) -> di
         result["repos"][name] = entry
     try:
         wanted = demand(project, limit=demand_rows)
-        result["port_demand"] = {"totals": wanted["totals"], "top": [
-            {"address": r["address"], "name": r["name"], "need": r["need"], "native_files": r["native_files"]}
-            for r in wanted["rows"]]}
+        top = [{"address": r["address"], "name": r["name"], "need": r["need"], "native_files": r["native_files"]}
+               for r in wanted["rows"]]
+        result["port_demand"] = {"totals": wanted["totals"], "top": top, "unchanged_since": _unchanged_since(
+            project, "demand", [r["address"] for r in top])}
     except ValueError:
         pass
     return result
+
+
+def _unchanged_since(project: Project, key: str, value: list) -> str | None:
+    """When the brief has shown the same list since: the brief then says so in one line instead of repeating it."""
+    from .activity import state_dir
+    path = state_dir(project) / "brief-seen.json"
+    try:
+        seen = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except ValueError:
+        seen = {}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if seen.get(key, {}).get("value") != value:
+        seen[key] = {"value": value, "since": now}
+        path.write_text(json.dumps(seen) + "\n", encoding="utf-8")
+        return None
+    since = seen[key]["since"]
+    age_days = (datetime.now(timezone.utc) - datetime.fromisoformat(since)).total_seconds() / 86400
+    return since[:10] if age_days >= 1 else None
 
 
 SUBAGENT_CONTEXT = (
@@ -366,6 +385,13 @@ def session_review(project: Project, repo: str) -> dict:
     commits = f"{head}..HEAD" if head else None
     out["hygiene"] = hygiene.audit(project, repo, commits, parts=("commits", "tree")) if head else \
         hygiene.audit(project, repo, None, 5, parts=("commits", "tree"))
+    if start:
+        from .activity import processes
+        started = datetime.fromisoformat(start["time"])
+        age = (datetime.now(timezone.utc) - started).total_seconds() / 60
+        mine = [p for p in processes(project) if p.get("repo") == repo and p["age_min"] < age
+                and not re.search(r"(^|[/\\])(claude|codex)(\.exe)?(\s|$)", p["cmd"])]
+        out["processes"] = [{"pid": p["pid"], "age_min": p["age_min"], "cmd": p["cmd"][:120]} for p in mine]
     if _role_of(project, repo) == "decomp" and start:
         deltas = {}
         for target, name in start.get("baselines", {}).items():

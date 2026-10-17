@@ -19,7 +19,7 @@ from .index import MODULE_SHIFT, address_text, connect, containing, refresh, uni
 from .project import Project
 
 TYPES = {"u8": ">B", "s8": ">b", "u16": ">H", "s16": ">h", "u32": ">I", "s32": ">i",
-         "f32": ">f", "f64": ">d", "ptr": ">I"}
+         "u64": ">Q", "s64": ">q", "f32": ">f", "f64": ">d", "ptr": ">I"}
 
 
 _DOLS: dict[str, tuple[tuple[int, int], Dol]] = {}
