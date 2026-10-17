@@ -115,6 +115,12 @@ def _original(root: Path, config: dict[str, str]) -> tuple[str | None, str]:
             f"{(config.get('object_base') or 'orig/<GAMEID>')} and build once")
 
 
+def _git_identity(root: Path) -> str | None:
+    name = git(root, "config", "user.name").stdout.decode().strip()
+    email = git(root, "config", "user.email").stdout.decode().strip()
+    return f"{name} <{email}>" if name and email else None
+
+
 def _existing(root: Path, names: list[str]) -> list[str]:
     return [n for n in names if (root / n).exists()]
 
@@ -148,14 +154,21 @@ def manifest_for(decomp: Path, version: str | None = None, native: Path | None =
         notes.append(f"{symbols} does not exist yet: run the decomp's first build (dtk writes it)")
     project_id = name or _slug(f"{root.name}-{version}")
     decomp_paths = _existing(root, DOCS + DECOMP_CODE)
+    identity = _git_identity(root)
+    if identity is None:
+        notes.append("no git identity in this repo: set user.name and user.email, then hygiene.identity in the "
+                     "project file, so commits carry yours")
     repositories: dict[str, Any] = {
         "decomp": {
             "root": str(root), "role": "decomp",
             "index_paths": decomp_paths,
             "cite_paths": _existing(root, ["docs"]),
             "start": ["python configure.py", "ninja"],
-            "finish": ["ninja"],
+            "finish": ["ninja", "zkit progress --since session --check", "zkit hygiene"],
             "rules": [],
+            # Strict from the start: debt never enters the tree, commits stay short and human.
+            "quality": {"gate": "error"},
+            "hygiene": {"identity": identity},
         }
     }
     if native is not None:
@@ -166,6 +179,8 @@ def manifest_for(decomp: Path, version: str | None = None, native: Path | None =
             "cite_paths": _existing(native_root, ["docs", "src", "source", "include", "tests"]),
             "code_paths": _existing(native_root, ["src", "source", "include"]),
             "rules": [],
+            "checks": {"hold_rule": "error", "require_citation": True},
+            "hygiene": {"identity": _git_identity(native_root) or identity},
         }
         build = next((b for b in sorted(native_root.glob("build*/compile_commands.json"))), None)
         if build is not None:

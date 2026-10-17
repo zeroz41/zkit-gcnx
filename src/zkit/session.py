@@ -315,13 +315,13 @@ def _unchanged_since(project: Project, key: str, value: list) -> str | None:
 
 
 SUBAGENT_CONTEXT = (
-    "zkit is available for evidence on {project}. Use the CLI via Bash (MCP zkit_* tools may need loading): "
-    "`zkit lookup <addr|name ...>` (match/name state, owning file:line, callers, cites), "
-    "`zkit asm <addr> [--size 0x40]`, `zkit decompile <addr ...>` (Ghidra's C for the original function; "
-    "read it next to m2c, especially where m2c fails or emits goto), `zkit data <addr|symbol ...> --type f32 --size 64`, "
-    "`zkit names --regex RE | --range A-B`, `zkit xrefs <addr|symbol ...>`, `zkit search <words>`, "
-    "`zkit wait <repo>` before a build instead of pgrep/sleep. All take several addresses per call. "
-    "Prefer these to grepping symbols.txt or parsing the executable/report.json with Python.")
+    "zkit is available for {project}. Use its CLI via Bash: `zkit lookup <addr|name ...>` (state, owning file:line, "
+    "callers), `zkit asm <addr>`, `zkit decompile <addr ...>` (Ghidra's C; read it next to the decompiler seed), "
+    "`zkit data <addr> --type f32 --count 8`, `zkit xrefs <addr>`, `zkit refs <addr|name>` (where the source "
+    "defines and uses it), `zkit compiled <addr>` (built vs original), `zkit try <addr> <file>` (check a candidate "
+    "with the unit's own compiler; four attempts per function). Several addresses per call. Don't grep symbol or "
+    "split files or parse binaries with scripts. Edit only your own files, never build the tree, and report one "
+    "line per address.")
 
 
 def subagent_context(project: Project) -> str:

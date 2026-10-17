@@ -1,15 +1,11 @@
-"""Native-port guidance shared by MCP and session context; policy comes from each project."""
+"""Port guidance shared by the MCP instructions and the session brief; each project supplies its own policy."""
 
 PORT_GUIDANCE = (
-    'For native porting, read the project architecture/quality contract and identify the shared owner, '
-    'interfaces, dependency direction and lifetime before implementation. Prefer composed reusable behavior '
-    'and validated data over copied controllers or monolithic per-content paths; use inheritance only where '
-    'substitutability and ownership fit. Keep original formats and protocols in adapters/importers, with native '
-    'definitions/events crossing the boundary. Recover authored commands and metadata: never fabricate behavior '
-    'from an asset name, identity, shape or one sample layout. Automate discovery, dependency closure, conversion '
-    'and validation through the project importer so newly discovered content follows the same path; preserve '
-    'outputs on failure and report unsupported records explicitly. Carry the requested system through import, '
-    'native definitions, shared runtime, live admission and registered verification. Inventory coverage or a '
-    'component comparison is not completion. These port architecture rules do not refactor matching decomp: '
-    'preserve its original layout, translation units, compiler constraints and byte-match requirements.'
+    "Porting: behavior comes only from decomp code that is matched, named and clean (`zkit port-plan` marks "
+    "each function); anything unclear is decomp work first or an explicitly unsupported boundary, never a guess. "
+    "Reproduce what the original observably does, not how its era-bound code was structured: shared owners, "
+    "interfaces at real boundaries, composition, data-driven content through the importer, protocol adapters "
+    "feeding a native interface. Fix causes where the original computes them, for every consumer, not per object. "
+    "Presentation can be reimplemented freely, but with enhancements off it must match the original. These rules "
+    "never restructure the matching decomp. `zkit contract port` has the full contract."
 )
