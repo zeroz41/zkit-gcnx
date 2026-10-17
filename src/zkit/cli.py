@@ -147,6 +147,17 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--size", type=lambda v: int(v, 0), help="bytes to cover instead of --count")
     c.add_argument("--fields", help="Record layout, e.g. u32,f32,ptr,pad4")
     c.add_argument("--stride", type=lambda v: int(v, 0))
+    c = add("compiled", help="A function (or a whole unit) compiled vs the original object: identical, or the "
+                             "differing words with both disassemblies")
+    c.add_argument("query", help="address, name, or a unit name from objdiff.json")
+    c.add_argument("--limit", type=int, default=24)
+    c = add("objects", help="Prove a change kept the code: --save copies every built object, --compare (after the "
+                            "build) checks each against its copy modulo intended renames")
+    c.add_argument("--save", action="store_true")
+    c.add_argument("--compare", action="store_true")
+    c.add_argument("--label", default="saved")
+    c.add_argument("--rename", action="append", default=[], metavar="OLD=NEW", help="an intended symbol rename")
+    c.add_argument("--rename-json", type=Path, help="a JSON {old: new} map of intended renames")
     c = add("refs", help="Where a function or global is defined, declared and used in the source (any spelling)")
     c.add_argument("query", nargs="+")
     c.add_argument("--repo")
@@ -501,6 +512,19 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             return inspect_dol.read_data(project, target, address, kind, n, args.stride, fields)
         data = bridge.batch(bridge.query_list(" ".join(args.address)), one)
         return data, render.data_rows(data)
+    if command == "compiled":
+        data = bridge.compiled(project, args.query, target, args.limit)
+        return data, render.compiled(data)
+    if command == "objects":
+        from . import objects
+        if args.save:
+            meta = objects.save(project, target, args.label)
+            return meta, f"saved {meta['objects']} objects as {meta['label']} in {meta['seconds']} s" + (
+                f" ({meta['missing']} not built yet)" if meta["missing"] else "")
+        rename = json.loads(args.rename_json.read_text(encoding="utf-8")) if args.rename_json else {}
+        rename.update(dict(item.split("=", 1) for item in args.rename))
+        data = objects.compare_saved(project, target, args.label, rename)
+        return data, render.objects_compare(data)
     if command == "refs":
         data = bridge.refs(project, " ".join(args.query), target, project.repo_key(args.repo) if args.repo else None,
                            args.limit)

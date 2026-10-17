@@ -846,6 +846,56 @@ def _bytes(part: int, whole: int) -> str:
     return f"{100.0 * part / whole:.2f}% ({part:,}/{whole:,})" if whole else "0% (0/0)"
 
 
+def compiled(data: dict) -> str:
+    if "functions" in data:
+        out = [f"unit {data.get('unit')}: {data['exact']}/{data['total']} functions identical to the original"
+               + (f"; compiled-only: {', '.join(data['compiled_only'][:6])}" if data["compiled_only"] else "")]
+        for row in data["functions"]:
+            if row.get("error"):
+                out.append(f"  error   {row['function']}: {row['error']}")
+            elif not row["exact"]:
+                state = "missing" if row["missing"] else ("relocations only" if row["reloc_only"] else
+                                                          f"{row['differences']} word(s) differ")
+                out.append(f"  differs {row['function']} (0x{row['size']:X} bytes): {state}")
+        return "\n".join(out)
+    head = f"{data.get('address', '')} {data['function']} in {data.get('unit')}: "
+    if data.get("missing"):
+        return head + data["message"]
+    if data["exact"]:
+        return head + f"identical to the original (0x{data['size']:X} bytes, relocations included)"
+    out = [head + f"{data['differences']} differing word(s); original 0x{data['size']:X} bytes, compiled "
+                  f"0x{data['compiled_size']:X}" + (" — relocation targets only" if data["reloc_only"] else "")
+           + (f" (report {data['report_match']:.2f}%)" if data.get("report_match") is not None else "")]
+    for row in data["rows"]:
+        note = ""
+        if row.get("original_reloc") or row.get("compiled_reloc"):
+            note = f"  reloc {row.get('original_reloc')} vs {row.get('compiled_reloc')}"
+        out.append(f"  +0x{row['offset']:04X}  {row['original']} vs {row['compiled']}{note}")
+    if data["differences"] > len(data["rows"]):
+        out.append(f"  ... {data['differences'] - len(data['rows'])} more")
+    if data.get("original_asm") and data.get("compiled_asm"):
+        first = data.get("first_difference", 0)
+        out.append(f"original | compiled from +0x{max(0, first - 8):X}:")
+        pick = lambda lines: [l for l in lines if re.match(r"\s*[0-9a-f]+:", l)]
+        a, b = pick(data["original_asm"]), pick(data["compiled_asm"])
+        start = max(0, first // 4 - 2)
+        for x, y in list(zip(a, b))[start:start + 16]:
+            out.append(f"  {x.strip()[:60]:<60} | {y.strip()[:60]}")
+    return "\n".join(out)
+
+
+def objects_compare(data: dict) -> str:
+    out = [f"objects vs saved copy {data['label']} ({data['saved']['time']}): {data['identical']} identical, "
+           f"{data['changed_count']} changed, {len(data['new'])} new, {len(data['gone'])} gone"
+           + (f"; {data['not_rebuilt']} not rebuilt since the copy" if data["not_rebuilt"] else "")
+           + (" — OK" if data["ok"] else " — CHANGED")]
+    for row in data["changed"]:
+        out.append(f"  {row['object']}: " + "; ".join(row["problems"][:3]) + (f" (+{row['count'] - 3})" if row["count"] > 3 else ""))
+    for path in data["gone"]:
+        out.append(f"  gone: {path}")
+    return "\n".join(out)
+
+
 def refs(data: dict) -> str:
     f = data.get("function")
     head = f"refs for {data['query']}" + (f" ({_fn(f)})" if f else "") + f": {data['total']} line(s); spellings " + \

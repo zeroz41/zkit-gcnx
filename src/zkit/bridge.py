@@ -1533,3 +1533,41 @@ def refs(project: Project, query: str, target: str | None = None, repo: str | No
     return {"query": query, "function": function, "spellings": sorted(spellings), "rows": rows, "total": total,
             "limits": "Text matches in tracked files (git grep), classified by line shape. Calls through pointers, "
                       "macros and vtables are not seen; `lookup` lists the original's direct callers."}
+
+
+# ----------------------------------------------------------------------------
+# Compiled objects against the original's split objects.
+
+def compiled(project: Project, query: str, target: str | None = None, limit: int = 24) -> dict[str, Any]:
+    """A function's compiled bytes and relocations against the original's, from the unit's objects in objdiff.json;
+    a unit name gives every function of the unit."""
+    from . import objects
+    target = default_target(project, target)
+    refresh(project)
+    db = connect(project)
+    units = objects.objdiff_units(project, target)
+    root = project.root(project.target(target)["repository"])
+    if query in units or any(name.endswith("/" + query.strip("/")) for name in units):
+        name = query if query in units else next(n for n in units if n.endswith("/" + query.strip("/")))
+        unit = units[name]
+        data = objects.unit_diff(root / unit["target_path"], root / unit["base_path"])
+        data["unit"] = name
+        return data
+    found = resolve(project, query, target, limit=2)
+    if len(found) != 1:
+        raise ValueError(f"{query} names {'no' if not found else 'more than one'} function; use an address")
+    row = containing(db, target, found[0])
+    if row is None or not row["unit"]:
+        raise ValueError(f"{query} is not a function of any objdiff unit")
+    unit = units.get(row["unit"])
+    if not unit or not unit.get("base_path"):
+        raise ValueError(f"Unit {row['unit']} has no compiled object yet (no source, or not built)")
+    target_path, base_path = root / unit["target_path"], root / unit["base_path"]
+    if not base_path.is_file():
+        raise ValueError(f"{unit['base_path']} is not built yet: build the project first")
+    data = objects.function_diff(target_path, base_path, row["name"], limit=limit)
+    data.update(unit=row["unit"], address=address_text(row["address"]), report_match=row["match"])
+    if not data.get("exact") and not data.get("missing"):
+        data["original_asm"] = objects.disassembly(project, target, target_path, row["name"], data["machine"])
+        data["compiled_asm"] = objects.disassembly(project, target, base_path, row["name"], data["machine"])
+    return data
