@@ -1,234 +1,105 @@
 # zkit
 
-Makes AI coding agents (Claude Code, Codex) fast and accurate on two kinds of GameCube work:
+zkit helps AI coding agents (Claude Code and Codex) work on matching decompilations of console games, and on
+native ports written from them, without guessing. It supports GameCube/Wii projects built with
+[decomp-toolkit](https://github.com/encounter/decomp-toolkit) and [objdiff](https://github.com/encounter/objdiff),
+and Switch projects built with clang.
 
-- **Decompiling** a game with [decomp-toolkit](https://github.com/encounter/decomp-toolkit) (dtk).
-- **Porting** it: writing a PC version whose behavior matches the decomp, number for number.
+It indexes your decomp, the original executable and your port, and answers what an agent would otherwise grep or
+script for: where a function is defined and who calls it, the original bytes and data, how a compiled function
+differs from the original, what a session changed, and whether a port is about to rest on decomp code that isn't
+clean yet. It also carries the rules: what "done" means, how candidates are written and proven, and what must
+never be committed.
 
-## Quick start
+It runs locally, reads your files, and never uses the network.
 
-You need [uv](https://docs.astral.sh/uv/getting-started/installation/), git, and a dtk decomp you've built once. Then:
+## Install
+
+You need [uv](https://docs.astral.sh/uv/getting-started/installation/) and git.
 
 ```sh
 uv tool install git+https://github.com/zeroz41/gcn-zkit
 cd path/to/your-decomp
-zkit setup                          # just the decomp
-zkit setup --native ../your-port    # or the decomp plus your PC port
+zkit setup                          # the decomp
+zkit setup --native ../your-port    # or the decomp and its port
 ```
 
-Restart Claude Code or Codex in the decomp or port folder and ask:
+`setup` writes the project file (in zkit's own config folder, never in your repo), builds the index, and installs
+the plugin for Claude Code and Codex, whichever you have. Restart them in the project folder. `zkit doctor`
+checks everything and prints the fix for anything missing.
+
+Optional: [Ghidra](https://github.com/NationalSecurityAgency/ghidra/releases) 11.3+ for `zkit decompile`
+(GameCube also needs the [GameCube Loader](https://github.com/Cuyler36/Ghidra-GameCube-Loader/releases)
+extension for its Gekko language), installed with `uv tool install --force 'zkit[ghidra] @
+git+https://github.com/zeroz41/gcn-zkit'`.
+
+## Use
+
+Agents get a short brief at session start and these skills: `zkit-resume`, `zkit-recover-function`,
+`zkit-clean-source`, `zkit-port-system`, `zkit-start-project` and `zkit-finish`. A short prompt is enough:
 
 ```
 Continue the decomp. Use zkit-resume, then zkit-recover-function. Finish with zkit-finish.
 ```
 
-or, for the port:
-
 ```
-Continue the port. Use zkit-resume, then zkit-port-system. Finish with zkit-finish.
-```
-
-That's it. The rest of this page explains what you get, more prompts, and how to fix things if a step doesn't work.
-
-## What it is
-
-A local tool that joins your decomp, the original game (with its REL modules) and, if you have one, your PC port. It
-answers what an agent needs in one call.
-
-**For the decomp:**
-
-- **lookup**: any function by address or name. Its match %, the file and line that define it (including inline
-  methods in headers), every caller (including from RELs), callees, and the vtables that hold it. On a vtable or table,
-  every slot it points to.
-- **asm / data**: the original instructions with symbols and constants resolved, and the original data.
-- **xrefs**: who reads or writes a global.
-- **names**: find functions by name, file or match state, for example the closest near-misses. A range over data
-  lists its data symbols.
-- **unit**: a split unit's ranges, the functions still to match or name, the data other units use, and the literals
-  and globals its code takes from elsewhere. `--blocked` lists every exact unit that won't link yet, with those
-  cross-unit references; `--gaps` maps every data range no split claims and which unit uses it.
-- **classes**: method names whose class the original vtables contradict, and virtuals with no class yet.
-
-**For a port that must behave like the original** (the port cites the original addresses it implements, like
-`// 800C1C4C`):
-
-- **port-plan**: before porting a feature, the original's call tree, with each step marked: reuse what the port
-  already has, decompile it first, or port it.
-- **suspects / consts / drift**: where the port probably behaves slightly differently from the real game. That covers
-  code built on functions the decomp hasn't matched yet, numbers that don't match the constants the original loads,
-  and port code written against decomp code that has changed since.
-- **grounding / demand**: how much of the port rests on proven decomp code, and which decomp functions the port is
-  waiting on.
-- **impact / check / tiers**: the exact tests to run for a change, lint against the port's rules, and which code must
-  match the original exactly and which is free to differ (rendering, UI).
-- **stale**: which built programs are older than the code compiled into them, so nobody tests an old build.
-
-**For every session:** the **brief** is handed to each new agent. It covers progress, other agents and builds running,
-uncommitted work, and the last session's notes, so no session starts from zero.
-
-It works on brand-new, in-progress and finished decomps, with or without a port. It runs on your machine, only reads
-your files, and never uses the network.
-
-## Does it help?
-
-Same model, same questions, with and without zkit ([details](docs/validation.md)):
-
-| Project | Without zkit | With zkit |
-| --- | --- | --- |
-| Brand new decomp, 0% matched, 757 RELs (5 questions) | 5/5 right, 82 s, $0.46 | 5/5 right, 61 s, $0.56 |
-| Same game, 41% matched (2 questions) | 2/2 right¹, 15 s, $0.13 | 2/2 right, 20 s, $0.15 |
-| Same game, fully matched (2 questions) | 2/2 right, 37 s, $0.21 | 2/2 right, 18 s, $0.16 |
-| A 72%-matched decomp with a PC port built to match it (4 questions) | 3/4 right, 308 s, $0.83 | 4/4 right, 66 s, $0.56 |
-
-Single questions on a small decomp come out about even, because dtk's output is already searchable text. The gains
-grow with the project, and are largest with a PC port, where questions span the decomp, the original and the port at
-once.
-
-It's also checked against real work: 3,938 calls that agents made on the decomp-plus-port project, replayed on this
-version and the previous one. This version answers every one the previous one did, plus the ones it missed:
-definition lines agents otherwise found by hand, and lookups that mix names and addresses.
-
-¹ Graded as a miss for leaving out a compiler-generated function on purpose; its numbers were right.
-
-## Requirements
-
-| You need | Windows | macOS | Linux |
-| --- | --- | --- | --- |
-| **uv** (installs zkit and its Python) | `powershell -c "irm https://astral.sh/uv/install.ps1 \| iex"` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| **git** | [git-scm.com](https://git-scm.com/downloads/win) | `xcode-select --install` | your package manager (`sudo apt install git`, ...) |
-| **A dtk decomp, built once** | `python configure.py`, then `ninja` in the decomp (its README lists what that needs) | same | same |
-| Claude Code or Codex (optional) | [Claude Code](https://docs.claude.com/en/docs/claude-code), [Codex](https://github.com/openai/codex) | same | same |
-
-Optional, for `decompile`: [Ghidra](https://github.com/NationalSecurityAgency/ghidra/releases) 11.3+, the
-[GameCube Loader](https://github.com/Cuyler36/Ghidra-GameCube-Loader/releases) build for that Ghidra unzipped into
-Ghidra's user `Extensions` folder (only its Gekko/Broadway language is used; its DOL loader, which opens dialogs, never
-runs), and the `ghidra` extra:
-`uv tool install --force 'zkit[ghidra] @ git+https://github.com/zeroz41/gcn-zkit'` (from a checkout:
-`uv tool install --force --editable '/path/to/zkit[ghidra]'`). `zkit doctor` says which piece is missing.
-
-uv brings the right Python and every package zkit needs. The decomp's own build downloads dtk, the compilers and
-binutils. No decomp yet? Start one from [dtk-template](https://github.com/encounter/dtk-template).
-
-## Install and set up, step by step
-
-1. Install the command: `uv tool install git+https://github.com/zeroz41/gcn-zkit`.
-   If `zkit` is then "not found", run `uv tool update-shell` and open a new terminal.
-2. In your decomp's folder, run `zkit setup`. It indexes the decomp (a few seconds to a minute) and connects
-   Claude Code and Codex, whichever you have.
-3. Restart them. In Codex, accept the startup-hook prompt once.
-4. Run `zkit doctor`. Anything that isn't OK comes with the command that fixes it.
-
-For more decomps, run `setup` in each one. zkit picks the right one from the folder you're in.
-
-Have your own project file, with your rules, finish steps, lessons or a port (see [docs/manifest.md](docs/manifest.md))?
-Keep it outside this repo and run `zkit setup path/to/your.project.json`. That's the same full install.
-
-## Use
-
-Your agent starts with the brief, the tools and four skills: `zkit-resume`, `zkit-recover-function`, `zkit-finish`,
-and `zkit-port-system` for PC ports. The brief carries required architecture/standards references, the repo's rules, finish steps, other agents and
-leftover work, so a short prompt is enough. Paste one of these:
-
-**Decompiling:**
-
-```
-Continue the decomp. Use zkit-resume, then zkit-recover-function.
-Go for big wins. If the port is waiting on functions, work the zkit demand list.
-Keep any verified work you find. Finish with zkit-finish.
+Continue the port on the next milestone in its status doc. Use zkit-resume, then zkit-port-system.
+Finish with zkit-finish.
 ```
 
-**Working on the PC port:**
-
 ```
-Continue the port on the next milestone in its status doc.
-Use zkit-resume, then zkit-port-system: check zkit grounding for the system,
-run zkit port-plan before porting, and reuse the code that already owns the behavior.
-Automate import dependencies through the project pipeline; check configured architecture and coverage.
-Test the live path with zkit impact. Finish with zkit-finish.
+Clean up the decomp source in large proven steps. Use zkit-clean-source. Finish with zkit-finish.
 ```
 
-**Finding behavior in the port that's slightly off from the real game:**
+The rules behind the skills: `zkit contract decomp` and `zkit contract port`.
 
-```
-Use zkit-port-system. Run zkit suspects and zkit drift on the port. For the top items:
-decompile-first ones go to the decomp first (zkit-recover-function), then re-port and
-re-test with zkit impact. Fix near-miss constants against the original. Finish with zkit-finish.
-```
+### Commands
 
-To leave a note when you stop early, say: *"zkit handoff: what you did and what's next."* The next session sees it.
+Run them in your repo. They only read, except `handoff`, `report`, `objects --save` and `cache --prune`, which
+write to zkit's own folders or the folder you name.
 
-### Commands you can run yourself
-
-Run these inside the repo. They only read, except `handoff`.
-
-| You want to know | Type |
+| You want | Command |
 | --- | --- |
-| Where things stand, who else is working, what's left over | `zkit brief` |
-| Is everything set up? (each problem comes with its fix) | `zkit doctor` |
-| Everything about a function | `zkit lookup MyClass::update` or `zkit lookup 0x80012345` |
-| A function in a REL | `zkit lookup mymodule+0x1D0` |
-| What's in a vtable | `zkit lookup __vt__7MyClass` |
-| The closest near-misses in a file | `zkit names --unit my_file --below 100 --sort match` |
-| Original disassembly / data | `zkit asm 0x80012345` / `zkit data 0x80345678 --type str` |
-| Ghidra's C for an original function, next to m2c (optional; closer where m2c emits `goto`) | `zkit decompile 0x80012345` |
-| A unit's ranges, data and cross-unit references | `zkit unit game/MyClass` or `zkit unit 0x80345678` |
-| Exact units that don't link yet, and why | `zkit unit --blocked` |
-| Data no split claims yet, and who uses it | `zkit unit --gaps --section .sdata2` |
-| Class names the vtables contradict | `zkit classes` |
-| Who reads or writes a global | `zkit xrefs g_gameState` |
-| Search docs and source | `zkit search player jump` |
-| Is someone else building? Wait until it's free | `zkit wait decomp` |
-| Other agents, builds, locks, stranded worktrees | `zkit activity` |
-| Check a port system against its configured include boundaries | `zkit architecture native src/world` |
-| Find missing import/integration entries in a declared inventory | `zkit coverage native effects` |
-| Validate exact tests and plan their parallel prebuilds (no execution) | `zkit test-plan native movement collision --jobs 4` |
-| What must run before ending a session | `zkit gate` |
-| Leave a note for the next session | `zkit handoff decomp "matched X; next: Y"` |
+| Where things stand, who else is working, what was left | `zkit brief` |
+| Everything about a function | `zkit lookup 0x80012345` or `zkit lookup MyClass::update` |
+| Where the source defines and uses it | `zkit refs 0x80012345` |
+| Original instructions or data | `zkit asm 0x80012345`, `zkit data 0x80345678 --type f32 --count 8` |
+| Ghidra's C for an original function | `zkit decompile 0x80012345` |
+| A compiled function against the original | `zkit compiled 0x80012345` |
+| Check a candidate outside the tree | `zkit try 0x80012345 candidate.cpp` |
+| A unit, exact units that don't link, unclaimed data | `zkit unit game/MyClass`, `zkit unit --blocked`, `zkit unit --gaps` |
+| Progress, and what changed since a baseline | `zkit progress`, `zkit progress --since session --check` |
+| A browsable progress page | `zkit report --out build/progress` |
+| Decompiler debt left in the source | `zkit quality`, `zkit quality --since HEAD~20` |
+| Prove a change kept every object identical | `zkit objects --save`, build, `zkit objects --compare` |
+| What must not be committed or left behind | `zkit hygiene` |
+| What to run before ending | `zkit gate` |
+| A note for the next session | `zkit handoff decomp "matched X; next: Y"` (no text prints the last note) |
 
-With a PC port (`setup --native`), run these inside the port:
+With a port:
 
-| You want to know | Type |
+| You want | Command |
 | --- | --- |
-| What to reuse, port or decompile first for a feature | `zkit port-plan 0x80012345` |
+| Is the decomp ready for this feature, and what to reuse | `zkit port-plan 0x80012345` |
 | What the port is waiting on from the decomp | `zkit demand` |
-| Which systems rest on unproven decomp code | `zkit grounding` |
-| **Where the port probably behaves slightly wrong, and what to do** | `zkit suspects` |
-| Are the port's numbers the real game's numbers? | `zkit consts src/combat` |
-| What changed in the decomp that the port must re-check | `zkit drift` (after re-checking: `zkit drift --accept`) |
-| Which tests cover my change, and who else uses that code | `zkit impact` (`--budget 120` while iterating) |
-| Is the build older than my edits? (check before running it) | `zkit stale` |
-| What must match the original exactly, and where I'm free | `zkit tiers src/camera` |
-| Is my change breaking the repo's rules? | `zkit check` |
-| Copy-pasted code that should be shared | `zkit reuse` |
+| Where the port probably differs from the original | `zkit suspects`, `zkit consts src/combat` |
+| What changed in the decomp that the port must re-check | `zkit drift` |
+| The tests that cover a change | `zkit impact` |
+| Is the build older than the code? | `zkit stale` |
+| Lint the change against the project's rules | `zkit check` |
 
-Optional: block commits that break the port's rules with `zkit install git-hook --write <port folder>`
-(`git commit --no-verify` skips it once). The rules, finish steps and lint checks live in the project file; see
-[docs/manifest.md](docs/manifest.md).
+`zkit install git-hook --write <repo>` adds a pre-commit check and a commit-message check (one short line, the
+project's identity, no AI co-author).
 
 ## Update or remove
 
-- **Update:** `uv tool upgrade zkit`, then `zkit setup --refresh-agents` in each decomp.
-  From a local checkout: `uv tool install --force --editable /path/to/zkit`, then
-  `zkit setup /path/to/project.json --refresh-agents --plugin-source /path/to/zkit`.
-  Restart both agents. `zkit doctor` shows the loaded Python path and plugin cache versions/content.
-- **Remove:** `uv tool uninstall zkit`, then `claude plugin uninstall zkit@zkit` and/or
-  `codex plugin remove zkit@zkit`. To also remove its notes and index, delete `~/.config/zkit`,
-  `~/.cache/zkit` and `~/.local/state/zkit` (on Windows these are in your user folder).
-
-## Troubleshooting
-
-| Problem | Fix |
-| --- | --- |
-| "not a decomp-toolkit project" | Run it in the decomp folder, the one with `configure.py` and `config/<GAMEID>/config.yml`. |
-| No match %, source files or REL functions | Build the decomp once (`python configure.py`, then `ninja`), then `zkit setup` again. |
-| The agent doesn't list zkit | Check that `zkit --version` works in a new terminal, then fully restart the agent. |
-| No brief at session start | Start the agent inside the decomp folder. Elsewhere zkit stays silent on purpose. |
+- Update: `uv tool upgrade zkit`, then `zkit setup --refresh-agents` and restart the agents.
+- Remove: `uv tool uninstall zkit`, `claude plugin uninstall zkit@zkit`, `codex plugin remove zkit@zkit`, and
+  delete `~/.config/zkit`, `~/.cache/zkit` and `~/.local/state/zkit`.
 
 ## More
 
-- [docs/design.md](docs/design.md): how it works, and what each answer does and doesn't prove
-- [docs/manifest.md](docs/manifest.md): the project file `setup` writes (rules, finish steps, lint checks, PC ports)
-- [docs/validation.md](docs/validation.md): tests and measurements
-- Tested on Linux and Windows. CI runs the tests on Linux, macOS and Windows.
+- [docs/architecture.md](docs/architecture.md): how zkit is built and what each answer does and doesn't prove.
+- [docs/project-file.md](docs/project-file.md): the project file (rules, finish gate, checks, hygiene, ports).
 
-GPL-3.0 licensed.
+GPL-3.0.

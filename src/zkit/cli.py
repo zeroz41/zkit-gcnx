@@ -267,6 +267,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--since", help="judge the commits in SINCE..HEAD (default: the last --limit commits)")
     c.add_argument("--limit", type=int, default=30)
     c.add_argument("--only", choices=["commits", "files", "tree"], action="append", help="run only these parts")
+    c = add("contract", help="Print the toolkit's rules for a decomp or a port (no project needed)")
+    c.add_argument("kind", choices=["decomp", "port"])
     c = add("commit-msg", help="Check a commit message file against the repo's commit rules (the commit-msg hook)")
     c.add_argument("file", type=Path)
     c = add("cites", help="Native citations that resolve to nothing in the target")
@@ -378,6 +380,10 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         text = "\n".join(f"{'*' if r.get('here') else ' '} {r.get('id', '?'):<32} {r['manifest']}"
                          + (" (default)" if r.get("default") else "") for r in rows) or "no projects yet: zkit init <decomp repo>"
         return rows, text + ("\n* = the project for this folder" if any(r.get("here") for r in rows) else "")
+    if args.command == "contract":
+        from importlib import resources
+        text = resources.files("zkit").joinpath(f"contracts/{args.kind}.md").read_text(encoding="utf-8")
+        return {"kind": args.kind, "text": text}, text
     if args.command == "cache":
         from .index import cache_inventory, prune_cache
         if args.prune:

@@ -14,7 +14,8 @@ from pathlib import Path
 from .project import Project
 
 COMMAND = "zkit"
-SKILLS = ["zkit-resume", "zkit-recover-function", "zkit-port-system", "zkit-finish"]
+SKILLS = ["zkit-resume", "zkit-recover-function", "zkit-clean-source", "zkit-port-system", "zkit-start-project",
+          "zkit-finish"]
 
 
 def skills_source() -> Path | None:
