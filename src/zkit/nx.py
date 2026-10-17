@@ -85,6 +85,8 @@ class Module:
     build_id: str = ""
     name: str = ""
     symbols: dict[int, str] = field(default_factory=dict)           # offset -> dynamic symbol name (defined)
+    sizes: dict[int, int] = field(default_factory=dict)             # offset -> that symbol's size
+    kinds: dict[int, str] = field(default_factory=dict)             # offset -> func or object
     imports: dict[int, str] = field(default_factory=dict)           # data offset -> imported symbol it holds
     pointers: dict[int, int] = field(default_factory=dict)          # data offset -> offset it points to (relative)
     init_array: list[int] = field(default_factory=list)
@@ -122,10 +124,36 @@ class Module:
         return list(struct.unpack(f"<{len(data) // 4}I", data))
 
     def functions(self) -> list[tuple[int, int]]:
-        """(start, size) of every function the module's unwind table describes, sorted."""
-        if self.eh_frame_hdr is None:
-            return []
-        return _eh_frame_functions(self, *self.eh_frame_hdr)
+        """(start, size) of every function: the unwind table's (clang writes one for every function it compiles),
+        plus defined function symbols and import stubs it lacks."""
+        found = dict(_eh_frame_functions(self, *self.eh_frame_hdr)) if self.eh_frame_hdr else {}
+        for offset, kind in self.kinds.items():
+            if kind == "func" and offset not in found and self.sizes.get(offset):
+                found[offset] = self.sizes[offset]
+        for offset in self.stubs():
+            found.setdefault(offset, 16)
+        return sorted(found.items())
+
+    def stubs(self) -> dict[int, str]:
+        """Import stubs (adrp x16 / ldr x17, [x16, #lo] / add x16, x16, #lo / br x17) -> the import they jump to."""
+        if getattr(self, "_stubs", None) is not None:
+            return self._stubs
+        found: dict[int, str] = {}
+        text = next((s for s in self.segments if s.name == "text"), None)
+        if text is not None:
+            words = struct.unpack_from(f"<{text.size // 4}I", self.image, text.offset)
+            for index in range(len(words) - 3):
+                first, second, third, fourth = words[index:index + 4]
+                if first & 0x9F00001F != 0x90000010 or second & 0xFFC003FF != 0xF9400211 or fourth != 0xD61F0220:
+                    continue
+                pc = text.offset + index * 4
+                imm = ((first >> 5 & 0x7FFFF) << 2) | (first >> 29 & 3)
+                imm = (imm - (1 << 21) if imm & (1 << 20) else imm) << 12
+                slot = (pc & ~0xFFF) + imm + ((second >> 10 & 0xFFF) << 3)
+                if slot in self.imports:
+                    found[pc] = self.imports[slot]
+        self._stubs = found
+        return found
 
 
 def load(path: Path) -> Module:
@@ -221,6 +249,8 @@ def _read_mod0(module: Module) -> None:
             names.append((text, shndx, value))
             if text and shndx and value:
                 module.symbols.setdefault(value, text)
+                module.sizes.setdefault(value, size)
+                module.kinds.setdefault(value, "func" if info & 0xF == 2 else "object")
     for start_tag, size_tag in ((DT_RELA, DT_RELASZ), (DT_JMPREL, DT_PLTRELSZ)):
         start, size = tags.get(start_tag), tags.get(size_tag)
         if start is None or not size:
