@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 LANGUAGE = "PowerPC:BE:32:Gekko_Broadway"
+SWITCH_LANGUAGE = "AARCH64:LE:64:v8A"
 
 
 def main(request_path: str) -> int:
@@ -42,42 +43,61 @@ def main(request_path: str) -> int:
 
     from .gc import Dol
 
+    switch = request.get("platform") == "switch"
+    base = int(request.get("base") or 0)
+    wanted = SWITCH_LANGUAGE if switch else LANGUAGE
     try:
-        language = DefaultLanguageService.getLanguageService().getLanguage(LanguageID(LANGUAGE))
+        language = DefaultLanguageService.getLanguageService().getLanguage(LanguageID(wanted))
     except Exception:
-        out.write_text(json.dumps({"error": f"Ghidra has no {LANGUAGE} language: install the GameCube Loader "
-                                            "extension (see `zkit doctor`)"}) + "\n", encoding="utf-8")
+        out.write_text(json.dumps({"error": f"Ghidra has no {wanted} language" + (
+            "" if switch else ": install the GameCube Loader extension (see `zkit doctor`)")}) + "\n", encoding="utf-8")
         return 2
-    program = ProgramDB("dol", language, language.getCompilerSpecByID(CompilerSpecID("default")), Object())
+    program = ProgramDB("original", language, language.getCompilerSpecByID(CompilerSpecID("default")), Object())
     address = program.getAddressFactory().getDefaultAddressSpace().getAddress
-    dol = Dol.load(Path(request["dol"]))
     transaction = program.startTransaction("map")
     memory = program.getMemory()
-    for section in dol.sections:
-        blob = dol.raw[section.offset:section.offset + section.size]
-        block = memory.createInitializedBlock(f"{section.kind}{section.index}", address(section.address),
-                                              ByteArrayInputStream(blob), len(blob), TaskMonitor.DUMMY, False)
-        block.setRead(True)
-        block.setWrite(section.kind == "data")
-        block.setExecute(section.kind == "text")
-    low, high = dol.bss[0], dol.bss[0] + dol.bss[1]
-    cursor = low  # .bss as dtk sees it also spans .sdata/.sbss: map only the gaps no section covers
-    for start, end in sorted((s.address, s.address + s.size) for s in dol.sections if s.kind == "data") + [(high, high)]:
-        if start > cursor and cursor < high:
-            memory.createUninitializedBlock(f"bss_{cursor:X}", address(cursor), min(start, high) - cursor,
-                                            False).setWrite(True)
-        cursor = max(cursor, end)
+    if switch:
+        from .nx import load
+        module = load(Path(request["dol"]))
+        for segment in module.segments:
+            if segment.name == "bss":
+                memory.createUninitializedBlock("bss", address(base + segment.offset), segment.size, False).setWrite(True)
+                continue
+            blob = bytes(module.image[segment.offset:segment.offset + segment.size])
+            block = memory.createInitializedBlock(segment.name, address(base + segment.offset),
+                                                  ByteArrayInputStream(blob), len(blob), TaskMonitor.DUMMY, False)
+            block.setRead(True)
+            block.setWrite(segment.name == "data")
+            block.setExecute(segment.kind == "code")
+    else:
+        dol = Dol.load(Path(request["dol"]))
+        for section in dol.sections:
+            blob = dol.raw[section.offset:section.offset + section.size]
+            block = memory.createInitializedBlock(f"{section.kind}{section.index}", address(section.address),
+                                                  ByteArrayInputStream(blob), len(blob), TaskMonitor.DUMMY, False)
+            block.setRead(True)
+            block.setWrite(section.kind == "data")
+            block.setExecute(section.kind == "text")
+        low, high = dol.bss[0], dol.bss[0] + dol.bss[1]
+        cursor = low  # .bss as dtk sees it also spans .sdata/.sbss: map only the gaps no section covers
+        for start, end in sorted((s.address, s.address + s.size) for s in dol.sections if s.kind == "data") + [(high, high)]:
+            if start > cursor and cursor < high:
+                memory.createUninitializedBlock(f"bss_{cursor:X}", address(cursor), min(start, high) - cursor,
+                                                False).setWrite(True)
+            cursor = max(cursor, end)
+    width = 10 if switch else 8
     functions = program.getFunctionManager()
     for start, size in request["functions"]:
+        at = base + start
         try:
-            functions.createFunction(f"fn_{start:08X}", address(start), AddressSet(address(start),
-                                     address(start + max(size, 4) - 1)), SourceType.IMPORTED)
+            functions.createFunction(f"fn_{at:0{width}X}", address(at), AddressSet(address(at),
+                                     address(at + max(size, 4) - 1)), SourceType.IMPORTED)
         except Exception:
             pass  # overlapping or out-of-image boundary: that function reports "no function"
     context = program.getProgramContext()
-    # GQR0 is zero on GameCube (__OSPSInit) and MWCC's own paired-single code uses it; without this every
-    # psq_l/psq_st decompiles into dequantization branches.
-    values = [(f"r{reg}", value) for reg, value in request["sda"].items()] + [("GQR0", 0)]
+    # GameCube: GQR0 is zero (__OSPSInit) and MWCC's own paired-single code uses it; without this every
+    # psq_l/psq_st decompiles into dequantization branches. r2/r13 are the small-data bases.
+    values = [] if switch else [(f"r{reg}", value) for reg, value in request["sda"].items()] + [("GQR0", 0)]
     for name, value in values:
         register = program.getRegister(name)
         if register is None:
@@ -101,7 +121,7 @@ def main(request_path: str) -> int:
             interface.toggleSyntaxTree(False)
             interface.openProgram(program)
             local.interface = interface
-        function = functions.getFunctionAt(address(start))
+        function = functions.getFunctionAt(address(base + start))
         if function is None:
             return {"address": start, "error": "no function at this boundary"}
         result = interface.decompileFunction(function, request.get("timeout", 60), TaskMonitor.DUMMY)

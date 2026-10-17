@@ -264,18 +264,20 @@ def _python() -> str | None:
     return sys.executable if importlib.util.find_spec("pyghidra") else None
 
 
-def status() -> dict:
-    """What `doctor` reports; `problem`/`fix` are set when decompilation cannot run."""
+def status(platform: str = "gamecube") -> dict:
+    """What `doctor` reports; `problem`/`fix` are set when decompilation cannot run. GameCube needs the Gekko
+    language from the GameCube Loader extension; Switch uses Ghidra's own AArch64 language."""
     install = install_dir()
     if install is None:
         return {"problem": "Ghidra not found", "fix": "install Ghidra 11.3+ or set GHIDRA_INSTALL_DIR"}
     props = _properties(install)
     version = f"{props.get('application.version')} {props.get('application.release.name')}"
-    language = gekko_language(install)
+    builtin = install / "Ghidra" / "Processors" / "AARCH64" / "data" / "languages" / "AARCH64.ldefs"
+    language = builtin if platform == "switch" else gekko_language(install)
     python = _python()
     info = {"install": str(install), "version": version, "language": str(language) if language else None,
-            "python": python}
-    if language is None:
+            "python": python, "platform": platform}
+    if language is None or not Path(language).is_file():
         info.update(problem="Ghidra lacks the Gekko/Broadway language (paired singles)",
                     fix=f"unzip the GameCube Loader for Ghidra {props.get('application.version')} from {EXTENSION} into "
                         f"{_user_settings(props.get('application.version', ''), props.get('application.release.name', '')) / 'Extensions'}"
@@ -285,13 +287,13 @@ def status() -> dict:
     return info
 
 
-_AVAILABLE: list = [0.0, False]
+_AVAILABLE: list = [0.0, False, ""]
 
 
-def available() -> bool:
+def available(platform: str = "gamecube") -> bool:
     """Whether `decompile` can run, rechecked every 5 minutes (cheap enough for every lookup)."""
-    if time.monotonic() - _AVAILABLE[0] > 300:
-        _AVAILABLE[:] = [time.monotonic(), not status().get("problem")]
+    if time.monotonic() - _AVAILABLE[0] > 300 or len(_AVAILABLE) < 3 or _AVAILABLE[2] != platform:
+        _AVAILABLE[:] = [time.monotonic(), not status(platform).get("problem"), platform]
     return _AVAILABLE[1]
 
 
@@ -312,6 +314,7 @@ def _environment(info: dict, dol: Path, sda: dict[int, int]) -> str:
     language = Path(info["language"])
     sources = (".ldefs", ".sinc", ".slaspec", ".pspec", ".cspec")  # not .sla: Ghidra compiles it on first use
     stamp = [f"{p.name}:{p.stat().st_size}" for p in sorted(language.parent.iterdir()) if p.suffix in sources]
+    stamp.append(info.get("platform", "gamecube"))
     key = json.dumps([WORKER_VERSION, info["version"], stamp, _dol_digest(dol), sorted(sda.items())])
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
@@ -326,13 +329,15 @@ def _store(project: Project) -> sqlite3.Connection:
 
 
 def _run_worker(info: dict, dol: Path, sda: dict[int, int], boundaries: list[tuple[int, int]],
-                addresses: list[int], threads: int | None) -> tuple[list[dict], dict]:
+                addresses: list[int], threads: int | None, platform: str = "gamecube",
+                base: int = 0) -> tuple[list[dict], dict]:
     plan = budget(threads)
     if plan.get("refuse"):
         raise ValueError(plan["refuse"])
     with tempfile.TemporaryDirectory(prefix="zkit-ghidra-") as work:
         request, output = Path(work) / "request.json", Path(work) / "out.jsonl"
         request.write_text(json.dumps({"install_dir": info["install"], "dol": str(dol), "sda": sda,
+                                       "platform": platform, "base": base,
                                        "functions": boundaries, "addresses": addresses,
                                        "threads": plan["threads"], "heap": f"{plan['heap_mb']}m",
                                        "output": str(output)}), encoding="utf-8")
@@ -357,28 +362,33 @@ def _run_worker(info: dict, dol: Path, sda: dict[int, int], boundaries: list[tup
     return rows[:-1], rows[-1]["timing"]
 
 
-FN_NAME = re.compile(r"\bfn_([0-9A-F]{8})\b")
-DATA_NAME = re.compile(r"\b(?:PTR_\w*?_|DAT_|[a-z]{1,6}Ram)([0-9a-fA-F]{8})\b")
+FN_NAME = re.compile(r"\bfn_([0-9A-F]{8,16})\b")
+DATA_NAME = re.compile(r"\b(?:PTR_\w*?_|DAT_|[a-z]{1,6}Ram)([0-9a-fA-F]{8,16})\b")
 # Ghidra notes dead paths it pruned; with GQR0 pinned these are paired-single dequantization paths, never source.
 UNREACHABLE = re.compile(r"^/\* WARNING: Removing unreachable block \(ram,0x[0-9a-f]+\) \*/\n", re.M)
-POINTER = re.compile(r"\b0x(8[01][0-9a-fA-F]{6})\b")  # lis/addi addresses Ghidra did not type as pointers
+POINTER_GAMECUBE = re.compile(r"\b0x(8[01][0-9a-fA-F]{6})\b")  # lis/addi addresses Ghidra did not type as pointers
 
 
 def _namer(project: Project, target: str, db):
     """Current names for Ghidra's address names: functions exactly, data as symbol or symbol.unkOFFSET, and
     image constants that land inside a symbol as its address. Constants outside every symbol stay numbers."""
     from .bridge import _symbol_lookup
+    from .platform import for_target
+    current = for_target(project.target(target))
+    key = lambda text: current.cite_value(text)
+    pointers = POINTER_GAMECUBE if current.name == "gamecube" else re.compile(r"\b0x(" + current.cite_pattern()
+                                                                               .split("(", 2)[-1].split(")")[0] + r")\b")
     seen: dict[tuple[str, int], str | None] = {}
 
     def function(match: re.Match) -> str:
-        address = int(match[1], 16)
+        address = key(match[1])
         if ("fn", address) not in seen:
             row = function_at(db, target, address)
             seen["fn", address] = row["name"] if row and row["address"] == address else None
         return seen["fn", address] or match[0]
 
     def data(match: re.Match) -> str:
-        address = int(match[1], 16)
+        address = key(match[1])
         if ("data", address) not in seen:
             symbol = _symbol_lookup(project, target, address)
             name = None
@@ -388,7 +398,7 @@ def _namer(project: Project, target: str, db):
         return seen["data", address] or match[0]
 
     def pointer(match: re.Match) -> str:
-        address = int(match[1], 16)
+        address = key(match[1])
         if ("ptr", address) not in seen:
             symbol = _symbol_lookup(project, target, address)
             name = None
@@ -399,23 +409,25 @@ def _namer(project: Project, target: str, db):
             seen["ptr", address] = name
         return seen["ptr", address] or match[0]
 
-    return lambda text: POINTER.sub(pointer, DATA_NAME.sub(data, FN_NAME.sub(function, UNREACHABLE.sub("", text))))
+    return lambda text: pointers.sub(pointer, DATA_NAME.sub(data, FN_NAME.sub(function, UNREACHABLE.sub("", text))))
 
 
 def decompile(project: Project, target: str, addresses: list[int] | None, threads: int | None = None) -> dict:
     """Decompile DOL functions (None: every function not cached yet). Cached rows return instantly; misses run
     one Ghidra worker for all of them."""
-    info = status()
+    from .inspect_dol import _dol, sda_bases
+    from .platform import for_target
+    config = project.target(target)
+    current = for_target(config)
+    info = status(current.name)
     if info.get("problem"):
         raise ValueError(f"Ghidra decompilation is unavailable: {info['problem']}. Fix: {info['fix']}")
-    from .inspect_dol import _dol, sda_bases
-    config = project.target(target)
     dol_path = project.file(config["repository"], config["original"]) if config.get("original") else None
     if dol_path is None or not dol_path.is_file():
         raise ValueError(f"Target {target} has no original executable on disk")
     refresh(project, [])
     db = connect(project)
-    sda = sda_bases(project, target, _dol(project, target))
+    sda = sda_bases(project, target, _dol(project, target)) if current.name == "gamecube" else {}
     env = _environment(info, dol_path, sda)
     boundaries = [(r[0], r[1]) for r in db.execute(
         "SELECT address, size FROM functions WHERE target=? AND address<? ORDER BY address",
@@ -442,7 +454,8 @@ def decompile(project: Project, target: str, addresses: list[int] | None, thread
             cached.update(read_cache(missing))  # another agent's worker may have filled them while we waited
             missing = [a for a in missing if a not in cached]
             if missing:
-                rows, timing = _run_worker(info, dol_path, sda, boundaries, missing, threads)
+                rows, timing = _run_worker(info, dol_path, sda, boundaries, missing, threads, current.name,
+                                           current.base)
                 with store:
                     store.execute("DELETE FROM decompiled WHERE env<>?", (env,))  # rows of an older Ghidra or DOL
                     store.executemany("INSERT OR REPLACE INTO decompiled VALUES(?,?,?,?,?)",

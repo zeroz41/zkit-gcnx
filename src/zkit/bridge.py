@@ -22,10 +22,27 @@ from typing import Any
 
 from .gc import Symbol, read_symbols
 from .index import (MODULE_SHIFT, address_text, cache_path, connect, containing, fts_query, module_address, refresh,
-                    report_age_hours, report_staleness)
+                    report_age_hours, report_staleness, use_platform)
 from .project import Project
 
-HEX = re.compile(r"^(?:0x)?([0-9A-Fa-f]{8})$")
+class _Address:
+    """`HEX.match(text)[1]` is the hex of the key an address token names, for the active platform: 80012345 and
+    0x80012345 on GameCube, 0x7100123456 or 0x123456 on Switch (stored relative to the module base)."""
+
+    class _Found:
+        def __init__(self, value: int):
+            self.value = value
+
+        def __getitem__(self, index: int) -> str:
+            return f"{self.value:X}"
+
+    def match(self, text: str):
+        from .index import platform
+        value = platform().parse(text) if text else None
+        return self._Found(value) if value is not None else None
+
+
+HEX = _Address()
 QUERY_SPLIT = re.compile(r"[\s,]+")
 MODULE_TOKEN = re.compile(r"[A-Za-z_][\w.-]*\+0x[0-9A-Fa-f]+")  # a REL function address, e.g. mymodule+0x124
 CALLER_ROWS = 400
@@ -723,24 +740,29 @@ def _pointer_slots(project: Project, target: str, db, start: int, size: int, cap
     """Words inside a data object that point at code or data in the original (a vtable's methods, a callback or
     jump table's targets). Read from the original executable; nothing for .bss or without one."""
     from .inspect_dol import _dol
+    from .platform import for_target
+    platform = for_target(project.target(target))
     try:
         dol = _dol(project, target)
-        words = dol.words(start, min(size, cap * 4))
+        if platform.pointer_size == 8:
+            words = [dol.pointers.get(start + i * 8, 0) or 0 for i in range(min(size, cap * 8) // 8)]
+        else:
+            words = dol.words(start, min(size, cap * 4))
     except ValueError:
         return []
     out = []
     for index, word in enumerate(words):
-        if not 0x80000000 <= word < 0x81800000:
+        if not word or not platform.in_image(dol, word):
             continue
         row = containing(db, target, word)
         if row is not None:
             name = row["demangled"] or row["name"]
             label = name + (f"+0x{word - row['address']:X}" if word != row["address"] else "")
-            out.append({"offset": index * 4, "target": f"{address_text(word)} {label}", "status": status_word(_status(row))})
+            out.append({"offset": index * platform.pointer_size, "target": f"{address_text(word)} {label}", "status": status_word(_status(row))})
         else:
             symbol = _symbol_lookup(project, target, word)
             label = (symbol["name"] + (f"+0x{symbol['offset']:X}" if symbol["offset"] else "")) if symbol else ""
-            out.append({"offset": index * 4, "target": f"{address_text(word)} {label}".strip()})
+            out.append({"offset": index * platform.pointer_size, "target": f"{address_text(word)} {label}".strip()})
     return out
 
 
@@ -1235,7 +1257,8 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
     root = project.root(repo)
     config = project.config["repositories"][repo]
     rules = config.get("checks", {})
-    address = re.compile(config.get("address_pattern", r"(?<![0-9A-Fa-f])(?:0x)?(8[01][0-9A-Fa-f]{6})(?![0-9A-Fa-f])"))
+    from .index import platform as active_platform
+    address = re.compile(config.get("address_pattern", active_platform().cite_pattern()))
     if paths is None:
         hunks = _diff_hunks(root, base, staged)
         changed = {p: (None if h is None else set().union(*[x[0] for x in h]) if h else set()) for p, h in hunks.items()}
@@ -1302,7 +1325,7 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
             if not wanted(number):
                 continue
             for match in address.finditer(line):
-                value = int(match.group(1), 16)
+                value = active_platform().cite_value(match.group(1))
                 stats["citations"] += 1
                 row = containing(db, target, value)
                 if row is None:
@@ -1491,7 +1514,7 @@ def refs(project: Project, query: str, target: str | None = None, repo: str | No
                 symbol = _symbol_lookup(project, target, found[0])
                 if symbol:
                     spellings.add(symbol["name"])
-            spellings.add(f"{found[0]:08X}" if found[0] < 1 << 32 else f"{found[0] & 0xFFFFFFFF:X}")
+            spellings.add(address_text(found[0])[2:] if found[0] < 1 << 32 else f"{found[0] & 0xFFFFFFFF:X}")
     if not spellings:
         spellings.add(query.strip())
     bare = {s for s in spellings if "::" not in s}
@@ -1510,7 +1533,7 @@ def refs(project: Project, query: str, target: str | None = None, repo: str | No
         for line in result.stdout.splitlines():
             path, _, rest = line.partition(":")
             number, _, text = rest.partition(":")
-            words = set(re.findall(r"[A-Za-z_~][\w:~]*|[0-9A-Fa-f]{8}", text))
+            words = set(re.findall(r"[A-Za-z_~][\w:~]*|[0-9A-Fa-f]{8,16}", text))
             hit = [s for s in spellings if s in words or any(w.endswith(s) and s[:1].isdigit() for w in words)
                    or s in text and "::" in s]
             if not hit:

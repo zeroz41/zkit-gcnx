@@ -14,7 +14,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .gc import Dol
 from .index import MODULE_SHIFT, address_text, connect, containing, refresh, unit_asm
 from .project import Project
 
@@ -22,11 +21,21 @@ TYPES = {"u8": ">B", "s8": ">b", "u16": ">H", "s16": ">h", "u32": ">I", "s32": "
          "u64": ">Q", "s64": ">q", "f32": ">f", "f64": ">d", "ptr": ">I"}
 
 
-_DOLS: dict[str, tuple[tuple[int, int], Dol]] = {}
+def _format(project: Project, target: str, kind: str) -> str:
+    """struct format of a type in the target's byte order and pointer size."""
+    from .platform import for_target
+    platform = for_target(project.target(target))
+    code = TYPES[kind][1:]
+    if kind == "ptr" and platform.pointer_size == 8:
+        code = "Q"
+    return platform.endian + code
 
 
-def _dol(project: Project, target: str) -> Dol:
-    """The original executable, parsed once per process (the MCP server reads it on every asm/data/lookup call)."""
+_DOLS: dict[str, tuple[tuple[int, int], object]] = {}
+
+
+def _dol(project: Project, target: str):
+    """The original executable (a DOL, or a Switch module), parsed once per process."""
     config = project.target(target)
     if not config.get("original"):
         raise ValueError(f"Target {target} has no original executable configured")
@@ -37,7 +46,8 @@ def _dol(project: Project, target: str) -> Dol:
     stamp = (info.st_mtime_ns, info.st_size)
     cached = _DOLS.get(str(path))
     if cached is None or cached[0] != stamp:
-        cached = (stamp, Dol.load(path))
+        from .platform import for_target
+        cached = (stamp, for_target(config).open(path))
         _DOLS[str(path)] = cached
     return cached[1]
 
@@ -123,6 +133,9 @@ def disasm(project: Project, target: str, address: int, size: int | None = None,
     without, the whole containing function, marking address when it is interior."""
     refresh(project, [])
     db = connect(project)
+    from .platform import for_target
+    if for_target(project.target(target)).name == "switch":
+        return _disasm_elf(project, target, address, size, max_lines)
     size = None if size is None else max(4, size - size % 4)
     row = containing(db, target, address)
     start = address if size is not None or row is None else row["address"]
@@ -193,6 +206,80 @@ def disasm(project: Project, target: str, address: int, size: int | None = None,
             "source": "original executable bytes"}
 
 
+_ELVES: dict[str, tuple[str, Path]] = {}
+
+
+def module_elf(project: Project, target: str) -> Path:
+    """The original module as an ELF with the index's function names, cached: what disassemblers and Ghidra read."""
+    from .index import _meta, cache_path
+    from .nx import to_elf
+    from .platform import for_target
+    config = project.target(target)
+    platform = for_target(config)
+    db = connect(project)
+    original = project.file(config["repository"], config["original"])
+    stamp = f"{original.stat().st_size}:{original.stat().st_mtime_ns}:{_meta(db, f'bounds:{target}')}:{platform.base}"
+    path = cache_path(project).with_name(f"{cache_path(project).stem}-{target}.elf")
+    if _ELVES.get(str(path), ("",))[0] == stamp and path.is_file():
+        return path
+    marker = path.with_suffix(".stamp")
+    if not (path.is_file() and marker.is_file() and marker.read_text(encoding="utf-8") == stamp):
+        rows = db.execute("SELECT address, size, name FROM functions WHERE target=? AND address<? ORDER BY address",
+                          (target, 1 << MODULE_SHIFT)).fetchall()
+        blob = to_elf(_dol(project, target), platform.base, [(r[0], r[1], r[2]) for r in rows])
+        partial = path.with_suffix(".partial")
+        partial.write_bytes(blob)
+        partial.replace(path)
+        marker.write_text(stamp, encoding="utf-8")
+    _ELVES[str(path)] = (stamp, path)
+    return path
+
+
+def _disasm_elf(project: Project, target: str, address: int, size: int | None, max_lines: int) -> dict:
+    """AArch64: llvm-objdump over the cached module ELF; adrp-formed addresses named and float constants read."""
+    from .bridge import _status
+    from .platform import for_target
+    platform = for_target(project.target(target))
+    db = connect(project)
+    tool = shutil.which("llvm-objdump") or shutil.which("aarch64-linux-gnu-objdump")
+    if tool is None:
+        raise ValueError("No AArch64 disassembler: install LLVM (llvm-objdump)")
+    row = containing(db, target, address)
+    start = address if size is not None or row is None else row["address"]
+    size = size or (row["size"] if row else 0x40)
+    truncated = size > max_lines * 4
+    size = min(size, max_lines * 4)
+    elf = module_elf(project, target)
+    result = subprocess.run([tool, "-d", f"--start-address=0x{platform.base + start:X}",
+                             f"--stop-address=0x{platform.base + start + size:X}", str(elf)],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    image = _dol(project, target)
+    refs: dict[int, list[tuple[int, str]]] = {}
+    for pc, value, kind in platform.addresses(image, start, size, {}):
+        refs.setdefault(pc, []).append((value, kind))
+    lines = []
+    for line in result.stdout.splitlines():
+        match = re.match(r"\s*([0-9a-f]+):\s+((?:[0-9a-f]{2} ){4}|[0-9a-f]{8})\s*(.*)", line)
+        if not match:
+            continue
+        pc = int(match[1], 16) - platform.base
+        word = match[2].replace(" ", "")
+        text = re.sub(r"\s+", " ", match[3].strip())
+        for value, kind in refs.get(pc, []):
+            label = _name(db, target, value) or _symbol_name(project, target, value) or \
+                (image.symbols.get(value) if hasattr(image, "symbols") else "")
+            text += f"  ; ={address_text(value)}" + (f" {label}" if label else "")
+            if kind in ("f32", "f64"):
+                try:
+                    text += f" = {_value(db, target, image, value, kind, project)}"
+                except (ValueError, struct.error):
+                    pass
+        lines.append(f"{address_text(pc)[2:]}  {word}  {text}" + ("   <=" if pc == address != start else ""))
+    return {"target": target, "address": address_text(start), "size": size, "truncated": truncated,
+            "function": _status(row) if row else None, "disassembler": Path(tool).name, "text": "\n".join(lines),
+            "source": "original module bytes"}
+
+
 def _dtk_lines(project: Project, target: str, row, start: int, size: int, address: int) -> list[str] | None:
     """The function's lines from decomp-toolkit's asm output, or None when that file is missing."""
     from .gc import asm_functions, asm_objects, asm_references, directive_value
@@ -234,10 +321,10 @@ def _dol_constant(project: Project, target: str, symbol: str, kind: str) -> str 
         raw = _dol(project, target).read(found.address, 4 if kind == "f32" else 8)
     except ValueError:
         return None
-    return repr(struct.unpack(">f" if kind == "f32" else ">d", raw)[0])
+    return repr(struct.unpack(_format(project, target, kind), raw)[0])
 
 
-def _readable(project: Project, target: str, dol: Dol, address: int, width: int) -> None:
+def _readable(project: Project, target: str, dol, address: int, width: int) -> None:
     """Explain why an address has no bytes in the executable (bss) instead of a bare range error."""
     section = dol.section_at(address)
     if section is not None and address + width <= section.address + section.size:
@@ -247,9 +334,9 @@ def _readable(project: Project, target: str, dol: Dol, address: int, width: int)
     where = f" ({symbol['name']}+0x{symbol['offset']:X}, {symbol['section']})" if symbol else ""
     bss_start, bss_size = dol.bss
     if bss_start <= address < bss_start + bss_size or (symbol and "bss" in symbol["section"]):
-        raise ValueError(f"0x{address:08X}{where} is zero-initialized .bss: the executable has no bytes for it; "
+        raise ValueError(f"{address_text(address)}{where} is zero-initialized .bss: the executable has no bytes for it; "
                          "its runtime value comes from code. `zkit xrefs` lists who writes it.")
-    raise ValueError(f"0x{address:08X}+{width}{where} is not inside one section of the executable")
+    raise ValueError(f"{address_text(address)}+{width}{where} is not inside one section of the executable")
 
 
 def count_for_size(size: int, kind: str = "u32", fields: list[str] | None = None, stride: int | None = None) -> int:
@@ -278,7 +365,7 @@ def read_data(project: Project, target: str, address: int, kind: str = "u32", co
     rows = []
     if fields:
         layout = [f.strip() for f in fields]
-        width = sum(struct.calcsize(TYPES[f]) if f in TYPES else int(f.lstrip("pad")) for f in layout)
+        width = sum(struct.calcsize(_format(project, target, f)) if f in TYPES else int(f.lstrip("pad")) for f in layout)
         stride = stride or width
         for index in range(min(count, 512)):
             base = address + index * stride
@@ -288,8 +375,8 @@ def read_data(project: Project, target: str, address: int, kind: str = "u32", co
                     offset += int(field[3:])
                     continue
                 values.append(_value(db, target, dol, base + offset, field, project))
-                offset += struct.calcsize(TYPES[field])
-            rows.append({"index": index, "address": f"0x{base:08X}", "values": values})
+                offset += struct.calcsize(_format(project, target, field))
+            rows.append({"index": index, "address": address_text(base), "values": values})
     elif kind == "str":
         # count = number of consecutive NUL-terminated strings (padding NULs between them are skipped).
         section = dol.section_at(address)
@@ -300,19 +387,26 @@ def read_data(project: Project, target: str, address: int, kind: str = "u32", co
                 break
             raw = dol.read(cursor, limit)
             text = raw.split(b"\0", 1)[0]
-            rows.append({"address": f"0x{cursor:08X}", "values": [text.decode("shift_jis", errors="replace")]})
+            rows.append({"address": address_text(cursor), "values": [_decode_text(project, target, text)]})
             cursor += len(text) + 1
             while cursor < section.address + section.size and dol.read(cursor, 1) == b"\0":
                 cursor += 1
     else:
-        width = struct.calcsize(TYPES[kind])
+        width = struct.calcsize(_format(project, target, kind))
         for index in range(min(count, 1024)):
             base = address + index * (stride or width)
-            rows.append({"address": f"0x{base:08X}", "values": [_value(db, target, dol, base, kind, project)]})
+            rows.append({"address": address_text(base), "values": [_value(db, target, dol, base, kind, project)]})
     owner = containing(db, target, address)
-    return {"target": target, "address": f"0x{address:08X}", "kind": kind if not fields else fields,
+    return {"target": target, "address": address_text(address), "kind": kind if not fields else fields,
             "rows": rows, "source": "original executable bytes",
             "inside_function": (owner["demangled"] or owner["name"]) if owner else None}
+
+
+def _decode_text(project: Project, target: str, raw: bytes) -> str:
+    """Strings as the game stores them: Shift-JIS on GameCube, UTF-8 on Switch."""
+    from .platform import for_target
+    encoding = "utf-8" if for_target(project.target(target)).name == "switch" else "shift_jis"
+    return raw.decode(encoding, errors="replace")
 
 
 def _symbol_name(project: Project, target: str, address: int) -> str:
@@ -323,12 +417,16 @@ def _symbol_name(project: Project, target: str, address: int) -> str:
     return symbol["name"] + (f"+0x{symbol['offset']:X}" if symbol["offset"] else "")
 
 
-def _value(db, target: str, dol: Dol, address: int, kind: str, project: Project | None = None):
-    value = struct.unpack(TYPES[kind], dol.read(address, struct.calcsize(TYPES[kind])))[0]
+def _value(db, target: str, dol, address: int, kind: str, project: Project | None = None):
+    fmt = _format(project, target, kind) if project else TYPES[kind]
+    value = struct.unpack(fmt, dol.read(address, struct.calcsize(fmt)))[0]
     if kind == "ptr":
-        label = (_name(db, target, value) or (_symbol_name(project, target, value) if project else "")) \
-            if 0x80000000 <= value < 0x81800000 else ""
-        return f"0x{value:08X}" + (f" ({label})" if label else "")
+        from .index import platform
+        current = platform()
+        key = value - current.base if current.base and value >= current.base else value
+        inside = bool(value) and current.in_image(dol, key)
+        label = (_name(db, target, key) or (_symbol_name(project, target, key) if project else "")) if inside else ""
+        return (address_text(key) if inside else f"0x{value:X}") + (f" ({label})" if label else "")
     if kind == "f32":
         return float(f"{value:.9g}")
     if kind == "f64":

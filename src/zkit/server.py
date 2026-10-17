@@ -79,6 +79,8 @@ def _json(data) -> str:
 
 
 def create_server(project: Project) -> FastMCP:
+    from .index import use_platform
+    use_platform(project)
     has_native = bool(bridge.role_repos(project, "native"))
     has_recipes = any(r.get("recipes") for r in project.config["repositories"].values())
     port = " and its native port" if has_native else ""
