@@ -157,6 +157,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--label", default="saved")
     c.add_argument("--rename", action="append", default=[], metavar="OLD=NEW", help="an intended symbol rename")
     c.add_argument("--rename-json", type=Path, help="a JSON {old: new} map of intended renames")
+    c = add("boundaries", help="Translation units and function names proposed from evidence in the original "
+                               "(source paths and function names its code references, layout, call structure)")
+    c.add_argument("--splits", type=Path, help="also write the proposal as a splits.txt")
+    c.add_argument("--limit", type=int, default=30)
     c = add("refs", help="Where a function or global is defined, declared and used in the source (any spelling)")
     c.add_argument("query", nargs="+")
     c.add_argument("--repo")
@@ -535,6 +539,13 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         rename.update(dict(item.split("=", 1) for item in args.rename))
         data = objects.compare_saved(project, target, args.label, rename)
         return data, render.objects_compare(data)
+    if command == "boundaries":
+        from . import boundaries
+        data = boundaries.propose(project, target)
+        if args.splits:
+            boundaries.write_splits(data, args.splits.expanduser().resolve())
+            data["written"] = str(args.splits)
+        return data, render.boundaries(data, args.limit) + (f"\nwrote {args.splits}" if args.splits else "")
     if command == "refs":
         data = bridge.refs(project, " ".join(args.query), target, project.repo_key(args.repo) if args.repo else None,
                            args.limit)

@@ -396,6 +396,17 @@ def create_server(project: Project) -> FastMCP:
         data = bridge.compiled(p, query, target(p), max(1, min(limit, 200)))
         return out(data, render.compiled(data), response_format)
 
+    @tool(enabled=bool(project.config.get("targets")))
+    def zkit_boundaries(limit: int = 30, repo: str | None = None, response_format: Format = "text") -> str:
+        """Translation-unit boundaries and function names proposed from evidence in the original: source paths and
+        Class::method strings its code references, functions between two of the same file, static helpers beside
+        their only caller's unit. Third-party source trees show which code is libraries. Proposals with evidence,
+        for the project's split and rename tools to apply; `zkit boundaries --splits FILE` writes a splits.txt."""
+        from . import boundaries
+        p = decomp(repo)
+        data = boundaries.propose(p, target(p))
+        return out(data, render.boundaries(data, max(1, min(limit, 200))), response_format)
+
     @tool()
     def zkit_refs(query: str, repo: str | None = None, limit: int = 60, response_format: Format = "text") -> str:
         """Where an original function or global is defined, declared and used in the source of every configured
