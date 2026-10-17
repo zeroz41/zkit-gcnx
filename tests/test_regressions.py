@@ -1,5 +1,6 @@
 """Regression tests for failures seen in real Claude Code / Codex sessions (evals/replay/corpus.json)."""
 
+import support  # noqa: F401  (isolates config, cache and state)
 import asyncio
 import json
 import subprocess
@@ -18,7 +19,7 @@ class AuditRegressions(unittest.TestCase):
                        check=True, capture_output=True)
 
     def test_several_addresses_in_one_query(self):
-        from gcn_zkit.bridge import lookup, split_queries
+        from zkit.bridge import lookup, split_queries
         self.assertEqual(split_queries("0x80003000 0x80003010"), ["0x80003000", "0x80003010"])
         self.assertEqual(split_queries("8013E990,8013E998"), ["8013E990", "8013E998"])
         self.assertEqual(split_queries("TEnemy::update"), ["TEnemy::update"])
@@ -26,14 +27,14 @@ class AuditRegressions(unittest.TestCase):
         self.assertEqual([d["function"]["address"] for d in data["batch"]], ["0x80003000", "0x80003010"])
 
     def test_asm_honours_interior_start_with_size(self):
-        from gcn_zkit.inspect_dol import disasm
+        from zkit.inspect_dol import disasm
         data = disasm(self.project, "t", TEXT + 0x14, 8)
         self.assertEqual(data["address"], "0x80003014")
         self.assertEqual(data["function"]["address"], "0x80003010")
         self.assertEqual(disasm(self.project, "t", TEXT + 0x14)["address"], "0x80003010")  # no size: whole function
 
     def test_data_by_symbol_and_unreadable_address(self):
-        from gcn_zkit import bridge, inspect_dol
+        from zkit import bridge, inspect_dol
         address = bridge.resolve_address(self.project, "enemyTable", "t")
         self.assertEqual(address, 0x80003104)
         self.assertEqual(inspect_dol.read_data(self.project, "t", address, "ptr", 1)["rows"][0]["values"][0][:10],
@@ -44,7 +45,7 @@ class AuditRegressions(unittest.TestCase):
             inspect_dol.read_data(self.project, "t", address, "float", 1)
 
     def test_xrefs_names_and_callers(self):
-        from gcn_zkit import bridge
+        from zkit import bridge
         refs = bridge.xrefs(self.project, "enemyTable", "t")
         self.assertIn("TPlayer__sub_80003010", [f for f, _ in refs["functions"]])
         self.assertEqual(refs["kinds"].get("addr"), 1)
@@ -59,7 +60,7 @@ class AuditRegressions(unittest.TestCase):
         self.assertEqual(data["callers"]["by_class"], [("TEnemy", 1)])
 
     def test_definition_finder_skips_comments_externs_and_calls(self):
-        from gcn_zkit.bridge import find_definition
+        from zkit.bridge import find_definition
         lines = ["// CARVE-GEN TODO: foo__3FooFv(void) hand-decompile",
                  "s32 foo__3FooFv(void *, void *); /* extern */",
                  "void bar() {", "    x = foo__3FooFv(a);", "    if (foo__3FooFv(b)) {", "    }", "}",
@@ -68,7 +69,7 @@ class AuditRegressions(unittest.TestCase):
         self.assertIsNone(find_definition(["s32 foo__3FooFvi(void);"], ["foo__3FooFv"]))
 
     def test_mcp_arguments_are_forgiving_but_strict(self):
-        from gcn_zkit.server import create_server
+        from zkit.server import create_server
         from mcp.server.fastmcp.exceptions import ToolError
         server = create_server(self.project)
         call = lambda name, args: asyncio.run(server.call_tool(name, args))
@@ -83,7 +84,7 @@ class AuditRegressions(unittest.TestCase):
         self.assertFalse(isinstance(result, tuple) and result[1])  # no duplicated structuredContent
 
     def test_check_reports_edited_existing_violation_as_debt(self):
-        from gcn_zkit.bridge import check
+        from zkit.bridge import check
         self.write_native("src/actors/Old.cpp", "// 80003000\nbool f() { return isSwamp(1); }\n")
         self.git(self.native, "add", "-A")
         self.git(self.native, "commit", "-qm", "old")
@@ -93,7 +94,7 @@ class AuditRegressions(unittest.TestCase):
         self.assertNotIn("forbidden", rules)
 
     def test_git_worktree_is_its_own_working_tree(self):
-        from gcn_zkit.bridge import check
+        from zkit.bridge import check
         tree = self.native.parent / "native-wt"
         self.git(self.native, "worktree", "add", "-q", "-b", "wt", str(tree))
         (tree / "src/actors/Swamp.cpp").write_text("// 80003000\nbool g() { return isSwamp(3); }\n", encoding="utf-8")
@@ -107,7 +108,7 @@ class AuditRegressions(unittest.TestCase):
         self.assertFalse(any(f["rule"] == "forbidden" for f in check(self.project, "native")["findings"]))
 
     def test_cli_accepts_json_after_subcommand_and_batches_asm(self):
-        from gcn_zkit import cli
+        from zkit import cli
         import contextlib
         import io
         out = io.StringIO()

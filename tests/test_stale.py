@@ -1,5 +1,6 @@
 """Stale build outputs from build.ninja, compile_commands.json and file times. Nothing is built."""
 
+import support  # noqa: F401  (isolates config, cache and state)
 import json
 import os
 from pathlib import Path
@@ -48,14 +49,14 @@ class StaleTests(unittest.TestCase):
         self.manifest.write_text(json.dumps({"schema_version": 1, "id": "stale", "repositories": {"native": {
             "root": "port", "role": "native", "index_paths": ["src"],
             "tests": {"build_dir": "out/rel", "include_roots": ["src"], "scan": ["src"], "apps": ["game app"]}}}}))
-        from gcn_zkit.project import Project
+        from zkit.project import Project
         self.project = Project.load(self.manifest)
 
     def touch(self, rel):
         os.utime(self.root / rel, (self.later, self.later))
 
     def verdicts(self, programs=None):
-        from gcn_zkit.native import stale
+        from zkit.native import stale
         return {r["output"]: r for r in stale(self.project, "native", programs)["outputs"]}
 
     def test_fresh_build_is_not_stale(self):
@@ -77,18 +78,18 @@ class StaleTests(unittest.TestCase):
         self.assertEqual(self.verdicts(["game app"])["game app"]["newer_count"], 1)  # an unused header is ignored
 
     def test_gate_reports_configured_stale_apps_and_cli_agrees(self):
-        from gcn_zkit.session import gate
+        from zkit.session import gate
         self.assertEqual(gate(self.project, "native")["stale_apps"], [])
         self.touch("src/app/Main.cpp")
         self.assertEqual([a["output"] for a in gate(self.project, "native")["stale_apps"]], ["game app"])
         env = dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1] / "src"))
-        cli = subprocess.run([sys.executable, "-m", "gcn_zkit.cli", "--project", str(self.manifest), "--json",
+        cli = subprocess.run([sys.executable, "-m", "zkit.cli", "--project", str(self.manifest), "--json",
                               "stale", "native"], capture_output=True, text=True, env=env, check=True)
         self.assertEqual([r["output"] for r in json.loads(cli.stdout)["outputs"] if r["stale"]], ["game app"])
 
     def test_without_ninja_says_so(self):
         (self.root / "out/rel/build.ninja").unlink()
-        from gcn_zkit.native import stale
+        from zkit.native import stale
         self.assertFalse(stale(self.project, "native")["checked"])
 
 

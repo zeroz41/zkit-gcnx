@@ -1,5 +1,6 @@
 """Exercise actual SDK stdio negotiation and dispatch, not just Python calls."""
 
+import support  # noqa: F401  (isolates config, cache and state)
 import asyncio
 import importlib.util
 import json
@@ -25,13 +26,13 @@ class McpTests(unittest.TestCase):
                     "game": {"root": ".", "required_docs": ["AGENTS.md"], "search_paths": ["AGENTS.md"]}}}))
                 env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"),
                            XDG_CACHE_HOME=str(root / "cache"), XDG_STATE_HOME=str(root / "state"))
-                params = StdioServerParameters(command=sys.executable, args=["-m", "gcn_zkit.cli", "--project", str(manifest), "serve"], env=env)
+                params = StdioServerParameters(command=sys.executable, args=["-m", "zkit.cli", "--project", str(manifest), "serve"], env=env)
                 async with stdio_client(params) as (read, write):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
                         # No native port and no recipes: the port tools are left out.
-                        self.assertEqual(len(tools), 17)  # +zkit_classes; zkit_unit needs a splits file
+                        self.assertEqual(len(tools), 19)  # zkit_unit needs a splits file, zkit_progress a report
                         self.assertNotIn("zkit_impact", tools)
                         self.assertTrue(all(name.startswith("zkit_") for name in tools))
                         writers = {name for name, tool in tools.items() if not tool.annotations.readOnlyHint}
@@ -59,15 +60,15 @@ class McpTests(unittest.TestCase):
 
     def test_native_port_tools(self):
         """A project with a native repo gets the port tools; recipe tools still need configured recipes."""
-        from gcn_zkit.project import Project
-        from gcn_zkit.server import create_server
+        from zkit.project import Project
+        from zkit.server import create_server
         with tempfile.TemporaryDirectory() as temp:
             manifest = Path(temp) / "project.json"
             manifest.write_text(json.dumps({"schema_version": 1, "id": "ported", "repositories": {
                 "decomp": {"root": ".", "role": "decomp"}, "native": {"root": ".", "role": "native"}}}))
             names = {t.name for t in create_server(Project.load(manifest))._tool_manager.list_tools()}
-            from gcn_zkit.index import close_connections
+            from zkit.index import close_connections
             close_connections()
-        self.assertEqual(len(names), 26)
+        self.assertEqual(len(names), 28)
         self.assertTrue({"zkit_impact", "zkit_drift", "zkit_port_plan", "zkit_demand"} <= names)
         self.assertNotIn("zkit_recipes", names)

@@ -1,12 +1,13 @@
+import support  # noqa: F401  (isolates config, cache and state)
 import asyncio
 import json
 from pathlib import Path
 import tempfile
 import unittest
 
-from gcn_zkit.project import Project
-from gcn_zkit.architecture import audit as architecture
-from gcn_zkit.coverage import audit as coverage
+from zkit.project import Project
+from zkit.architecture import audit as architecture
+from zkit.coverage import audit as coverage
 
 
 class ProjectAuditTests(unittest.TestCase):
@@ -76,7 +77,7 @@ class ProjectAuditTests(unittest.TestCase):
         self.assertTrue(result['errors'])
 
     def test_decomp_only_project_does_not_expose_port_audits(self):
-        from gcn_zkit.server import create_server
+        from zkit.server import create_server
         self.config['repositories']['port']['role'] = 'decomp'
         del self.config['repositories']['port']['architecture']
         del self.config['repositories']['port']['coverage']
@@ -131,8 +132,8 @@ class ProjectAuditTests(unittest.TestCase):
             architecture(self.project, 'port', ['../outside.cpp'])
 
     def test_cli_and_mcp_report_the_same_findings(self):
-        from gcn_zkit.cli import build_parser, run
-        from gcn_zkit.server import create_server
+        from zkit.cli import build_parser, run
+        from zkit.server import create_server
         self.write('engine/simulation/Actor.cpp', '#include "device/Device.hpp"\n')
         cases = [('architecture', ['port', '--all'], 'zkit_architecture', {'repo': 'port', 'all_files': True}),
                  ('coverage', ['port', 'effects'], 'zkit_coverage', {'repo': 'port', 'name': 'effects'})]

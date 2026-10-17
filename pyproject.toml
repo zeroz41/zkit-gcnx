@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gcn-zkit"
+name = "zkit"
 version = "0.8.1"
 description = "Fast local evidence for AI agents decompiling GameCube games and porting them with matching behavior"
 requires-python = ">=3.11"
@@ -16,14 +16,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = []  # kept so `pip install gcn-zkit[mcp]` from 0.3 still works
-ghidra = ["pyghidra>=2.1"]  # `decompile`; also needs Ghidra and its Gekko/Broadway language (see `gcn-zkit doctor`)
+ghidra = ["pyghidra>=2.1"]  # `decompile`; also needs Ghidra and its Gekko/Broadway language (see `zkit doctor`)
 
 [project.urls]
 Homepage = "https://github.com/zeroz41/gcn-zkit"
 
 [project.scripts]
-gcn-zkit = "gcn_zkit.cli:main"
+zkit = "zkit.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+zkit = ["report.html"]

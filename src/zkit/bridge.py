@@ -467,6 +467,36 @@ def header_definition(project: Project, repo: str, name: str | None, demangled: 
     return None
 
 
+def readiness(project: Project, target: str, row) -> dict[str, Any]:
+    """Whether an original function's decomp is a behavior reference a port may follow yet.
+
+    Ready means byte-exact, named on evidence, and a definition whose body reads as source: no raw offsets,
+    decompiler temporaries, placeholder callees or hand-mangled calls. Anything less is the decomp being unclear,
+    and a port holds that behavior until the decomp is cleaned."""
+    from . import quality
+    info = _status(row)
+    reasons = []
+    if not info.get("exact"):
+        reasons.append("not byte-exact")
+    if info.get("provisional_name"):
+        reasons.append("placeholder name")
+    repo = project.target(target)["repository"]
+    found = source_definition(project, repo, row["source"], row["name"], row["demangled"]) \
+        or header_definition(project, repo, row["name"], row["demangled"])
+    debt: list[str] = []
+    if found is None:
+        if info.get("exact"):
+            reasons.append("definition not found in the source")
+    else:
+        counts = collections.Counter(f["label"] for f in quality.findings(found["body"],
+                                                                         quality.patterns(project, repo), True))
+        debt = [f"{label} x{n}" for label, n in counts.most_common(4)]
+        if debt:
+            reasons.append("source still reads as decompiler output (" + ", ".join(debt) + ")")
+    return {"ready": not reasons, "reasons": reasons, "definition": f"{found.get('path', row['source'])}:{found['line']}"
+            if found else None}
+
+
 def _source_line(project: Project, repo: str, source: str | None, name: str, demangled: str | None) -> int | None:
     found = source_definition(project, repo, source, name, demangled)
     return found["line"] if found else None
@@ -882,10 +912,14 @@ def port_plan(project: Project, query: str, depth: int = 2, target: str | None =
         callers = db.execute("SELECT count(DISTINCT caller) FROM calls WHERE target=? AND callee=?",
                              (target, row["address"])).fetchone()[0]
         info["original_callers"] = callers
+        ready = readiness(project, target, row)
+        info["ready"], info["not_ready"] = ready["ready"], ready["reasons"]
         if info["native_files"]:
-            info["action"] = "reuse" if info["exact"] else "reuse-unverified"
+            info["action"] = "reuse" if ready["ready"] else "reuse-unverified"
         elif not info["exact"]:
             info["action"] = "decompile-first"
+        elif not ready["ready"]:
+            info["action"] = "clean-first"
         elif callers >= 8:
             info["action"] = "shared-port"
         else:
@@ -902,15 +936,20 @@ def port_plan(project: Project, query: str, depth: int = 2, target: str | None =
     counts = collections.Counter(n["action"] for n in nodes)
     return {"query": query, "found": True, "root": nodes[0], "nodes": nodes, "summary": dict(counts),
             "truncated_nodes": truncated,
-            "legend": {"reuse": "the port already cites this; extend that owner instead of writing a copy",
-                       "reuse-unverified": "the port implements it but the decomp is not exact; recover it before "
-                                           "trusting the native semantics",
-                       "decompile-first": "decomp is not exact yet; recover it before trusting semantics "
-                                          "(`decompile` reads it meanwhile; that is not proof)",
+            "legend": {"reuse": "the port already cites this and the decomp is clean; extend that owner instead "
+                                "of writing a copy",
+                       "reuse-unverified": "the port implements it but the decomp is not clean yet; the native "
+                                           "semantics are unproven until it is",
+                       "decompile-first": "decomp is not exact yet: match it before porting anything that depends "
+                                          "on it (`decompile` reads it meanwhile; that is not proof)",
+                       "clean-first": "exact, but the decomp still reads as decompiler output or has a placeholder "
+                                      "name: clean and name it in the decomp, then port",
                        "shared-port": "many original callers: port once into a shared owner, not per feature",
                        "port": "exact in the decomp and not yet cited natively"},
             "limits": "Direct calls only; `indirect_calls` counts bctrl sites (vtable/pointer dispatch) whose "
-                      "targets are not in the tree — read them with asm. Check `lookup` on the root for callers."}
+                      "targets are not in the tree — read them with asm. Check `lookup` on the root for callers. "
+                      "Hold rule: port only nodes marked port, shared-port or reuse; everything else is decomp work "
+                      "first, or an explicitly unsupported boundary."}
 
 
 _DOL_CACHE: dict[str, tuple[str, Any]] = {}
@@ -1196,10 +1235,37 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
                  for r in rules.get("forbidden", [])]
     findings = []
     stats = collections.Counter()
+    from .tiers import tier_of
+    hold = rules.get("hold_rule", "error")  # citing decomp that is not ready: error, warning or off
+    ready_cache: dict[int, dict] = {}
+    decomp_gate = None
+    if config.get("role") == "decomp":
+        from . import quality
+        quality_config = config.get("quality", {})
+        decomp_gate = quality_config.get("gate", "warning")
+        catalog = quality.patterns(project, repo)
+        roots, exclude = quality._paths(project, repo, None)
     for rel, added in sorted(changed.items()):
         if texts.get(rel) is None:
             continue
         text_lines = texts[rel].splitlines()
+        if decomp_gate and decomp_gate != "off" and quality._keep(rel, exclude) and any(
+                rel == r or rel.startswith(r.rstrip("/") + "/") for r in roots):
+            removed_text = "\n".join(old for lines_added, removed in (hunks.get(rel) or []) for old in removed)
+            had = quality.count(removed_text, catalog)
+            for number, line in enumerate(text_lines, 1):
+                if added is not None and number not in added:
+                    continue
+                for found in quality.findings(line, catalog):
+                    stats["debt_added"] += 1
+                    old = had[found["key"]] > 0
+                    if old:
+                        had[found["key"]] -= 1
+                    findings.append({"severity": "info" if old else decomp_gate, "rule": "decomp-debt" if old
+                                     else "decomp-debt-added", "ref": f"{rel}:{number}",
+                                     "message": ("carried over from the replaced lines: " if old else "adds ")
+                                     + found["label"] + f": {found['text']}"})
+        tier = tier_of(project, repo, rel) if config.get("role") == "native" else "exact"
         wanted = (lambda n: True) if added is None else (lambda n, a=added: n in a)
         removed_by_line: dict[int, list[str]] = {}
         for lines_added, removed in (hunks.get(rel) or []):
@@ -1234,12 +1300,23 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
                                                     "flag constant, or stale address?"})
                     continue
                 info = _status(row)
-                if not info["exact"]:
+                if config.get("role") == "native" and hold != "off" and tier in ("exact", "equivalent"):
+                    if row["address"] not in ready_cache:
+                        ready_cache[row["address"]] = readiness(project, target, row)
+                    ready = ready_cache[row["address"]]
+                    if not ready["ready"]:
+                        stats["not_ready_citations"] += 1
+                        findings.append({"severity": hold, "rule": "hold-until-clean", "ref": f"{rel}:{number}",
+                                         "address": info["address"], "name": info["name"],
+                                         "message": "the decomp of this function is not ready ("
+                                                    + "; ".join(ready["reasons"]) + "). Match and clean it in the "
+                                                    "decomp first, or leave the behavior explicitly unsupported; "
+                                                    "never port a guess."})
+                elif not info["exact"]:
                     findings.append({"severity": "info", "rule": "citation-unmatched", "ref": f"{rel}:{number}",
                                      "address": info["address"], "name": info["name"],
                                      "message": f"Cited decomp function is {status_word(info)}; its semantics "
-                                                "are unverified. Note the gap; recover it only if this change "
-                                                "depends on the unverified part."})
+                                                "are unverified."})
                 if match.group(0).lower().startswith("0x") and rules.get("bare_citations"):
                     findings.append({"severity": "warning", "rule": "citation-format", "ref": f"{rel}:{number}",
                                      "message": rules["bare_citations"]})
@@ -1251,8 +1328,6 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
                 if not definition or line.startswith((" ", "\t")):
                     continue
                 stats["new_definitions"] += 1
-                from .tiers import tier_of
-                tier = tier_of(project, repo, rel) if config.get("role") == "native" else "exact"
                 if tier not in ("exact", "equivalent"):
                     continue  # liberty/infrastructure code has no original to cite
                 end = number

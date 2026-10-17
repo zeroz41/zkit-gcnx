@@ -1,4 +1,4 @@
-# gcn-zkit
+# zkit
 
 Makes AI coding agents (Claude Code, Codex) fast and accurate on two kinds of GameCube work:
 
@@ -12,8 +12,8 @@ You need [uv](https://docs.astral.sh/uv/getting-started/installation/), git, and
 ```sh
 uv tool install git+https://github.com/zeroz41/gcn-zkit
 cd path/to/your-decomp
-gcn-zkit setup                          # just the decomp
-gcn-zkit setup --native ../your-port    # or the decomp plus your PC port
+zkit setup                          # just the decomp
+zkit setup --native ../your-port    # or the decomp plus your PC port
 ```
 
 Restart Claude Code or Codex in the decomp or port folder and ask:
@@ -71,9 +71,9 @@ your files, and never uses the network.
 
 ## Does it help?
 
-Same model, same questions, with and without gcn-zkit ([details](docs/validation.md)):
+Same model, same questions, with and without zkit ([details](docs/validation.md)):
 
-| Project | Without gcn-zkit | With gcn-zkit |
+| Project | Without zkit | With zkit |
 | --- | --- | --- |
 | Brand new decomp, 0% matched, 757 RELs (5 questions) | 5/5 right, 82 s, $0.46 | 5/5 right, 61 s, $0.56 |
 | Same game, 41% matched (2 questions) | 2/2 right¹, 15 s, $0.13 | 2/2 right, 20 s, $0.15 |
@@ -94,7 +94,7 @@ definition lines agents otherwise found by hand, and lookups that mix names and 
 
 | You need | Windows | macOS | Linux |
 | --- | --- | --- | --- |
-| **uv** (installs gcn-zkit and its Python) | `powershell -c "irm https://astral.sh/uv/install.ps1 \| iex"` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| **uv** (installs zkit and its Python) | `powershell -c "irm https://astral.sh/uv/install.ps1 \| iex"` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | **git** | [git-scm.com](https://git-scm.com/downloads/win) | `xcode-select --install` | your package manager (`sudo apt install git`, ...) |
 | **A dtk decomp, built once** | `python configure.py`, then `ninja` in the decomp (its README lists what that needs) | same | same |
 | Claude Code or Codex (optional) | [Claude Code](https://docs.claude.com/en/docs/claude-code), [Codex](https://github.com/openai/codex) | same | same |
@@ -103,25 +103,25 @@ Optional, for `decompile`: [Ghidra](https://github.com/NationalSecurityAgency/gh
 [GameCube Loader](https://github.com/Cuyler36/Ghidra-GameCube-Loader/releases) build for that Ghidra unzipped into
 Ghidra's user `Extensions` folder (only its Gekko/Broadway language is used; its DOL loader, which opens dialogs, never
 runs), and the `ghidra` extra:
-`uv tool install --force 'gcn-zkit[ghidra] @ git+https://github.com/zeroz41/gcn-zkit'` (from a checkout:
-`uv tool install --force --editable '/path/to/gcn-zkit[ghidra]'`). `gcn-zkit doctor` says which piece is missing.
+`uv tool install --force 'zkit[ghidra] @ git+https://github.com/zeroz41/gcn-zkit'` (from a checkout:
+`uv tool install --force --editable '/path/to/zkit[ghidra]'`). `zkit doctor` says which piece is missing.
 
-uv brings the right Python and every package gcn-zkit needs. The decomp's own build downloads dtk, the compilers and
+uv brings the right Python and every package zkit needs. The decomp's own build downloads dtk, the compilers and
 binutils. No decomp yet? Start one from [dtk-template](https://github.com/encounter/dtk-template).
 
 ## Install and set up, step by step
 
 1. Install the command: `uv tool install git+https://github.com/zeroz41/gcn-zkit`.
-   If `gcn-zkit` is then "not found", run `uv tool update-shell` and open a new terminal.
-2. In your decomp's folder, run `gcn-zkit setup`. It indexes the decomp (a few seconds to a minute) and connects
+   If `zkit` is then "not found", run `uv tool update-shell` and open a new terminal.
+2. In your decomp's folder, run `zkit setup`. It indexes the decomp (a few seconds to a minute) and connects
    Claude Code and Codex, whichever you have.
 3. Restart them. In Codex, accept the startup-hook prompt once.
-4. Run `gcn-zkit doctor`. Anything that isn't OK comes with the command that fixes it.
+4. Run `zkit doctor`. Anything that isn't OK comes with the command that fixes it.
 
-For more decomps, run `setup` in each one. gcn-zkit picks the right one from the folder you're in.
+For more decomps, run `setup` in each one. zkit picks the right one from the folder you're in.
 
 Have your own project file, with your rules, finish steps, lessons or a port (see [docs/manifest.md](docs/manifest.md))?
-Keep it outside this repo and run `gcn-zkit setup path/to/your.project.json`. That's the same full install.
+Keep it outside this repo and run `zkit setup path/to/your.project.json`. That's the same full install.
 
 ## Use
 
@@ -163,66 +163,66 @@ Run these inside the repo. They only read, except `handoff`.
 
 | You want to know | Type |
 | --- | --- |
-| Where things stand, who else is working, what's left over | `gcn-zkit brief` |
-| Is everything set up? (each problem comes with its fix) | `gcn-zkit doctor` |
-| Everything about a function | `gcn-zkit lookup MyClass::update` or `gcn-zkit lookup 0x80012345` |
-| A function in a REL | `gcn-zkit lookup mymodule+0x1D0` |
-| What's in a vtable | `gcn-zkit lookup __vt__7MyClass` |
-| The closest near-misses in a file | `gcn-zkit names --unit my_file --below 100 --sort match` |
-| Original disassembly / data | `gcn-zkit asm 0x80012345` / `gcn-zkit data 0x80345678 --type str` |
-| Ghidra's C for an original function, next to m2c (optional; closer where m2c emits `goto`) | `gcn-zkit decompile 0x80012345` |
-| A unit's ranges, data and cross-unit references | `gcn-zkit unit game/MyClass` or `gcn-zkit unit 0x80345678` |
-| Exact units that don't link yet, and why | `gcn-zkit unit --blocked` |
-| Data no split claims yet, and who uses it | `gcn-zkit unit --gaps --section .sdata2` |
-| Class names the vtables contradict | `gcn-zkit classes` |
-| Who reads or writes a global | `gcn-zkit xrefs g_gameState` |
-| Search docs and source | `gcn-zkit search player jump` |
-| Is someone else building? Wait until it's free | `gcn-zkit wait decomp` |
-| Other agents, builds, locks, stranded worktrees | `gcn-zkit activity` |
-| Check a port system against its configured include boundaries | `gcn-zkit architecture native src/world` |
-| Find missing import/integration entries in a declared inventory | `gcn-zkit coverage native effects` |
-| Validate exact tests and plan their parallel prebuilds (no execution) | `gcn-zkit test-plan native movement collision --jobs 4` |
-| What must run before ending a session | `gcn-zkit gate` |
-| Leave a note for the next session | `gcn-zkit handoff decomp "matched X; next: Y"` |
+| Where things stand, who else is working, what's left over | `zkit brief` |
+| Is everything set up? (each problem comes with its fix) | `zkit doctor` |
+| Everything about a function | `zkit lookup MyClass::update` or `zkit lookup 0x80012345` |
+| A function in a REL | `zkit lookup mymodule+0x1D0` |
+| What's in a vtable | `zkit lookup __vt__7MyClass` |
+| The closest near-misses in a file | `zkit names --unit my_file --below 100 --sort match` |
+| Original disassembly / data | `zkit asm 0x80012345` / `zkit data 0x80345678 --type str` |
+| Ghidra's C for an original function, next to m2c (optional; closer where m2c emits `goto`) | `zkit decompile 0x80012345` |
+| A unit's ranges, data and cross-unit references | `zkit unit game/MyClass` or `zkit unit 0x80345678` |
+| Exact units that don't link yet, and why | `zkit unit --blocked` |
+| Data no split claims yet, and who uses it | `zkit unit --gaps --section .sdata2` |
+| Class names the vtables contradict | `zkit classes` |
+| Who reads or writes a global | `zkit xrefs g_gameState` |
+| Search docs and source | `zkit search player jump` |
+| Is someone else building? Wait until it's free | `zkit wait decomp` |
+| Other agents, builds, locks, stranded worktrees | `zkit activity` |
+| Check a port system against its configured include boundaries | `zkit architecture native src/world` |
+| Find missing import/integration entries in a declared inventory | `zkit coverage native effects` |
+| Validate exact tests and plan their parallel prebuilds (no execution) | `zkit test-plan native movement collision --jobs 4` |
+| What must run before ending a session | `zkit gate` |
+| Leave a note for the next session | `zkit handoff decomp "matched X; next: Y"` |
 
 With a PC port (`setup --native`), run these inside the port:
 
 | You want to know | Type |
 | --- | --- |
-| What to reuse, port or decompile first for a feature | `gcn-zkit port-plan 0x80012345` |
-| What the port is waiting on from the decomp | `gcn-zkit demand` |
-| Which systems rest on unproven decomp code | `gcn-zkit grounding` |
-| **Where the port probably behaves slightly wrong, and what to do** | `gcn-zkit suspects` |
-| Are the port's numbers the real game's numbers? | `gcn-zkit consts src/combat` |
-| What changed in the decomp that the port must re-check | `gcn-zkit drift` (after re-checking: `gcn-zkit drift --accept`) |
-| Which tests cover my change, and who else uses that code | `gcn-zkit impact` (`--budget 120` while iterating) |
-| Is the build older than my edits? (check before running it) | `gcn-zkit stale` |
-| What must match the original exactly, and where I'm free | `gcn-zkit tiers src/camera` |
-| Is my change breaking the repo's rules? | `gcn-zkit check` |
-| Copy-pasted code that should be shared | `gcn-zkit reuse` |
+| What to reuse, port or decompile first for a feature | `zkit port-plan 0x80012345` |
+| What the port is waiting on from the decomp | `zkit demand` |
+| Which systems rest on unproven decomp code | `zkit grounding` |
+| **Where the port probably behaves slightly wrong, and what to do** | `zkit suspects` |
+| Are the port's numbers the real game's numbers? | `zkit consts src/combat` |
+| What changed in the decomp that the port must re-check | `zkit drift` (after re-checking: `zkit drift --accept`) |
+| Which tests cover my change, and who else uses that code | `zkit impact` (`--budget 120` while iterating) |
+| Is the build older than my edits? (check before running it) | `zkit stale` |
+| What must match the original exactly, and where I'm free | `zkit tiers src/camera` |
+| Is my change breaking the repo's rules? | `zkit check` |
+| Copy-pasted code that should be shared | `zkit reuse` |
 
-Optional: block commits that break the port's rules with `gcn-zkit install git-hook --write <port folder>`
+Optional: block commits that break the port's rules with `zkit install git-hook --write <port folder>`
 (`git commit --no-verify` skips it once). The rules, finish steps and lint checks live in the project file; see
 [docs/manifest.md](docs/manifest.md).
 
 ## Update or remove
 
-- **Update:** `uv tool upgrade gcn-zkit`, then `gcn-zkit setup --refresh-agents` in each decomp.
-  From a local checkout: `uv tool install --force --editable /path/to/gcn-zkit`, then
-  `gcn-zkit setup /path/to/project.json --refresh-agents --plugin-source /path/to/gcn-zkit`.
-  Restart both agents. `gcn-zkit doctor` shows the loaded Python path and plugin cache versions/content.
-- **Remove:** `uv tool uninstall gcn-zkit`, then `claude plugin uninstall gcn-zkit@gcn-zkit` and/or
-  `codex plugin remove gcn-zkit@gcn-zkit`. To also remove its notes and index, delete `~/.config/gcn-zkit`,
-  `~/.cache/gcn-zkit` and `~/.local/state/gcn-zkit` (on Windows these are in your user folder).
+- **Update:** `uv tool upgrade zkit`, then `zkit setup --refresh-agents` in each decomp.
+  From a local checkout: `uv tool install --force --editable /path/to/zkit`, then
+  `zkit setup /path/to/project.json --refresh-agents --plugin-source /path/to/zkit`.
+  Restart both agents. `zkit doctor` shows the loaded Python path and plugin cache versions/content.
+- **Remove:** `uv tool uninstall zkit`, then `claude plugin uninstall zkit@zkit` and/or
+  `codex plugin remove zkit@zkit`. To also remove its notes and index, delete `~/.config/zkit`,
+  `~/.cache/zkit` and `~/.local/state/zkit` (on Windows these are in your user folder).
 
 ## Troubleshooting
 
 | Problem | Fix |
 | --- | --- |
 | "not a decomp-toolkit project" | Run it in the decomp folder, the one with `configure.py` and `config/<GAMEID>/config.yml`. |
-| No match %, source files or REL functions | Build the decomp once (`python configure.py`, then `ninja`), then `gcn-zkit setup` again. |
-| The agent doesn't list gcn-zkit | Check that `gcn-zkit --version` works in a new terminal, then fully restart the agent. |
-| No brief at session start | Start the agent inside the decomp folder. Elsewhere gcn-zkit stays silent on purpose. |
+| No match %, source files or REL functions | Build the decomp once (`python configure.py`, then `ninja`), then `zkit setup` again. |
+| The agent doesn't list zkit | Check that `zkit --version` works in a new terminal, then fully restart the agent. |
+| No brief at session start | Start the agent inside the decomp folder. Elsewhere zkit stays silent on purpose. |
 
 ## More
 

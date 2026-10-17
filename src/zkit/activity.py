@@ -30,8 +30,8 @@ def _interesting(project: Project) -> re.Pattern:
     return re.compile(f"{SEP}({PROGRAMS}{''.join('|' + p for p in extra)}){END}", re.I) if extra else INTERESTING
 PYTHON_TOOLS = re.compile(r"(tools/[\w./-]+\.py|verify-[\w-]+\.py|permuter\.py)")
 # This toolkit's own MCP servers and CLI calls are never "activity". Match the program, not any path that happens to
-# contain the name (a decomp inside a folder called gcn-zkit-something is still a decomp).
-OWN = re.compile(r"(?:^|[/\\])gcn-zkit(?:\.exe)?(?:\s|$)|-m gcn_zkit\.cli\b")
+# contain the name (a decomp inside a folder called zkit-something is still a decomp).
+OWN = re.compile(r"(?:^|[/\\])zkit(?:\.exe)?(?:\s|$)|-m zkit\.cli\b")
 
 
 def _git(root: Path, *args: str) -> str:
@@ -49,7 +49,8 @@ def _parallel(fn, items: list) -> list:
 
 
 def state_dir(project: Project) -> Path:
-    base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "gcn-zkit"
+    from .paths import state_home
+    base = state_home()
     path = base / re.sub(r"[^\w.-]", "_", project.config["id"])
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -242,7 +243,7 @@ def builders(project: Project, repo: str, worktree: str | None = None) -> list[d
     """Build processes running in one checkout (the main one, or `worktree`) and the locks held on it.
 
     Only a process's own program and arguments are matched, never a `sh -c` script: two agents both running
-    `gcn-zkit wait && ninja` must not see each other's wrapper shell and wait forever."""
+    `zkit wait && ninja` must not see each other's wrapper shell and wait forever."""
     patterns = [re.compile(p) for p in BUILDERS + project.config["repositories"][repo].get("builders", [])]
     busy = []
     for proc in processes(project):

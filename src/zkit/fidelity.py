@@ -261,7 +261,7 @@ def suspects(project: Project, repo: str, paths: list[str] | None = None, target
         if u:
             actions.append(f"decompile-first: {u} cited original(s) not exact ({', '.join(unmatched[rel]['examples'][:2])})")
         if c["near"]:
-            actions.append(f"check {c['near']} near-miss constant(s) (`gcn-zkit consts {rel}`)")
+            actions.append(f"check {c['near']} near-miss constant(s) (`zkit consts {rel}`)")
         if c["unsourced"]:
             actions.append(f"source {c['unsourced']} constant(s) not loaded by any cited original")
         if covered is False:
@@ -276,7 +276,7 @@ def suspects(project: Project, repo: str, paths: list[str] | None = None, target
             "weights": "3×unmatched cited original, 4×near-miss constant, 1×unsourced constant, "
                        "2×untested, 1×no recipe; ×1.5 exact tier, ×1.0 equivalent; liberty/infrastructure excluded",
             "meaning": "Where slightly-off behavior most likely lives. decompile-first items cannot be "
-                       "trusted until the decomp proves them; after recovering them run `gcn-zkit drift`."}
+                       "trusted until the decomp proves them; after recovering them run `zkit drift`."}
 
 
 def _tested_files(project: Project, repo: str) -> dict[str, bool] | None:
@@ -381,10 +381,10 @@ def drift(project: Project, target: str | None = None, accept: bool = False,
         os.replace(temporary, path)
         return {"baseline": "accepted", "functions": len(current), "changes": [],
                 "note": "Baseline saved. Later runs list cited functions whose decomp state changed; "
-                        "re-verify their native code, then `gcn-zkit drift --accept` again."}
+                        "re-verify their native code, then `zkit drift --accept` again."}
     elif not path.is_file():
         return {"baseline": "none", "functions": len(current), "changes": [],
-                "note": "No baseline yet (nothing written). Record one with `gcn-zkit drift --accept`, or compare "
+                "note": "No baseline yet (nothing written). Record one with `zkit drift --accept`, or compare "
                         "with an old decomp report via `--since <report.json>`."}
     else:
         previous = json.loads(path.read_text(encoding="utf-8"))

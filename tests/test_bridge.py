@@ -1,5 +1,6 @@
 """Synthetic decomp + native port, with a hand-assembled DOL. No game assets."""
 
+import support  # noqa: F401  (isolates config, cache and state)
 import json
 import os
 from pathlib import Path
@@ -53,7 +54,7 @@ class BridgeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        from gcn_zkit.index import close_connections
+        from zkit.index import close_connections
         self.addCleanup(close_connections)  # runs first: Windows cannot delete an open database
         base = Path(self.temp.name)
         for var in ("XDG_CACHE_HOME", "XDG_STATE_HOME"):
@@ -116,7 +117,7 @@ class BridgeTests(unittest.TestCase):
             "variants": {"families": ["Bear", "Wolf", "Bird"]}}))
         (base / "knowledge").mkdir()
         (base / "knowledge/lock.md").write_text("---\ntitle: Lock gotcha\napplies: decomp\nkind: gotcha\n---\nBody.\n", encoding="utf-8")
-        from gcn_zkit.project import Project
+        from zkit.project import Project
         self.project = Project.load(self.manifest)
 
     def write_native(self, rel, text):
@@ -125,7 +126,7 @@ class BridgeTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
 
     def test_dol_and_direct_calls(self):
-        from gcn_zkit.gc import Dol, direct_calls
+        from zkit.gc import Dol, direct_calls
         dol = Dol.load(self.decomp / "orig.dol")
         self.assertEqual(direct_calls(dol, TEXT, 12), [(TEXT, TEXT + 0x10), (TEXT + 4, TEXT + 0x20)])
         backwards = struct.pack(">I", bl(TEXT + 0x20, TEXT))
@@ -135,7 +136,7 @@ class BridgeTests(unittest.TestCase):
             dol.read(0x81000000, 4)
 
     def test_index_is_incremental(self):
-        from gcn_zkit.index import refresh
+        from zkit.index import refresh
         first = refresh(self.project)
         self.assertGreater(first["files_reindexed"], 4)
         self.assertEqual(refresh(self.project)["files_reindexed"], 0)
@@ -145,7 +146,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(refresh(self.project)["files_removed"], 1)
 
     def test_lookup_joins_both_repos(self):
-        from gcn_zkit.bridge import lookup
+        from zkit.bridge import lookup
         data = lookup(self.project, "TEnemy::update")
         self.assertEqual(data["function"]["source"], "src/Enemy.cpp")
         self.assertEqual(data["function"]["source_line"], 1)
@@ -162,17 +163,18 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(data["symbol"]["name"], "enemyTable")
 
     def test_port_plan_and_demand(self):
-        from gcn_zkit.bridge import demand, port_plan
+        from zkit.bridge import demand, port_plan
         plan = port_plan(self.project, "0x80003000", depth=1)
         actions = {n["address"]: n["action"] for n in plan["nodes"]}
-        self.assertEqual(actions, {"0x80003000": "reuse", "0x80003010": "reuse", "0x80003020": "reuse-unverified"})
+        self.assertEqual(actions, {"0x80003000": "reuse", "0x80003010": "reuse-unverified", "0x80003020": "reuse-unverified"})
+        self.assertIn("placeholder name", next(n for n in plan["nodes"] if n["address"] == "0x80003010")["not_ready"])
         rows = {r["address"]: r["need"] for r in demand(self.project)["rows"]}
         self.assertEqual(rows["0x80003020"], ["match", "name"])
         self.assertEqual(rows["0x80003010"], ["name"])
         self.assertNotIn("0x80003000", rows)
 
     def test_check_judges_only_added_lines(self):
-        from gcn_zkit.bridge import check
+        from zkit.bridge import check
         self.assertEqual(check(self.project, "native")["findings"], [])
         self.write_native("src/actors/Enemy.cpp", (self.native / "src/actors/Enemy.cpp").read_text(encoding="utf-8") +
                           "void tick() {\n  if (isSwamp) {}\n}\n" + "\n" * 20 + "int x; // typo 80009999\n")
@@ -181,7 +183,7 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse(check(self.project, "native")["ok"])
 
     def test_reuse_finds_copies_and_dispatch_sites(self):
-        from gcn_zkit.bridge import reuse
+        from zkit.bridge import reuse
         data = reuse(self.project, "native", ["Bear", "Wolf", "Bird"])
         self.assertEqual(data["identical_helpers"][0]["name"], "finite")
         self.assertEqual(data["identical_helpers"][0]["copies"], 3)
@@ -189,8 +191,8 @@ class BridgeTests(unittest.TestCase):
                          {"src/actors/Families.cpp", "src/actors/Third.cpp"})
 
     def test_data_lookup_lists_table_slots_and_typed_queries(self):
-        from gcn_zkit.bridge import lookup, typed_query
-        from gcn_zkit.render import lookup as render_lookup
+        from zkit.bridge import lookup, typed_query
+        from zkit.render import lookup as render_lookup
         text = render_lookup(lookup(self.project, "enemyTable"))
         self.assertTrue(text.startswith("0x80003104 is data, not code: enemyTable"), text)
         self.assertIn("+0x0 (slot 0) -> 0x80003000 TEnemy::update()", text)
@@ -199,8 +201,8 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(typed_query("TEnemy::update", "u32", 16), ("TEnemy::update", "u32", 16))
 
     def test_disasm_and_data(self):
-        from gcn_zkit.gc import Dol
-        from gcn_zkit.inspect_dol import disasm, read_data, sda_bases
+        from zkit.gc import Dol
+        from zkit.inspect_dol import disasm, read_data, sda_bases
         self.assertEqual(sda_bases(self.project, "t", Dol.load(self.decomp / "orig.dol")), {2: DATA, 13: DATA})
         text = disasm(self.project, "t", TEXT + 0x10)["text"]
         if "objdump" in disasm(self.project, "t", TEXT)["disassembler"]:
@@ -210,8 +212,8 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(rows[0]["values"], [1.5, "0x80003000 (TEnemy::update())"])
 
     def test_gate_drift_brief_handoff_and_locks(self):
-        from gcn_zkit.activity import activity, write_handoff
-        from gcn_zkit.session import brief, gate
+        from zkit.activity import activity, write_handoff
+        from zkit.session import brief, gate
         drift = gate(self.project, "decomp")["drift"]
         self.assertEqual(drift[0]["missing"], ["tools/verify.py check"])
         write_handoff(self.project, "native", "Bird idle verified; next: wire Wolf")
@@ -226,12 +228,12 @@ class BridgeTests(unittest.TestCase):
         data = brief(self.project, "native")
         self.assertEqual(data["repos"]["native"]["handoffs"][0]["text"], "Bird idle verified; next: wire Wolf")
         self.assertIn("port_demand", data)
-        from gcn_zkit.render import brief as render_brief
+        from zkit.render import brief as render_brief
         self.assertIn("handoff", render_brief(data))
 
     def test_cli_and_hook(self):
         env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"), ZKIT_PROJECT=str(self.manifest))
-        run = lambda *a: subprocess.run([sys.executable, "-m", "gcn_zkit.cli", *a], capture_output=True, text=True,
+        run = lambda *a: subprocess.run([sys.executable, "-m", "zkit.cli", *a], capture_output=True, text=True,
                                         env=env, cwd=self.native, timeout=60)
         self.assertIn("TEnemy::update()", run("lookup", "80003000").stdout)
         self.assertIn("finite", run("reuse", "native").stdout)
@@ -243,7 +245,7 @@ class BridgeTests(unittest.TestCase):
 
 
     def test_native_impact_and_grounding(self):
-        from gcn_zkit.native import grounding, impact
+        from zkit.native import grounding, impact
         build = self.native / "build"
         build.mkdir()
         self.write_native("src/actors/Locomotion.hpp", "// 80003010\nfloat step();\n")
@@ -267,7 +269,7 @@ class BridgeTests(unittest.TestCase):
         config = json.loads(self.manifest.read_text(encoding="utf-8"))
         config["repositories"]["native"]["tests"] = {"build_dir": "build", "catalog": "build/catalog.json"}
         self.manifest.write_text(json.dumps(config), encoding="utf-8")
-        from gcn_zkit.project import Project
+        from zkit.project import Project
         project = Project.load(self.manifest)
         data = impact(project, "native", ["src/actors/Locomotion.hpp"])
         self.assertEqual(data["files"][0]["consumers"], ["src/actors/Bear.hpp", "src/actors/Wolf.hpp"])
@@ -279,7 +281,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(ground["weakest_files"][0]["path"], "src/actors/Other.cpp")
 
     def test_dol_inside_disc_image(self):
-        from gcn_zkit.gc import Dol
+        from zkit.gc import Dol
         dol = build_dol()
         disc = bytearray(0x10000)
         disc[0:6] = b"GTEST1"
@@ -303,7 +305,7 @@ class BridgeTests(unittest.TestCase):
 
 
     def test_constants_suspects_and_drift(self):
-        from gcn_zkit import fidelity
+        from zkit import fidelity
         # Function A (80003000) calls B, which loads 1.5 through r2: 1.5 verified, 1.49 near, 7.25 unsourced.
         self.write_native("src/actors/Tuning.cpp", "// Original 80003000.\nfloat tune(float x) {\n"
                                                    "  return x * 1.5F + 1.49F + 7.25F;\n}\n")
@@ -335,10 +337,10 @@ class BridgeTests(unittest.TestCase):
 
 
     def test_fidelity_tiers_scope_the_checks(self):
-        from gcn_zkit import fidelity
-        from gcn_zkit.bridge import check
-        from gcn_zkit.project import Project
-        from gcn_zkit.tiers import tier_of
+        from zkit import fidelity
+        from zkit.bridge import check
+        from zkit.project import Project
+        from zkit.tiers import tier_of
         config = json.loads(self.manifest.read_text(encoding="utf-8"))
         config["repositories"]["native"]["fidelity_tiers"] = [
             {"tier": "liberty", "pattern": "^src/ui/", "meaning": "menus"},
@@ -359,8 +361,8 @@ class BridgeTests(unittest.TestCase):
 
 
     def test_review_regressions(self):
-        from gcn_zkit import bridge, fidelity, inspect_dol
-        from gcn_zkit.gc import track_addresses
+        from zkit import bridge, fidelity, inspect_dol
+        from zkit.gc import track_addresses
         # Option injection through base is refused and nothing is written.
         target = self.native / "pwned.txt"
         with self.assertRaises(ValueError):
@@ -401,7 +403,7 @@ class BridgeTests(unittest.TestCase):
 
 class DemangleTests(unittest.TestCase):
     def test_codewarrior_members(self):
-        from gcn_zkit.index import cw_demangle
+        from zkit.index import cw_demangle
         self.assertEqual(cw_demangle("execute__7Actor_cFv"), "Actor_c::execute")
         self.assertEqual(cw_demangle("__ct__6TEnemyFPv"), "TEnemy::TEnemy")
         self.assertEqual(cw_demangle("__dt__6TEnemyFv"), "TEnemy::~TEnemy")

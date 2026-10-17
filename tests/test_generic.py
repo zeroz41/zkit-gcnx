@@ -1,6 +1,7 @@
 """A fresh decomp-toolkit project: `init`, project selection from the working directory, and REL modules
 (functions, callers across DOL and RELs, disassembly and xrefs from dtk's asm output). No game assets."""
 
+import support  # noqa: F401  (isolates config, cache and state)
 import contextlib
 import io
 import json
@@ -41,7 +42,7 @@ class FreshProject(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        from gcn_zkit.index import close_connections
+        from zkit.index import close_connections
         self.addCleanup(close_connections)  # runs first: Windows cannot delete an open database
         base = Path(self.temp.name)
         self.old_env = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
@@ -91,7 +92,7 @@ class FreshProject(unittest.TestCase):
                 os.environ[key] = value
 
     def cli(self, *argv, cwd=None):
-        from gcn_zkit.cli import main
+        from zkit.cli import main
         out = io.StringIO()
         previous = Path.cwd()
         os.chdir(cwd or self.repo)
@@ -106,7 +107,7 @@ class FreshProject(unittest.TestCase):
         code, said = self.cli("init")
         self.assertEqual(code, 0, said)
         self.assertIn("4 functions indexed (2 in REL modules)", said)
-        manifest = json.loads(next((Path(os.environ["XDG_CONFIG_HOME"]) / "gcn-zkit/projects").glob("*.json"))
+        manifest = json.loads(next((Path(os.environ["XDG_CONFIG_HOME"]) / "zkit/projects").glob("*.json"))
                               .read_text(encoding="utf-8"))
         target = manifest["targets"]["game01"]
         self.assertEqual(target["original"], "orig/GAME01/sys/main.dol")
@@ -126,7 +127,7 @@ class FreshProject(unittest.TestCase):
         self.assertIn("ObjTest_Execute__FPv", text)
         self.assertIn("fn_80003010", text)
         # A fresh process knows module names before any refresh.
-        from gcn_zkit import index
+        from zkit import index
         index._MODULE_NAMES.clear()
         index.close_connections()
         code, text = self.cli("asm", "obj_test+0x40")
@@ -151,7 +152,7 @@ class FreshProject(unittest.TestCase):
         code, said = self.cli("init")
         self.assertIn("no build/GAME01/report.json yet", said)
         self.assertIn("2 functions indexed", said)  # from symbols.txt
-        path = next((Path(os.environ["XDG_CONFIG_HOME"]) / "gcn-zkit/projects").glob("*.json"))
+        path = next((Path(os.environ["XDG_CONFIG_HOME"]) / "zkit/projects").glob("*.json"))
         data = json.loads(path.read_text(encoding="utf-8"))
         data["repositories"]["decomp"]["rules"] = ["Commit as me"]
         data["targets"]["game01"]["sda_bases"] = {"r2": "0x80003100"}

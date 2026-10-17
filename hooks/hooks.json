@@ -7,7 +7,7 @@
           {
             "type": "command",
             "timeout": 30,
-            "command": "gcn-zkit hook session-start"
+            "command": "zkit hook session-start"
           }
         ]
       }
@@ -18,7 +18,7 @@
           {
             "type": "command",
             "timeout": 15,
-            "command": "gcn-zkit hook subagent-start"
+            "command": "zkit hook subagent-start"
           }
         ]
       }

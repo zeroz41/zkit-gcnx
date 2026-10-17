@@ -6,17 +6,17 @@ is closer to the matched source in 111 of 160 functions that differ. Agents read
 
 The cache never goes stale on renames or data re-layouts: the worker sees only bytes and function boundaries
 (address names, undefined data) and current names are substituted on read. A row is keyed by the decompiler
-environment plus the function's own (address, size); `gcn-zkit decompile --all` fills a 27k-function DOL in ~40 s.
+environment plus the function's own (address, size); `zkit decompile --all` fills a 27k-function DOL in ~40 s.
 
 Memory is sized from the machine's total and currently available RAM when a worker starts (`budget`). Two hard
 rules: all agent sessions together (every claude/codex process tree: builds, tests, other workers) stay under
-GCN_ZKIT_AGENT_RAM_MB (default half of total RAM), and a worker never starts if it would leave less than 10% of
+ZKIT_AGENT_RAM_MB (default half of total RAM), and a worker never starts if it would leave less than 10% of
 total RAM (at least 2 GB) available. Within those, the JVM heap ceiling is 1/8 of available RAM (512 MB-4 GB; the JVM takes what it uses),
 threads are min(8, CPUs) trimmed to what fits, and as many workers run at once as fit (up to 4, one slot lock each
 in the cache directory); the rest wait for a slot and then reuse rows another worker just wrote. Measured on a
 27.5k-function DOL: ~1.0 GB peak per worker (JVM 860 MB, four decompiler processes 140 MB on the largest
 functions); with a 512 MB heap the whole DOL decompiles in 163 s at 850 MB peak, so an 8 GB machine can run it.
-A call decompiles only the functions it names; nothing ever decompiles the whole DOL unless asked (`--all`). GCN_ZKIT_GHIDRA_HEAP (e.g. 3g) and GCN_ZKIT_GHIDRA_MIN_FREE_MB override the heap and the reserve.
+A call decompiles only the functions it names; nothing ever decompiles the whole DOL unless asked (`--all`). ZKIT_GHIDRA_HEAP (e.g. 3g) and ZKIT_GHIDRA_MIN_FREE_MB override the heap and the reserve.
 Cached reads never start Ghidra.
 """
 
@@ -42,7 +42,7 @@ from .project import Project, digest
 
 WORKER_VERSION = 1
 EXTENSION = "https://github.com/Cuyler36/Ghidra-GameCube-Loader/releases"
-INSTALL = (f"uv tool install --force 'gcn-zkit[ghidra] @ git+https://github.com/{REPOSITORY}'   (from a checkout: "
+INSTALL = (f"uv tool install --force 'zkit[ghidra] @ git+https://github.com/{REPOSITORY}'   (from a checkout: "
            "uv tool install --force --editable '<checkout>[ghidra]')")
 LIMITS = ("Ghidra's reading of the original bytes at decomp-toolkit's boundaries, without auto-analysis or types. "
           "Read it next to m2c for any unmatched function and start from whichever shape fits: its loops and "
@@ -156,7 +156,7 @@ def _agent_mb() -> int | None:
 def _heap_mb(text: str) -> int:
     match = re.fullmatch(r"\s*(\d+)\s*([gGmM]?)\s*", text)
     if not match:
-        raise ValueError(f"GCN_ZKIT_GHIDRA_HEAP={text!r}: use a size like 1g or 1536m")
+        raise ValueError(f"ZKIT_GHIDRA_HEAP={text!r}: use a size like 1g or 1536m")
     return int(match[1]) * (1024 if match[2] in "gG" and match[2] else 1)
 
 
@@ -165,13 +165,13 @@ def budget(threads: int | None = None) -> dict:
     use, or `refuse` with the reason."""
     total, available = _memory_mb()
     agents = _agent_mb()
-    cap = (int(os.environ["GCN_ZKIT_AGENT_RAM_MB"]) if os.environ.get("GCN_ZKIT_AGENT_RAM_MB")
+    cap = (int(os.environ["ZKIT_AGENT_RAM_MB"]) if os.environ.get("ZKIT_AGENT_RAM_MB")
            else (total // 2 if total else None))
     room = None if available is None else available  # what a new worker may take without breaking a rule
-    reserve = (int(os.environ["GCN_ZKIT_GHIDRA_MIN_FREE_MB"]) if os.environ.get("GCN_ZKIT_GHIDRA_MIN_FREE_MB")
+    reserve = (int(os.environ["ZKIT_GHIDRA_MIN_FREE_MB"]) if os.environ.get("ZKIT_GHIDRA_MIN_FREE_MB")
                else max(2048, (total or 0) // 10))
-    if os.environ.get("GCN_ZKIT_GHIDRA_HEAP"):
-        heap = _heap_mb(os.environ["GCN_ZKIT_GHIDRA_HEAP"])
+    if os.environ.get("ZKIT_GHIDRA_HEAP"):
+        heap = _heap_mb(os.environ["ZKIT_GHIDRA_HEAP"])
     else:
         heap = HEAP_MB[1] if available is None else max(HEAP_MB[0], min(HEAP_MB[1], available // 8))
     if room is not None:
@@ -187,11 +187,11 @@ def budget(threads: int | None = None) -> dict:
               "workers": MAX_WORKERS if room is None else max(1, min(MAX_WORKERS, room // need))}
     if available is not None and available - need < reserve:
         result["refuse"] = (f"Not starting Ghidra: {available} MB of {total} MB available; a worker needs ~{need} MB "
-                            f"and must leave {reserve} MB (GCN_ZKIT_GHIDRA_MIN_FREE_MB). Cached functions still read "
+                            f"and must leave {reserve} MB (ZKIT_GHIDRA_MIN_FREE_MB). Cached functions still read "
                             "instantly; retry when memory frees up.")
     elif agents is not None and cap is not None and agents + need > cap:
         result["refuse"] = (f"Not starting Ghidra: agent sessions already use {agents} MB; a worker needs ~{need} MB "
-                            f"and all agents stay under {cap} MB (GCN_ZKIT_AGENT_RAM_MB). Cached functions still read "
+                            f"and all agents stay under {cap} MB (ZKIT_AGENT_RAM_MB). Cached functions still read "
                             "instantly; retry when a build or session finishes.")
     return result
 
@@ -228,7 +228,7 @@ class _WorkerLock:
 
 
 def _python() -> str | None:
-    configured = os.environ.get("GCN_ZKIT_GHIDRA_PYTHON")
+    configured = os.environ.get("ZKIT_GHIDRA_PYTHON")
     if configured:
         return configured
     return sys.executable if importlib.util.find_spec("pyghidra") else None
@@ -300,7 +300,7 @@ def _run_worker(info: dict, dol: Path, sda: dict[int, int], boundaries: list[tup
     plan = budget(threads)
     if plan.get("refuse"):
         raise ValueError(plan["refuse"])
-    with tempfile.TemporaryDirectory(prefix="gcn-zkit-ghidra-") as work:
+    with tempfile.TemporaryDirectory(prefix="zkit-ghidra-") as work:
         request, output = Path(work) / "request.json", Path(work) / "out.jsonl"
         request.write_text(json.dumps({"install_dir": info["install"], "dol": str(dol), "sda": sda,
                                        "functions": boundaries, "addresses": addresses,
@@ -308,7 +308,7 @@ def _run_worker(info: dict, dol: Path, sda: dict[int, int], boundaries: list[tup
                                        "output": str(output)}), encoding="utf-8")
         env = dict(os.environ, PYTHONPATH=os.pathsep.join(filter(None, [str(Path(__file__).resolve().parents[1]),
                                                                          os.environ.get("PYTHONPATH")])))
-        result = subprocess.run([info["python"], "-m", "gcn_zkit.ghidra_worker", str(request)], env=env,
+        result = subprocess.run([info["python"], "-m", "zkit.ghidra_worker", str(request)], env=env,
                                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                                 timeout=180 + len(addresses) // 4)
         rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()] if output.exists() else []
