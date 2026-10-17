@@ -4,6 +4,27 @@ addresses straight-line code forms (adrp + add/ldr/str, adr, literal loads). Dec
 from __future__ import annotations
 
 
+def written(word: int) -> tuple[int, ...]:
+    """General registers an instruction writes (approximate but conservative: when unsure, its rd field).
+
+    Branches and stores write nothing (bl/blr clobber is handled by callers); loads write rt (pairs also rt2);
+    every data-processing instruction writes rd."""
+    group = word >> 25 & 0xF
+    if group in (0b1010, 0b1011):                                   # branches, exceptions, system
+        return ()
+    if group & 0b0101 == 0b0100:                                    # loads and stores
+        if word >> 26 & 1:                                          # SIMD/FP registers: not general registers
+            return ()
+        pair = word & 0x38000000 == 0x28000000
+        load = bool(word >> 22 & 1)
+        if word & 0x3B000000 in (0x18000000, 0x19000000):           # literal loads (and prefetch)
+            return (word & 31,)
+        if not load:
+            return ()
+        return (word & 31, word >> 10 & 31) if pair else (word & 31,)
+    return (word & 31,)
+
+
 def _sign(value: int, bits: int) -> int:
     return value - (1 << bits) if value & (1 << (bits - 1)) else value
 
@@ -104,6 +125,6 @@ def track_addresses(words: list[int], start: int, load64=None) -> dict[int, tupl
             for register in range(19):
                 pages.pop(register, None)
             continue
-        if rd in pages and word & 0x1C000000 in (0x10000000, 0x08000000) and rd != 31:
-            pages.pop(rd, None)                                   # data-processing write to the register
+        for register in written(word):
+            pages.pop(register, None)
     return out

@@ -161,6 +161,12 @@ def build_parser() -> argparse.ArgumentParser:
                                "(source paths and function names its code references, layout, call structure)")
     c.add_argument("--splits", type=Path, help="also write the proposal as a splits.txt")
     c.add_argument("--limit", type=int, default=30)
+    c = add("delink", help="Split the original into one relocatable object per unit of a splits.txt (Switch): "
+                           "the target objects objdiff compares the compiled ones with")
+    c.add_argument("--splits", type=Path, required=True)
+    c.add_argument("--out", type=Path, required=True, help="folder for the objects (unit a/b.cpp: OUT/a/b.o)")
+    c.add_argument("--objdiff", type=Path, help="also write objdiff's project file here")
+    c.add_argument("--compiled", type=Path, help="where the build writes each unit's object (for --objdiff)")
     c = add("refs", help="Where a function or global is defined, declared and used in the source (any spelling)")
     c.add_argument("query", nargs="+")
     c.add_argument("--repo")
@@ -546,6 +552,18 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             boundaries.write_splits(data, args.splits.expanduser().resolve())
             data["written"] = str(args.splits)
         return data, render.boundaries(data, args.limit) + (f"\nwrote {args.splits}" if args.splits else "")
+    if command == "delink":
+        from . import delink
+        data = delink.delink(project, target, args.splits.expanduser().resolve(), args.out.expanduser().resolve(),
+                             args.objdiff.expanduser().resolve() if args.objdiff else None,
+                             args.compiled.expanduser().resolve() if args.compiled else None)
+        lines = [f"wrote {len(data['units'])} objects to {data['out']}"]
+        if data["unassigned"]:
+            lines.append(f"{data['unassigned']} referenced addresses are in no unit's ranges (extend the splits): "
+                         + ", ".join(data.get("unassigned_examples", [])[:8]))
+        if args.objdiff:
+            lines.append(f"wrote {args.objdiff}")
+        return data, "\n".join(lines)
     if command == "refs":
         data = bridge.refs(project, " ".join(args.query), target, project.repo_key(args.repo) if args.repo else None,
                            args.limit)

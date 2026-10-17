@@ -22,6 +22,7 @@ from .elf import Elf, Relocation, Section
 from .project import Project
 
 # Sections that never carry the program: compiler notes, debug info, line tables, address-significance tables.
+SHF_WRITE, SHF_EXECINSTR, SHF_STRINGS = 0x1, 0x4, 0x20
 SKIP_SECTIONS = re.compile(r"^(\.comment|\.mwcats.*|\.debug.*|\.line|\.note.*|\.llvm_addrsig|\.llvm\.call-graph-profile|"
                            r"\.ARM\.attributes|\.eh_frame|\.rela?\..*|\.symtab|\.strtab|\.shstrtab|\.group)$")
 
@@ -63,9 +64,46 @@ def _relocs(elf: Elf, section: Section, start: int, end: int, rename: dict[str, 
         if start <= reloc.offset < end:
             name = _symbol_name(elf, reloc.symbol)
             word = (reloc.offset - start) // width * width
-            grouped.setdefault(word, []).append((reloc.type, rename.get(name, name), reloc.addend))
-    return {word: (tuple(r[0] for r in rows), tuple(r[1] for r in rows), tuple(r[2] for r in rows))
-            for word, rows in grouped.items()}
+            grouped.setdefault(word, []).append((reloc.type, rename.get(name, name), reloc.addend, reloc.symbol))
+    return {word: tuple(tuple(r[i] for r in rows) for i in range(4)) for word, rows in grouped.items()}
+
+
+def _referenced(elf: Elf, index: int, addend: int) -> tuple[bytes, int, bool, bool] | None:
+    """(bytes from the target on, known length, string section, unnamed) for a relocation to constant data this
+    object defines; None for anything else (code, writable data, undefined symbols)."""
+    symbol = elf.symbols[index] if index < len(elf.symbols) else None
+    if symbol is None or not 0 < symbol.section < min(0xFF00, len(elf.sections)):
+        return None
+    section = elf.sections[symbol.section]
+    if section.flags & (SHF_EXECINSTR | SHF_WRITE):
+        return None
+    start = symbol.value + addend
+    data = bytes(max(0, section.size - start)) if section.type == 8 else elf.data(section)[start:]
+    known = symbol.size - addend if symbol.kind != "section" and symbol.size > addend else section.entsize
+    unnamed = symbol.kind == "section" or not symbol.name or _anonymous(symbol.name, symbol.bind) or \
+        symbol.name.startswith("lbl_")
+    return data, known, bool(section.flags & SHF_STRINGS), unnamed
+
+
+def _same_literal(a: Elf, xa: tuple, b: Elf, xb: tuple) -> bool:
+    """Relocations naming different symbols for the same constant: read-only data one side leaves unnamed (a
+    literal in a merge section, a generated label), compared by its bytes: a string up to its NUL, other data over
+    the size either side knows (its symbol or the merge section's entry). Two named constants stay different."""
+    if xa[0] != xb[0] or len(xa[3]) != len(xb[3]):
+        return False
+    for ia, aa, ib, ab in zip(xa[3], xa[2], xb[3], xb[2]):
+        left, right = _referenced(a, ia, aa), _referenced(b, ib, ab)
+        if left is None or right is None or not (left[3] or right[3]):
+            return False
+        if left[2] or right[2]:
+            end_left, end_right = left[0].find(b"\0"), right[0].find(b"\0")
+            if end_left < 0 or left[0][:end_left] != right[0][:end_right]:
+                return False
+            continue
+        length = max(left[1], right[1])
+        if length <= 0 or len(left[0]) < length or left[0][:length] != right[0][:length]:
+            return False
+    return True
 
 
 def _find(elf: Elf, name: str):
@@ -103,6 +141,7 @@ def function_diff(target_path: Path, base_path: Path, name: str, base_name: str 
     rb = _relocs(built, sb, b.value, b.value + b.size, {v: k for k, v in rename.items()})
     width = 4
     rows = []
+    literals = 0
     for offset in range(0, max(len(da), len(db)), width):
         wa, wb = da[offset:offset + width], db[offset:offset + width]
         xa, xb = ra.get(offset), rb.get(offset)
@@ -110,11 +149,16 @@ def function_diff(target_path: Path, base_path: Path, name: str, base_name: str 
             rows.append({"offset": offset, "original": wa.hex(), "compiled": wb.hex(),
                          "original_reloc": _reloc_text(xa), "compiled_reloc": _reloc_text(xb)})
         elif xa and xb and (xa[1] != xb[1] or xa[2] != xb[2]):
+            if _same_literal(original, xa, built, xb):
+                literals += 1
+                continue
             rows.append({"offset": offset, "original": wa.hex(), "compiled": wb.hex(),
                          "original_reloc": _reloc_text(xa), "compiled_reloc": _reloc_text(xb), "reloc_only": True})
     reloc_only = rows and all(r.get("reloc_only") for r in rows)
     out.update(exact=not rows and len(da) == len(db), size=len(da), compiled_size=len(db), differences=len(rows),
                reloc_only=bool(reloc_only), rows=rows[:limit])
+    if literals:
+        out["literal_relocations"] = literals  # same constant data under another symbol name
     if rows:
         out["first_difference"] = rows[0]["offset"]
     return out
