@@ -172,6 +172,9 @@ def build_parser() -> argparse.ArgumentParser:
                             "symbols.txt (recovered tables and destructors named), a header per class, analysis.json")
     c.add_argument("--out", type=Path, required=True)
     c.add_argument("--types-include", default="types.h")
+    c = add("discover", help="Functions, sections, small-data bases and data objects found in the original alone "
+                             "(no symbols file needed), written as a symbols.txt")
+    c.add_argument("--out", type=Path, required=True, help="the symbols.txt to write")
     c = add("units", help="Translation units from evidence in the original (source paths its code cites, literal "
                           "copies, data one run of code uses, classes): a fresh proposal, or --check the current splits")
     c.add_argument("--check", action="store_true", help="folds, splits and data claims for the existing splits.txt")
@@ -579,6 +582,10 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         u = data["units"]
         return data, (f"wrote {data['folder']}: {u['units']:,} units, {data['named_symbols']:,} named symbols, "
                       f"{data['class_headers']:,} class headers")
+    if command == "discover":
+        from .discover import discover_project
+        data = discover_project(project, target, args.out.expanduser().resolve())
+        return data, render.discovered(data)
     if command == "units":
         from . import units
         if args.check:
