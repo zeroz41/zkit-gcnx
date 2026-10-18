@@ -42,16 +42,9 @@ zkit setup --native ../your-port    # the decomp and its port
 
 ### Connect your agent
 
-`zkit setup` installs the zkit plugin (tools, skills and a session brief) for Claude Code and Codex, whichever
-you have. To do it yourself, for example after `zkit new`:
-
-```sh
-claude plugin marketplace add zeroz41/gc-switch-tool-zkit
-claude plugin install zkit@zkit
-
-codex plugin marketplace add zeroz41/gc-switch-tool-zkit
-codex plugin add zkit@zkit
-```
+`zkit setup` installs the zkit plugin (tools, skills and a session brief) in your agent. To do it yourself, for
+example after `zkit new`, add `zeroz41/gc-switch-tool-zkit` as a plugin marketplace in your agent and install
+`zkit@zkit` from it.
 
 Restart your agent in the project folder. `zkit doctor` checks everything and tells you how to fix
 what's missing.
