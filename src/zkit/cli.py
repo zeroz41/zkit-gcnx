@@ -358,10 +358,14 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--save", action="store_true", help="save the current report as a baseline")
     c.add_argument("--list", action="store_true", help="list saved baselines")
     c.add_argument("--check", action="store_true", help="with --since: exit 1 on any lost match, link or data")
-    c = add("report", help="Write a browsable offline HTML page from the objdiff reports")
-    c.add_argument("--out", type=Path, default=Path("build/progress"), help="folder for index.html")
+    c = add("report", help="Write a browsable offline HTML page from the objdiff reports (the build writes it too), "
+                           "and with --readme the progress table in the README")
+    c.add_argument("--out", type=Path, help="folder for index.html (default: build/progress in the repository)")
     c.add_argument("--title", help="page title (default: the project's title or id)")
     c.add_argument("--targets", nargs="*", help="targets to include (default: every target with a report)")
+    c.add_argument("--readme", nargs="?", type=Path, const=Path("README.md"),
+                   help="also rewrite the progress table between <!-- progress --> and <!-- /progress --> in this "
+                        "file (default: the repository's README.md)")
     c = add("quality", help="Decompiler debt left in the source (hand-mangled names, raw offsets, fake vtables, "
                             "temporaries, placeholder names), at the working tree or a revision")
     c.add_argument("repo", nargs="?")
@@ -910,8 +914,16 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         targets = args.targets or [t for t, c in project.config.get("targets", {}).items() if c.get("report")]
         if not targets:
             raise ValueError("The project has no targets with an objdiff report")
-        index = progress.write_page(project, targets, args.out.expanduser().resolve(), args.title)
-        return {"index": str(index)}, f"wrote {index}"
+        root = project.root(project.target(targets[0])["repository"])
+        out = args.out.expanduser().resolve() if args.out else root / "build" / "progress"
+        index = progress.write_page(project, targets, out, args.title)
+        result, said = {"index": str(index)}, f"wrote {index}"
+        if args.readme is not None:
+            readme = args.readme.expanduser()
+            readme = readme if readme.is_absolute() else root / readme
+            result["readme"] = {"path": str(readme), "changed": progress.write_readme(project, targets, readme)}
+            said += f"\n{'updated' if result['readme']['changed'] else 'unchanged'}: progress table in {readme}"
+        return result, said
     if command == "quality":
         from . import quality
         repo = args.repo or (bridge.role_repos(project, "decomp") or [None])[0]

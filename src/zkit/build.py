@@ -33,6 +33,7 @@ from typing import Any
 from .project import Project
 
 NINJA = "build/build.ninja"
+PAGE = "build/progress/index.html"   # `zkit report`'s page of every report
 # The standard GameCube/Wii compiler bundle (tag 20251118), and
 # the SHA-256 measured on it: CodeWarrior for GameCube 1.0-3.0a5.2 and Wii.
 COMPILERS_URL = "https://files.decomp.dev/compilers_20251118.zip"
@@ -407,6 +408,13 @@ def configure(project: Project, repository: str | None = None, only: str | None 
         summary[name] = {"units": len(units), "compiled": len(compiled), "objects": len(objects), "dir": paths.dir,
                          "report": report, "link": bool(linked), "objdiff": str(objdiff), "objdiff_written": wrote,
                          "notes": notes}
+    if groups["report"]:  # the browsable page of every report, current after each build
+        reported = [name for name in names if summary[name]["report"]]
+        ninja.rule("page", _command(zkit) + " report --out build/progress --targets " + _command(reported),
+                   description="PAGE $out")
+        ninja.build([PAGE], "page", implicit=groups["report"])
+        groups["progress"] = [PAGE]
+        defaults.append(PAGE)
     # A source added or removed changes its folder's time: ninja then reconfigures before building.
     sources = root / "src"
     folders = [_relative(p, root) for p in [sources, *sorted(p for p in sources.rglob("*") if p.is_dir())]] \

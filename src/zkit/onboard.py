@@ -164,7 +164,7 @@ def manifest_for(decomp: Path, version: str | None = None, native: Path | None =
             "index_paths": decomp_paths,
             "cite_paths": _existing(root, ["docs"]),
             "start": ["python configure.py", "ninja"],
-            "finish": ["ninja", "zkit progress --since session --check", "zkit hygiene"],
+            "finish": ["ninja", "zkit progress --since session --check", "zkit report --readme", "zkit hygiene"],
             "rules": [],
             # Strict from the start: debt never enters the tree, commits stay short and human.
             "quality": {"gate": "error"},
