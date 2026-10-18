@@ -1,4 +1,4 @@
-"""`zkit init`: write a project manifest for a decomp-toolkit (dtk) repository, so nobody writes JSON by hand.
+"""`zkit init`: write a project manifest for a decomp repository, so nobody writes JSON by hand.
 
 The manifest goes to the toolkit's own config directory (never into the repository) and is registered there,
 so the CLI, the MCP server and the session hook pick the right project from the working directory.
@@ -14,7 +14,7 @@ from typing import Any
 
 from .project import Project, git
 
-DISC_SUFFIXES = (".iso", ".gcm")  # read in place; dtk extracts every other format on the first build
+DISC_SUFFIXES = (".iso", ".gcm")  # read in place; the build extracts every other format on the first build
 OTHER_DISCS = (".rvz", ".wia", ".wbfs", ".ciso", ".gcz", ".nfs", ".tgc")
 DOCS = ["README.md", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", "docs"]
 DECOMP_CODE = ["include", "src", "libs"]
@@ -64,7 +64,7 @@ def _slug(text: str) -> str:
 
 
 def _top_level_yaml(path: Path) -> dict[str, str]:
-    """The flat top-level `key: value` pairs of a dtk config.yml (no YAML dependency needed for these)."""
+    """The flat top-level `key: value` pairs of a config.yml (no YAML dependency needed for these)."""
     out = {}
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         match = re.match(r"^([A-Za-z_]\w*):\s*(.*?)\s*(?:#.*)?$", line)
@@ -82,7 +82,7 @@ def _repo_root(path: Path) -> Path:
 
 
 def versions(root: Path) -> list[str]:
-    """Game versions configured in a dtk project (config/<ID>/config.yml), default version first."""
+    """Game versions configured in a decomp project (config/<ID>/config.yml), default version first."""
     found = sorted(p.parent.name for p in root.glob("config/*/config.yml"))
     configure = root / "configure.py"
     if found and configure.is_file():
@@ -109,7 +109,7 @@ def _original(root: Path, config: dict[str, str]) -> tuple[str | None, str]:
         others = [d.name for d in base.iterdir() if d.suffix.lower() in OTHER_DISCS]
         if others:
             return extracted.relative_to(root).as_posix(), (
-                f"{others[0]} is not readable directly; build the decomp once so dtk extracts {obj}")
+                f"{others[0]} is not readable directly; build the decomp once so it extracts {obj}")
     return (extracted.relative_to(root).as_posix() if config.get("object_base") else None,
             "original executable not found; put the disc image in "
             f"{(config.get('object_base') or 'orig/<GAMEID>')} and build once")
@@ -127,12 +127,12 @@ def _existing(root: Path, names: list[str]) -> list[str]:
 
 def manifest_for(decomp: Path, version: str | None = None, native: Path | None = None,
                  name: str | None = None) -> tuple[dict[str, Any], list[str]]:
-    """A manifest dict for a dtk decomp (plus an optional native port), and notes for the user."""
+    """A manifest dict for a decomp (plus an optional native port), and notes for the user."""
     root = _repo_root(decomp)
     notes: list[str] = []
     found = versions(root)
     if not found:
-        raise ValueError(f"{root} does not look like a decomp-toolkit project (no config/<GAMEID>/config.yml). "
+        raise ValueError(f"{root} does not look like a decomp project (no config/<GAMEID>/config.yml). "
                          "Pass the decomp repository folder.")
     if version and version not in found:
         raise ValueError(f"No config/{version}/config.yml; versions here: {', '.join(found)}")
@@ -151,7 +151,7 @@ def manifest_for(decomp: Path, version: str | None = None, native: Path | None =
                      "(`python configure.py` then `ninja`); match state, source files and REL functions appear after")
     symbols = config.get("symbols", f"config/{version}/symbols.txt")
     if not (root / symbols).is_file():
-        notes.append(f"{symbols} does not exist yet: run the decomp's first build (dtk writes it)")
+        notes.append(f"{symbols} does not exist yet: run the decomp's first build (it writes it)")
     project_id = name or _slug(f"{root.name}-{version}")
     decomp_paths = _existing(root, DOCS + DECOMP_CODE)
     identity = _git_identity(root)

@@ -79,7 +79,7 @@ def main(request_path: str) -> int:
             block.setWrite(section.kind == "data")
             block.setExecute(section.kind == "text")
         low, high = dol.bss[0], dol.bss[0] + dol.bss[1]
-        cursor = low  # .bss as dtk sees it also spans .sdata/.sbss: map only the gaps no section covers
+        cursor = low  # .bss as the symbols see it also spans .sdata/.sbss: map only the gaps no section covers
         for start, end in sorted((s.address, s.address + s.size) for s in dol.sections if s.kind == "data") + [(high, high)]:
             if start > cursor and cursor < high:
                 memory.createUninitializedBlock(f"bss_{cursor:X}", address(cursor), min(start, high) - cursor,

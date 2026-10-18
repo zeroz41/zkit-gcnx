@@ -106,7 +106,7 @@ def unit(project: Project, query: str, target: str | None = None, limit: int = 4
     refresh(project, [])
     rows, _ = splits(project, target)
     if not rows:
-        raise ValueError(f"Target {target} has no `splits` file in the manifest (decomp-toolkit splits.txt)")
+        raise ValueError(f"Target {target} has no `splits` file in the manifest (a splits.txt)")
     name, candidates = _resolve_unit(project, target, query)
     if name is None:
         match = HEX.match(query.strip())
@@ -117,7 +117,7 @@ def unit(project: Project, query: str, target: str | None = None, limit: int = 4
             return {"query": query, "found": False, "candidates": [],
                     "hint": f"No split claims {address_text(int(match[1], 16))}"
                             + (f" (nearest symbol {symbol.name}, {symbol.section})" if symbol else "")
-                            + ": decomp-toolkit gives unsplit bytes to an auto-generated unit."}
+                            + ": the build gives unsplit bytes to an auto-generated unit."}
         return {"query": query, "found": False, "candidates": candidates,
                 "hint": "Give a unit path from splits.txt (with or without extension), an address, or a function."}
     db = connect(project)
@@ -209,7 +209,7 @@ def blocked(project: Project, target: str | None = None, limit: int = 40) -> dic
     refresh(project, [])
     rows, _ = splits(project, target)
     if not rows:
-        raise ValueError(f"Target {target} has no `splits` file in the manifest (decomp-toolkit splits.txt)")
+        raise ValueError(f"Target {target} has no `splits` file in the manifest (a splits.txt)")
     db = connect(project)
     per_unit: dict[str, list[int]] = collections.defaultdict(lambda: [0, 0, 0])
     for name, section, start, end in rows:
@@ -254,7 +254,7 @@ def gaps(project: Project, target: str | None = None, section: str | None = None
     refresh(project, [])
     rows, _ = splits(project, target)
     if not rows:
-        raise ValueError(f"Target {target} has no `splits` file in the manifest (decomp-toolkit splits.txt)")
+        raise ValueError(f"Target {target} has no `splits` file in the manifest (a splits.txt)")
     db = connect(project)
     symbols, starts = _symbol_table(project, target)
     bounds: dict[str, list[int]] = {}
@@ -300,6 +300,6 @@ def gaps(project: Project, target: str | None = None, section: str | None = None
     ranges.sort(key=lambda r: (r["sole_user"] is None, r["section"] in CODE_SECTIONS, -r["size"]))
     return {"target": target, "sections": sections, "ranges": ranges[:limit], "total": len(ranges),
             "ready": sum(r["sole_user"] is not None for r in ranges),
-            "limits": "Section extents come from symbols.txt; unclaimed bytes belong to decomp-toolkit auto units. "
+            "limits": "Section extents come from symbols.txt; unclaimed bytes belong to auto-generated units. "
                       "Users are code references decoded from the original (direct calls for code); a range with one "
                       "split user is a claim candidate, not proof: check alignment and the decomp's split rules."}

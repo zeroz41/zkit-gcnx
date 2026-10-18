@@ -499,8 +499,8 @@ def combine(delinked: Path, compiled: Path, exact: list[str], out: Path, comment
 
 # The whole link
 
-def dtk_config(path: Path) -> dict[str, Any]:
-    """`mw_comment_version` and the `force_active` list of a decomp-toolkit config.yml (no YAML dependency)."""
+def config_yml(path: Path) -> dict[str, Any]:
+    """`mw_comment_version` and the `force_active` list of a config.yml (no YAML dependency)."""
     out: dict[str, Any] = {"force_active": []}
     if not path.is_file():
         return out
@@ -646,7 +646,7 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
     repository, module = config["repository"], config.get("module") or target
     root = project.root(repository)
     splits = splits or project.file(repository, config["splits"])
-    settings = dtk_config(splits.parent / "config.yml")
+    settings = config_yml(splits.parent / "config.yml")
     comment = settings.get("mw_comment_version", 10)
     image = delink._image(project, target)
     if image.machine is not delink.PPC:

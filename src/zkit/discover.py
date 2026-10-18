@@ -691,7 +691,7 @@ def discover(dol) -> Found:
 
 
 def write_symbols(found: Found, path: Path) -> Path:
-    """The result as a symbols.txt (decomp-toolkit's format): `fn_` functions, entry labels, data objects."""
+    """The result as a symbols.txt: `fn_` functions, entry labels, data objects."""
     rows = [(a, 0, f"fn_{a:08X} = {found.section_of(a)}:0x{a:08X}; // type:function size:0x{s:X}")
             for a, s in found.functions.items()]
     rows += [(a, 1, f"lbl_{a:08X} = {found.section_of(a)}:0x{a:08X}; // type:label") for a in found.labels]

@@ -11,8 +11,7 @@ pairs, GOT loads, branches) and which data words are pointers. On Switch the mod
 say so. A GameCube executable keeps none, so a word is a pointer only on evidence: it is a function's start, a
 place inside the one function a jump table serves, or the start of (or a place inside) a named object, and it
 does not sit in data the symbols call strings or numbers. A REL module keeps them all (rel.py): its tables name
-every reference but the calls makerel applied, which its bytes hold. Units come from a splits.txt (decomp-toolkit's
-format).
+every reference but the calls makerel applied, which its bytes hold. Units come from a splits.txt.
 """
 
 from __future__ import annotations

@@ -44,7 +44,7 @@ WORKER_VERSION = 1
 EXTENSION = "https://github.com/Cuyler36/Ghidra-GameCube-Loader/releases"
 INSTALL = (f"uv tool install --force 'zkit[ghidra] @ git+https://github.com/{REPOSITORY}'   (from a checkout: "
            "uv tool install --force --editable '<checkout>[ghidra]')")
-LIMITS = ("Ghidra's reading of the original bytes at decomp-toolkit's boundaries, without auto-analysis or types. "
+LIMITS = ("Ghidra's reading of the original bytes at the symbols' boundaries, without auto-analysis or types. "
           "Read it next to m2c for any unmatched function and start from whichever shape fits: its loops and "
           "branches are closer where m2c fails or emits goto, m2c's switches and calls usually are elsewhere. "
           "Retype it before compiling (undefined4, param_N); it is not evidence of runtime parity.")

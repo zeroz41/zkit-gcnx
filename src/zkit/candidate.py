@@ -1,5 +1,5 @@
 """Check a candidate outside the tree: compile it with its unit's exact build command and compare the function
-with the original, the same way for every project (decomp-toolkit/ninja or a compile_commands.json build).
+with the original, the same way for every project (a ninja or a compile_commands.json build).
 
 A candidate is a source file (the function with the includes it needs, or a whole copy of the unit) that is never
 written into the tree. Attempts are recorded per address; the fifth attempt on the same address is refused, the

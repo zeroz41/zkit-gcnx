@@ -278,7 +278,7 @@ def check_project(project, target: str | None = None, limit: int = 60) -> dict[s
     target = default_target(project, target)
     config = project.target(target)
     if not config.get("splits"):
-        raise ValueError(f"Target {target} has no `splits` file to check (decomp-toolkit splits.txt)")
+        raise ValueError(f"Target {target} has no `splits` file to check (a splits.txt)")
     rows = read_splits(project.file(config["repository"], config["splits"]))
     return {"target": target, **check(Program.from_project(project, target), rows, limit)}
 
@@ -392,7 +392,7 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str]) -> li
 
 
 def write_splits(data: dict, path: Path) -> Path:
-    """The proposal as a splits.txt (decomp-toolkit's format): one block per unit, code then its data."""
+    """The proposal as a splits.txt: one block per unit, code then its data."""
     lines = []
     for unit in data["units"]:
         lines.append(f"{unit['unit']}:")

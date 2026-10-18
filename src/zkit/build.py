@@ -1,6 +1,6 @@
 """Build a project: compile every unit that has a source, write the original's target objects, pair them for
 objdiff, report, link and check the result against the original's pinned SHA-1. One ninja file does it,
-generated from the project file: the role configure.py and build.ninja play in a decomp-toolkit project.
+generated from the project file: the role a hand-written configure.py and build.ninja play elsewhere.
 
 The settings are the target's `build` object (docs/project-file.md): the compiler and its flags, include folders,
 where the compilers live and what runs them, and per-unit overrides. A unit `a/b.cpp` of the splits is compiled
@@ -9,8 +9,8 @@ file is `build/build.ninja` (build/ is never committed) with objdiff's project f
 (the exact command of every compiled unit, which `zkit try` reuses).
 
 GameCube compilers are CodeWarrior's, one folder per version (`GC/2.6/mwcceppc.exe`), run through wibo (or wine)
-outside Windows; they are never fetched unless the owner asks (`--download`), and then only the bundle the
-decomp-toolkit template uses, checked against its SHA-256. Switch units are compiled with the configured clang.
+outside Windows; they are never fetched unless the owner asks (`--download`), and then only the standard GameCube/Wii
+compiler bundle, checked against its SHA-256. Switch units are compiled with the configured clang.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from typing import Any
 from .project import Project
 
 NINJA = "build/build.ninja"
-# The compiler bundle decomp-toolkit's project template downloads (tools/download_tool.py, tag 20251118), and
+# The standard GameCube/Wii compiler bundle (tag 20251118), and
 # the SHA-256 measured on it: CodeWarrior for GameCube 1.0-3.0a5.2 and Wii, the same files pso-decomp builds with.
 COMPILERS_URL = "https://files.decomp.dev/compilers_20251118.zip"
 COMPILERS_SHA256 = "69b0d4980a2eccea4ae6e70b486714b5190cb6c75e3bc7b8fb5878a8854d0d1c"
@@ -276,7 +276,7 @@ def build_targets(project: Project, repository: str | None = None, only: str | N
         return [only]
     if not names:
         raise ValueError(f"No target in {project.path} has `build` settings (projects made by `zkit new` have them; "
-                         "a decomp-toolkit project builds with its own configure.py)")
+                         "a project with its own configure.py builds with that)")
     return names
 
 

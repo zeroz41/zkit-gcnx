@@ -790,7 +790,7 @@ def serve_unconfigured() -> None:
     def zkit_setup() -> str:
         """How to point zkit at a GameCube decomp repository."""
         return ("No zkit project covers this folder. In a terminal run `zkit init <path to the decomp repo>` "
-                "(a decomp-toolkit project; build it once first for match data), then restart this session inside "
+                "(build it once first for match data), then restart this session inside "
                 "that repo. `zkit doctor` checks the setup.")
 
     mcp.run(transport="stdio")

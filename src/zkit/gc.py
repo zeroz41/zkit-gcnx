@@ -1,4 +1,4 @@
-"""GameCube binary formats shared by every game: DOL sections, dtk symbol and
+"""GameCube binary formats shared by every game: DOL sections, symbol and
 split files, and direct-call decoding. Nothing here knows about any one game."""
 
 from __future__ import annotations
@@ -111,11 +111,11 @@ class Symbol(NamedTuple):  # a tuple: tens of thousands are built per process, a
     type: str
     size: int
     scope: str
-    data: str = ""  # the data kind dtk records (string, float, 4byte, ...): what the bytes are, not where they point
+    data: str = ""  # the data kind symbols.txt records (string, float, 4byte, ...): what the bytes are, not where they point
 
 
 def read_symbols(path: Path) -> list[Symbol]:
-    """decomp-toolkit symbols.txt. Unknown attributes are ignored."""
+    """A symbols.txt. Unknown attributes are ignored."""
     symbols = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         match = SYMBOL_LINE.match(line.strip())
@@ -133,7 +133,7 @@ SPLIT_RANGE = re.compile(r"^\s+(?P<section>[.\w]+)\s+start:0x(?P<start>[0-9A-Fa-
 
 
 def read_splits(path: Path) -> list[tuple[str, str, int, int]]:
-    """(unit, section, start, end) rows from a decomp-toolkit splits.txt."""
+    """(unit, section, start, end) rows from a splits.txt."""
     rows, unit = [], None
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         if not line.strip() or line.lstrip().startswith("//"):

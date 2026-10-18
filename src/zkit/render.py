@@ -226,7 +226,7 @@ def lookup(data: dict) -> str:
         if owner:
             lines.append(f"  owner unit {owner['unit']} ({owner['section']} {owner['start']}-{owner['end']})")
         elif s and data.get("has_splits"):
-            lines.append("  owner unit: none in splits.txt (decomp-toolkit gives it to an auto-generated unit)")
+            lines.append("  owner unit: none in splits.txt (the build gives it to an auto-generated unit)")
         if data.get("suggestions"):
             lines.append("  similar: " + ", ".join(data["suggestions"]))
         slots = data.get("slots") or []
