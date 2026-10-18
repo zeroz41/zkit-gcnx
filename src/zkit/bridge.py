@@ -1425,6 +1425,12 @@ def _resolve_base(root: Path, base: str) -> str:
     if not base or base.startswith("-") or any(c in base for c in "\0\n"):
         raise ValueError(f"Invalid base revision: {base!r}")
     result = _git_run(root, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{base}^{{commit}}")
+    if result.returncode and base == "HEAD" and not _git_run(root, "symbolic-ref", "--quiet", "HEAD").returncode:
+        # a branch with no commits yet (the first commit): everything is new, so compare with the empty tree
+        empty = subprocess.run(["git", "-C", str(root), "hash-object", "-t", "tree", "--stdin"], input=b"",
+                               capture_output=True, timeout=60)
+        if not empty.returncode:
+            return empty.stdout.decode().strip()
     if result.returncode:
         raise ValueError(f"Unknown base revision {base!r} in {root}")
     return result.stdout.strip()
