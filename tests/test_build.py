@@ -128,6 +128,8 @@ class ConfigureTests(unittest.TestCase):
         units = json.loads((self.game / "objdiff.json").read_text())["units"]
         self.assertEqual([(u["name"], u.get("base_path")) for u in units],
                          [("game/Enemy", "build/T/src/game/Enemy.o"), ("game/Player", None)])
+        from zkit.progress import module_of        # the module it links into, not the unit's folder
+        self.assertEqual({module_of(u) for u in units}, {"main"})
         argv = ["tools/wibo", "build/compilers/GC/1.2.5n/mwcceppc.exe", "-O4,p", "-inline", "auto", "-i", "include",
                 "-DGAME", "-O4,s", "-c", "src/game/Enemy.cpp", "-o", "build/T/src/game"]
         self.assertEqual(json.loads((self.game / "build/compile_commands.json").read_text())[0]["arguments"], argv)
