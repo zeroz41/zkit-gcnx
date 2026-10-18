@@ -364,14 +364,23 @@ def _function_classes(program: Program) -> dict[int, str]:
     return out
 
 
+TABLES = (".ctors", ".dtors")      # pointer tables: one entry per unit's static initializer (finalizer)
+
+
 def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str]) -> list[tuple[int, int, str, str]]:
     """(start, end, unit, section): data only one unit's code uses, and class tables whose constructors are all in
-    one unit; neighbouring objects of one unit merge into one range."""
-    owned: list[tuple[int, int, str, str]] = []
+    one unit. The linker lays out every section in link order, one contiguous block per object, so in each section
+    a unit owns one range, and the units' ranges come in the order of their code: a claim against that order is a
+    reference from another unit, not ownership, and is dropped (the fewest claims that restore the order). A range
+    always covers whole symbols."""
+    from .link import LINKER_OBJECTS
+    claims: list[tuple[int, int, str, str]] = []
     for o, fs in ev.local.items():
         homes = {owner.get(i) for i in fs} - {None}
+        if o.name in LINKER_OBJECTS or o.section in TABLES:   # the linker's, or a table entry (below)
+            continue
         if len(homes) == 1 and not program.in_code(o.address):      # data in code is in its unit's code range
-            owned.append((o.address, o.address + max(o.size, 1), next(iter(homes)), o.section))
+            claims.append((o.address, o.address + max(o.size, 1), next(iter(homes)), o.section))
     if program.platform.name == "gamecube":
         from .classes import recover
         from .vtables import find
@@ -379,16 +388,126 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str]) -> li
         for address, info in recover(program, tables).items():
             homes = {owner.get(program.function_index.get(c)) for c in info.constructors} - {None}
             if len(homes) == 1:
-                owned.append((address, address + tables[address].size, next(iter(homes)), ".data"))
-    owned.sort()
-    merged: list[list] = []
-    for start, end, unit, section in owned:
-        if merged and merged[-1][2] == unit and merged[-1][3] == section and start - merged[-1][1] < 0x40 \
-                and not any(s < start and e > merged[-1][1] for s, e, u, _ in owned if u != unit):
-            merged[-1][1] = max(merged[-1][1], end)
+                claims.append((address, address + tables[address].size, next(iter(homes)), ".data"))
+        claims += _exception_tables(program, owner)
+    order: dict[str, int] = {}                         # unit -> its place in link order (its first code)
+    ordered = set()                                    # .init code says nothing of where its unit is linked
+    for index in sorted(owner):
+        if owner[index] not in order:
+            order[owner[index]] = len(order)
+            if program.section_of(program.functions[index].address) != ".init":
+                ordered.add(owner[index])
+    out: list[tuple[int, int, str, str]] = []
+    if program.platform.name == "gamecube":
+        claims += _initializer_tables(program, owner)
+    by_section: dict[str, list] = collections.defaultdict(list)
+    for claim in claims:
+        by_section[claim[3]].append(claim)
+    for section, rows in by_section.items():
+        rows = _whole_symbols(program, sorted(rows))
+        while section in TABLES and len(rows) > 1 and rows[0][2] in order and \
+                order[rows[0][2]] > min(order.get(r[2], 0) for r in rows[1:]):
+            out.append(rows.pop(0))                   # the runtime's leading entry: its own range (link.py)
+        kept = _in_link_order([r for r in rows if r[2] in ordered], order) + [r for r in rows if r[2] not in ordered]
+        spans: dict[str, list[int]] = {}
+        for start, stop, unit, _ in kept:
+            span = spans.setdefault(unit, [start, stop])
+            span[0], span[1] = min(span[0], start), max(span[1], stop)
+        for unit, (start, stop) in sorted(spans.items(), key=lambda item: item[1][0]):
+            start, stop = _word_bounds(program, start, stop)
+            if out and out[-1][3] == section and start < out[-1][1]:
+                continue                               # overlaps the previous unit's range: no claim is safe
+            out.append((start, stop, unit, section))
+    out.sort()
+    return out
+
+
+def _initializer_tables(program: Program, owner: dict[int, str]) -> list[tuple[int, int, str, str]]:
+    """.ctors and .dtors entries, each the unit's whose function it points to (its static initializer or
+    finalizer), not the unit of code that walks the table. The C++ runtime's entries lead the tables although its
+    unit links late: the linker puts them first itself (see link.RUNTIME_MEMBER)."""
+    claims = []
+    for o in program.objects:
+        if o.section not in TABLES:
+            continue
+        for at in range(o.address, o.address + o.size - 3, 4):
+            unit = owner.get(program.function_index.get(int.from_bytes(program.read(at, 4), "big"), -1))
+            if unit is not None:
+                claims.append((at, at + 4, unit, o.section))
+    return claims
+
+
+def _exception_tables(program: Program, owner: dict[int, str]) -> list[tuple[int, int, str, str]]:
+    """CodeWarrior writes a function's exception tables into its own object: each `extabindex` entry (function,
+    size, `extab` record) and the record it points to belong to the function's unit."""
+    from .link import LINKER_OBJECTS
+    out = []
+    for o in program.objects:
+        if o.section != "extabindex" or o.size < 12:
+            continue
+        if o.name in LINKER_OBJECTS:
+            continue
+        for at in range(o.address, o.address + o.size - 11, 12):
+            function, _, record = (int.from_bytes(program.read(at + 4 * k, 4), "big") for k in range(3))
+            unit = owner.get(program.function_index.get(function, -1))
+            if unit is None:
+                continue
+            out.append((at, at + 12, unit, "extabindex"))
+            held = program.object_at(record)
+            if held is not None and held.section == "extab":
+                out.append((held.address, held.address + held.size, unit, "extab"))
+    return out
+
+
+def _whole_symbols(program: Program, rows: list[tuple[int, int, str, str]]) -> list[tuple[int, int, str, str]]:
+    """Each claim widened to the data objects it touches: a unit's range never cuts a symbol."""
+    out = []
+    for start, stop, unit, section in rows:
+        first, last = program.object_at(start), program.object_at(stop - 1)
+        start = min(start, first.address) if first else start
+        stop = max(stop, last.address + last.size) if last else stop
+        out.append((start, stop, unit, section))
+    return out
+
+
+def _word_bounds(program: Program, start: int, stop: int) -> tuple[int, int]:
+    """A unit's data range on word boundaries: no object's section starts off one (none of 4,001 in a CodeWarrior
+    link map), so the objects up to the next word-aligned one are this unit's, and so is a start back to one."""
+    starts = program._object_starts
+    if start % 4:
+        index = bisect.bisect_right(starts, start) - 1
+        while index >= 0 and program.objects[index].address % 4:
+            index -= 1
+        start = program.objects[index].address if index >= 0 else start - start % 4
+    if stop % 4:
+        index = bisect.bisect_left(starts, stop)
+        while index < len(starts) and program.objects[index].address % 4:
+            index += 1
+        same = index < len(starts) and program.objects[index].section == program.object_at(stop - 1).section \
+            if program.object_at(stop - 1) else False
+        stop = program.objects[index].address if same else stop  # a section's own end need not be a word's
+    return start, stop
+
+
+def _in_link_order(rows: list[tuple[int, int, str, str]], order: dict[str, int]) -> list[tuple[int, int, str, str]]:
+    """The longest run of claims (by address) whose units never go back in link order."""
+    tails: list[int] = []                              # tails[k]: the row ending the best run of length k+1
+    places: list[int] = []                             # places[k]: that row's unit place (non-decreasing)
+    links: list[int] = []
+    for position, row in enumerate(rows):
+        place = order[row[2]]
+        k = bisect.bisect_right(places, place)
+        if k == len(tails):
+            tails.append(position)
+            places.append(place)
         else:
-            merged.append([start, end, unit, section])
-    return [tuple(m) for m in merged]
+            tails[k], places[k] = position, place
+        links.append(tails[k - 1] if k else -1)
+    kept, position = [], tails[-1] if tails else -1
+    while position >= 0:
+        kept.append(rows[position])
+        position = links[position]
+    return kept[::-1]
 
 
 def write_splits(data: dict, path: Path) -> Path:

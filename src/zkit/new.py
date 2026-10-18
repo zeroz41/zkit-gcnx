@@ -167,6 +167,8 @@ def write_symbols(program, path: Path) -> Path:
     for item in program.objects:
         lines.append(f"{item.name} = {item.section}:0x{item.address:08X}; // type:object size:0x{item.size:X} "
                      f"scope:{item.scope}" + (f" data:{item.data}" if item.data else ""))
+    for item in program.labels:
+        lines.append(f"{item.name} = {item.section}:0x{item.address:08X}; // type:label scope:global")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path

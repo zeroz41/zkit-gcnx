@@ -60,6 +60,7 @@ def section_traits(machine: Machine, name: str) -> tuple[int, int, int, int]:
     PowerPC follows CodeWarrior's objects (.sdata2 is writable there; code aligned to 4, data to 8); AArch64
     follows clang's (merge sections for strings and constants)."""
     alloc, write, execute = SHF_ALLOC, SHF_WRITE, SHF_EXECINSTR
+    name = name.split("$", 1)[0] if machine is PPC else name    # `.ctors$10` is a .ctors the linker sorts first
     if name.startswith((".text", ".init")):
         return SHT_PROGBITS, alloc | execute, 0, 4
     if name.startswith((".bss", ".sbss", ".tbss")):
@@ -102,18 +103,22 @@ def internal_linkage(name: str, scope: str | None = None) -> bool:
 class Unit:
     name: str
     ranges: dict[str, list[tuple[int, int]]] = field(default_factory=lambda: collections.defaultdict(list))
+    renames: dict[tuple[str, int], str] = field(default_factory=dict)   # (section, range start) -> name in the object
 
 
 def read_units(path: Path, base: int = 0, place: Callable[[str, int], int | None] | None = None) -> list[Unit]:
     """A splits.txt (`unit:` then `\\t.section start:0x.. end:0x..` lines); addresses written with or without the
     module base, or section-relative (a REL's) and placed by `place`."""
-    from .gc import read_splits
+    from .gc import read_renames, read_splits
     key = lambda value: value - base if base and value >= base else value
     units: dict[str, Unit] = {}
+    renames = read_renames(path)
     for name, section, start, end in read_splits(path):
         unit = units.setdefault(name, Unit(name))
         if place is None:
             unit.ranges[section].append((key(start), key(end)))
+            if (name, section, start) in renames:
+                unit.renames[(section, key(start))] = renames[(name, section, start)]
         elif place(section, start) is not None:
             unit.ranges[section].append((place(section, start), place(section, end)))
     return list(units.values())
@@ -538,8 +543,12 @@ def cut_unit(image: Image, unit: Unit) -> Cut:
     machine, symbols = image.machine, image.symbols
     o = machine.order
     cut = Cut(unit)
-    for section_name in sorted(unit.ranges, key=lambda n: _section_order(machine, n)):
-        ranges = sorted(unit.ranges[section_name])
+    groups = collections.defaultdict(list)            # name in the object -> ranges (a renamed range is its own)
+    for base_name, spans in unit.ranges.items():
+        for span in spans:
+            groups[unit.renames.get((base_name, span[0]), base_name)].append(span)
+    for section_name in sorted(groups, key=lambda n: (_section_order(machine, n.split("$", 1)[0]), n)):
+        ranges = sorted(groups[section_name])
         kind, flags, _, alignment = section_traits(machine, section_name)
         nobits = kind == SHT_NOBITS
         blob = bytearray()
