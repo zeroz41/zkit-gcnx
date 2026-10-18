@@ -185,6 +185,14 @@ class RelDelink(unittest.TestCase):
                               for r in theirs.relocations(theirs.section(section))], section)
             self.assertEqual(ours.data(ours.section(section)), theirs.data(theirs.section(section)), section)
 
+    def test_unnamed_dol_address_is_a_label_not_a_missing_unit(self):
+        (self.root / "host.txt").write_text(HOST.splitlines()[0] + "\n", encoding="utf-8")   # g_dol unnamed
+        project = Project.load(self.root / "project.json")
+        result = delink.delink(project, "mod", self.root / "mod/splits.txt", self.root / "target")
+        self.assertEqual(result["unassigned"], 0)       # the DOL's, not an address this module's splits miss
+        names = {s.name for s in Elf.load(self.root / "target/a.o").symbols}
+        self.assertIn("lbl_80300000", names)
+
 
 if __name__ == "__main__":
     unittest.main()

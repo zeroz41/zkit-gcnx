@@ -582,7 +582,7 @@ def delink(project: Project, target: str, splits: Path, out_dir: Path, objdiff: 
         if only is not None and unit.name not in only and unit.name.rsplit(".", 1)[0] not in only:
             continue
         row = delink_unit(image, unit, out_dir / f"{unit.name.rsplit('.', 1)[0]}.o")
-        unassigned = [a for a in row.pop("unassigned_addresses") if not in_some_unit(a)]
+        unassigned = [a for a in row.pop("unassigned_addresses") if not in_some_unit(a) and image.in_image(a)]
         if unassigned:
             row["unassigned"] = [image.text(a) for a in sorted(unassigned)[:20]]
         outside.update(unassigned)
