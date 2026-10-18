@@ -144,11 +144,11 @@ class Arguments(unittest.TestCase):
 
     def test_xrefs_batch(self):
         text = self.call("zkit_xrefs", {"query": "enemyTable lbl_80003100"})
-        self.assertIn("xrefs to 0x80003104", text)
-        self.assertIn("xrefs to 0x80003100", text)
+        self.assertIn("xrefs to [0x80003104, +0x4) enemyTable", text)
+        self.assertIn("xrefs to [0x80003100, +0x4) lbl_80003100", text)
         code, text = self.cli("xrefs", "0x80003104", "0x80003100")
         self.assertEqual(code, 0)
-        self.assertIn("xrefs to 0x80003100", text)
+        self.assertIn("xrefs to [0x80003100, +0x4) lbl_80003100", text)
 
     def test_data_batch_size_and_repo(self):
         text = self.call("zkit_data", {"repo": "decomp", "addresses": '["0x80003100","enemyTable"]', "type": "u8",

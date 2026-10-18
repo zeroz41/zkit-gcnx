@@ -106,15 +106,21 @@ def sda_bases(project: Project, target: str, dol: Dol) -> dict[int, int]:
     path = project.file(config["repository"], config["symbols"])
     if not path.is_file():
         return {}
-    start = None
+    start, size = None, 0x400
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         if line.startswith("__init_registers "):
             start = int(re.search(r":0x([0-9A-Fa-f]+)", line)[1], 16)
+            known = re.search(r"size:0x([0-9A-Fa-f]+)", line)
+            size = min(int(known[1], 16), 0x400) if known else size  # the whole function, up to its blr
             break
     if start is None:
         return {}
     regs: dict[int, int] = {}
-    for word in dol.words(start, 0x40):
+    try:
+        words = dol.words(start, size - size % 4)
+    except ValueError:
+        return {}
+    for word in words:
         op, rd, ra, imm = word >> 26, (word >> 21) & 31, (word >> 16) & 31, word & 0xFFFF
         if op == 15 and ra == 0:  # lis
             regs[rd] = (imm << 16) & 0xFFFFFFFF

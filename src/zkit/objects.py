@@ -28,8 +28,10 @@ SKIP_SECTIONS = re.compile(r"^(\.comment|\.mwcats.*|\.debug.*|\.line|\.note.*|\.
 
 
 def _anonymous(name: str, bind: str) -> bool:
-    """Compiler-numbered locals whose number is not stable across edits: MWCC @123, clang .L and .str.N."""
-    return bind == "local" and (name.startswith("@") or name.startswith((".L", "$x", "$d", ".str", "__func__.")))
+    """Compiler-numbered locals whose number is not stable across edits: MWCC @123, ...data.0 and function
+    statics (init$63), clang .L and .str.N, AArch64 mapping symbols."""
+    return bind == "local" and (name.startswith(("@", "...", ".L", "$x", "$d", ".str", "__func__."))
+                                or re.search(r"\$\d+$", name) is not None)
 
 
 def objdiff_units(project: Project, target: str) -> dict[str, dict]:
@@ -68,6 +70,9 @@ def _relocs(elf: Elf, section: Section, start: int, end: int, rename: dict[str, 
     return {word: tuple(tuple(r[i] for r in rows) for i in range(4)) for word, rows in grouped.items()}
 
 
+CONSTANT_SECTIONS = (".rodata", ".sdata2", ".sbss2")  # constant by name: MWCC marks .sdata2 writable
+
+
 def _referenced(elf: Elf, index: int, addend: int) -> tuple[bytes, int, bool, bool] | None:
     """(bytes from the target on, known length, string section, unnamed) for a relocation to constant data this
     object defines; None for anything else (code, writable data, undefined symbols)."""
@@ -75,35 +80,173 @@ def _referenced(elf: Elf, index: int, addend: int) -> tuple[bytes, int, bool, bo
     if symbol is None or not 0 < symbol.section < min(0xFF00, len(elf.sections)):
         return None
     section = elf.sections[symbol.section]
-    if section.flags & (SHF_EXECINSTR | SHF_WRITE):
+    if section.flags & SHF_EXECINSTR or (section.flags & SHF_WRITE and not section.name.startswith(CONSTANT_SECTIONS)):
         return None
     start = symbol.value + addend
     data = bytes(max(0, section.size - start)) if section.type == 8 else elf.data(section)[start:]
     known = symbol.size - addend if symbol.kind != "section" and symbol.size > addend else section.entsize
-    unnamed = symbol.kind == "section" or not symbol.name or _anonymous(symbol.name, symbol.bind) or \
-        symbol.name.startswith("lbl_")
-    return data, known, bool(section.flags & SHF_STRINGS), unnamed
+    return data, known, bool(section.flags & SHF_STRINGS), _unnamed(symbol)
 
 
-def _same_literal(a: Elf, xa: tuple, b: Elf, xb: tuple) -> bool:
+PPC_ACCESS = {32: 4, 33: 4, 34: 1, 35: 1, 36: 4, 37: 4, 38: 1, 39: 1, 40: 2, 41: 2, 42: 2, 43: 2, 44: 2, 45: 2,
+              48: 4, 49: 4, 50: 8, 51: 8, 52: 4, 53: 4, 54: 8, 55: 8, 56: 8, 57: 8}  # primary opcode -> bytes
+
+
+def _access(machine: str, word: bytes) -> int | None:
+    """Bytes a PowerPC load/store instruction reads or writes (lfs 4, lfd 8, psq_l 8, ...); None otherwise (an
+    addi taking an address, another machine)."""
+    return PPC_ACCESS.get(word[0] >> 2) if machine == "ppc" and len(word) == 4 else None
+
+
+def _same_bytes(left: tuple, right: tuple, width: int | None = None) -> bool:
+    """Two _referenced() constants hold the same value: a string up to its NUL; the bytes the instruction
+    accesses; else data over the size either side knows (its symbol or the merge section's entry)."""
+    if left[2] or right[2]:
+        end_left, end_right = left[0].find(b"\0"), right[0].find(b"\0")
+        return end_left >= 0 and left[0][:end_left] == right[0][:end_right]
+    length = width or max(left[1], right[1])
+    return length > 0 and len(left[0]) >= length and left[0][:length] == right[0][:length]
+
+
+def _same_literal(a: Elf, xa: tuple, b: Elf, xb: tuple, width: int | None = None) -> bool:
     """Relocations naming different symbols for the same constant: read-only data one side leaves unnamed (a
-    literal in a merge section, a generated label), compared by its bytes: a string up to its NUL, other data over
-    the size either side knows (its symbol or the merge section's entry). Two named constants stay different."""
+    literal in a merge section, a generated label), compared by its bytes. Two named constants stay different."""
     if xa[0] != xb[0] or len(xa[3]) != len(xb[3]):
         return False
     for ia, aa, ib, ab in zip(xa[3], xa[2], xb[3], xb[2]):
         left, right = _referenced(a, ia, aa), _referenced(b, ib, ab)
-        if left is None or right is None or not (left[3] or right[3]):
-            return False
-        if left[2] or right[2]:
-            end_left, end_right = left[0].find(b"\0"), right[0].find(b"\0")
-            if end_left < 0 or left[0][:end_left] != right[0][:end_right]:
-                return False
-            continue
-        length = max(left[1], right[1])
-        if length <= 0 or len(left[0]) < length or left[0][:length] != right[0][:length]:
+        if left is None or right is None or not (left[3] or right[3]) or not _same_bytes(left, right, width):
             return False
     return True
+
+
+def _unnamed(symbol) -> bool:
+    """A target the object does not name for itself: a section, a compiler-numbered local, a splitter's lbl_."""
+    return symbol.kind == "section" or not symbol.name or _anonymous(symbol.name, symbol.bind) or \
+        symbol.name.startswith("lbl_")
+
+
+def _same_place(a: Elf, xa: tuple, b: Elf, xb: tuple) -> bool:
+    """Relocations to writable data at the same offset of a same-named section of each object, one side naming it
+    only by place (the split object's lbl_805D7260 and the compiled __AR_InternalSize): the same variable, as
+    objdiff judges it. Two named variables stay different; constants are compared by value elsewhere."""
+    if xa[0] != xb[0]:
+        return False
+    for ia, aa, ib, ab in zip(xa[3], xa[2], xb[3], xb[2]):
+        left = a.symbols[ia] if ia < len(a.symbols) else None
+        right = b.symbols[ib] if ib < len(b.symbols) else None
+        if left is None or right is None or not (0 < left.section < min(0xFF00, len(a.sections))) \
+                or not (0 < right.section < min(0xFF00, len(b.sections))) \
+                or not (_unnamed(left) or _unnamed(right) or _plain(left.name) == _plain(right.name)):
+            return False
+        section = a.sections[left.section]
+        if section.name != b.sections[right.section].name or left.value + aa != right.value + ab \
+                or section.flags & SHF_EXECINSTR or not section.flags & SHF_WRITE or section.name.startswith(CONSTANT_SECTIONS):
+            return False
+        length = left.size - aa if left.kind != "section" else 0
+        if _code_targets(a, ia, aa, length) != _code_targets(b, ib, ab, length):
+            return False  # a jump table at the same place with other case targets
+    return True
+
+
+def _names_at(elf: Elf, index: int, addend: int) -> set[str]:
+    """Every symbol name defined at a relocation's target place (labels alias the function they start)."""
+    symbol = elf.symbols[index] if index < len(elf.symbols) else None
+    if symbol is None or not 0 < symbol.section < min(0xFF00, len(elf.sections)):
+        return {symbol.name} if symbol else set()
+    where = symbol.value + addend
+    return {_plain(s.name) for s in elf.symbols if s.section == symbol.section and s.value == where and not _unnamed(s)}
+
+
+def _plain(name: str) -> str:
+    """A name without the compiler's static-local number (MWCC fontEncode$25 is fontEncode)."""
+    return re.sub(r"\$\d+$", "", name)
+
+
+def _same_alias(a: Elf, xa: tuple, b: Elf, xb: tuple) -> bool:
+    """Relocations whose targets share a name in both objects (__OSDBINTEND and __OSDBJump at one address)."""
+    return xa[0] == xb[0] and all(_names_at(a, ia, aa) & _names_at(b, ib, ab)
+                                  for ia, aa, ib, ab in zip(xa[3], xa[2], xb[3], xb[2]))
+
+
+def _branch(word: bytes) -> tuple[int, int] | None:
+    """(instruction bits without the displacement, signed displacement) of a PowerPC b/bc."""
+    value = int.from_bytes(word, "big")
+    if value >> 26 == 18:
+        return value & ~0x03FFFFFC, ((value & 0x03FFFFFC) ^ 0x02000000) - 0x02000000
+    if value >> 26 == 16:
+        return value & ~0xFFFC, ((value & 0xFFFC) ^ 0x8000) - 0x8000
+    return None
+
+
+def _same_branch(elf: Elf, function, offset: int, relocated: bytes, reloc: tuple, resolved: bytes) -> bool:
+    """A branch one object relocates (the split object's `b fn+0x10`) and the other has resolved in place: the
+    same instruction to the same offset of the same function."""
+    left, right = _branch(relocated), _branch(resolved)
+    if left is None or right is None or left[0] != right[0] or len(reloc[3]) != 1:
+        return False
+    symbol = elf.symbols[reloc[3][0]] if reloc[3][0] < len(elf.symbols) else None
+    if symbol is None or symbol.section != function.section:
+        return False
+    return symbol.value + reloc[2][0] + left[1] - function.value == offset + right[1]
+
+
+def _code_targets(elf: Elf, index: int, addend: int, length: int) -> list[tuple] | None:
+    """(offset, function, offset into it) of every code address a data table (a switch's jump table) holds in
+    [symbol + addend, + length); None when the symbol is not data or holds no code address."""
+    symbol = elf.symbols[index] if index < len(elf.symbols) else None
+    if symbol is None or not 0 < symbol.section < min(0xFF00, len(elf.sections)) or length <= 0:
+        return None
+    section = elf.sections[symbol.section]
+    if section.flags & SHF_EXECINSTR:
+        return None
+    start, out = symbol.value + addend, []
+    functions = [f for f in elf.functions().values()]
+    for reloc in sorted(elf.relocations(section), key=lambda r: r.offset):
+        if not start <= reloc.offset < start + length or reloc.symbol >= len(elf.symbols):
+            continue
+        target = elf.symbols[reloc.symbol]
+        where = target.value + reloc.addend
+        owner = next((f for f in functions if f.section == target.section and f.value <= where < f.value + f.size),
+                     None)
+        if owner is None:
+            return None
+        out.append((reloc.offset - start, owner.name, where - owner.value))
+    return out or None
+
+
+def _tables(a: Elf, xa: tuple, b: Elf, xb: tuple) -> list[tuple]:
+    """(original, compiled) code targets of each relocated data table, over the size the original's symbol
+    gives (a jump table the original names jumptable_X and the compiler leaves unnamed)."""
+    out = []
+    for ia, aa, ib, ab in zip(xa[3], xa[2], xb[3], xb[2]):
+        symbol = a.symbols[ia] if ia < len(a.symbols) else None
+        length = symbol.size - aa if symbol and symbol.kind != "section" else 0
+        out.append((_code_targets(a, ia, aa, length), _code_targets(b, ib, ab, length)))
+    return out
+
+
+def _same_table(a: Elf, xa: tuple, b: Elf, xb: tuple) -> bool:
+    return xa[0] == xb[0] and all(left is not None and left == right for left, right in _tables(a, xa, b, xb))
+
+
+def _table_note(a: Elf, xa: tuple, b: Elf, xb: tuple) -> str | None:
+    """Which entry of a jump table differs, when both sides are tables of code addresses."""
+    for left, right in _tables(a, xa, b, xb):
+        if left and right and left != right:
+            first = next((x, y) for x, y in zip(left, right) if x != y) if len(left) == len(right) else None
+            return ("jump table entries differ" + (f": +0x{first[0][0]:X} -> {first[0][1]}+0x{first[0][2]:X} vs "
+                                                   f"{first[1][1]}+0x{first[1][2]:X}" if first else ""))
+    return None
+
+
+def _section_literal_differs(a: Elf, xa: tuple, b: Elf, xb: tuple, width: int | None = None) -> bool:
+    """Relocations spelled alike (`<.rodata.cst4>+0`) to constants whose bytes differ: the names say nothing."""
+    for ia, aa, ib, ab, name in zip(xa[3], xa[2], xb[3], xb[2], xa[1]):
+        left, right = (_referenced(a, ia, aa), _referenced(b, ib, ab)) if name.startswith("<") else (None, None)
+        if left and right and not _same_bytes(left, right, width):
+            return True
+    return False
 
 
 def _find(elf: Elf, name: str):
@@ -139,48 +282,65 @@ def function_diff(target_path: Path, base_path: Path, name: str, base_name: str 
     db = built.data(sb)[b.value:b.value + b.size]
     ra = _relocs(original, sa, a.value, a.value + a.size, {})
     rb = _relocs(built, sb, b.value, b.value + b.size, {v: k for k, v in rename.items()})
-    width = 4
+    width, machine = 4, original.machine
     rows = []
     literals = 0
     for offset in range(0, max(len(da), len(db)), width):
         wa, wb = da[offset:offset + width], db[offset:offset + width]
         xa, xb = ra.get(offset), rb.get(offset)
+        if xa and not xb and machine == "ppc" and _same_branch(original, a, offset, wa, xa, wb) or \
+                xb and not xa and machine == "ppc" and _same_branch(built, b, offset, wb, xb, wa):
+            continue
         if wa != wb or (xa and xb and xa[0] != xb[0]) or bool(xa) != bool(xb):
             rows.append({"offset": offset, "original": wa.hex(), "compiled": wb.hex(),
                          "original_reloc": _reloc_text(xa), "compiled_reloc": _reloc_text(xb)})
         elif xa and xb and (xa[1] != xb[1] or xa[2] != xb[2]):
-            if _same_literal(original, xa, built, xb):
+            if _same_place(original, xa, built, xb) or _same_alias(original, xa, built, xb) \
+                    or _same_literal(original, xa, built, xb, _access(machine, wa)) or _same_table(original, xa, built, xb):
                 literals += 1
                 continue
             rows.append({"offset": offset, "original": wa.hex(), "compiled": wb.hex(),
-                         "original_reloc": _reloc_text(xa), "compiled_reloc": _reloc_text(xb), "reloc_only": True})
+                         "original_reloc": _reloc_text(xa), "compiled_reloc": _reloc_text(xb), "reloc_only": True,
+                         **({"note": note} if (note := _table_note(original, xa, built, xb)) else {})})
+        elif xa and xb and _section_literal_differs(original, xa, built, xb, _access(machine, wa)):
+            rows.append({"offset": offset, "original": wa.hex(), "compiled": wb.hex(),
+                         "original_reloc": _reloc_text(xa), "compiled_reloc": _reloc_text(xb), "reloc_only": True,
+                         "note": "the constants these relocations point at differ"})
     reloc_only = rows and all(r.get("reloc_only") for r in rows)
     out.update(exact=not rows and len(da) == len(db), size=len(da), compiled_size=len(db), differences=len(rows),
                reloc_only=bool(reloc_only), rows=rows[:limit])
     if literals:
-        out["literal_relocations"] = literals  # same constant data under another symbol name
+        out["literal_relocations"] = literals  # the same place, constant or jump table under another symbol name
     if rows:
         out["first_difference"] = rows[0]["offset"]
     return out
 
 
+GAP = re.compile(r"^gap_\d+_[0-9A-Fa-f]+_\w+$")  # the splitter's name for bytes no function claims
+
+
 def unit_diff(target_path: Path, base_path: Path, rename: dict[str, str] | None = None) -> dict[str, Any]:
-    """Every function of a unit: exact, differing (with the count of differing words), or missing."""
+    """Every function of a unit: exact, differing (with the count of differing words), or missing. A gap the
+    splitter named (gap_03_80395908_text) that the compiled object lacks is padding, listed apart."""
     original, built = Elf.load(target_path), Elf.load(base_path)
     names = sorted(original.functions(), key=lambda n: original.functions()[n].value)
-    rows = []
+    rows, gaps = [], []
     for name in names:
         try:
             result = function_diff(target_path, base_path, name, rename=rename, limit=0)
         except ValueError as error:
             rows.append({"function": name, "error": str(error)})
             continue
+        if result.get("missing") and GAP.match(name):
+            gaps.append(name)
+            continue
         rows.append({"function": name, "exact": result["exact"], "size": result["size"],
                      "differences": result.get("differences"), "missing": result.get("missing", False),
                      "reloc_only": result.get("reloc_only", False)})
     extra = sorted(set(built.functions()) - set(original.functions()))
     return {"target": str(target_path), "base": str(base_path), "functions": rows,
-            "exact": sum(1 for r in rows if r.get("exact")), "total": len(rows), "compiled_only": extra}
+            "exact": sum(1 for r in rows if r.get("exact")), "total": len(rows), "compiled_only": extra,
+            "gaps": gaps}
 
 
 # Identity: the same compiled program before and after a change that must not change code.

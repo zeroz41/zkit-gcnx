@@ -248,7 +248,8 @@ def lookup(data: dict) -> str:
             lines.append(f"  mentioned {cite['repo']}:{cite['path']}:{cite['line']}  {cite['text'][:110]}")
         return "\n".join(lines)
     if data.get("ambiguous"):
-        return "ambiguous — candidates:\n" + "\n".join(f"  {_fn(c)}" for c in data["candidates"])
+        return (f"{data['query']} matches {len(data['candidates'])}{' or more' if data.get('more') else ''} functions; "
+                "use an address or the full name:\n" + "\n".join(f"  {_fn(c)}" for c in data["candidates"]))
     f = data["function"]
     if f.get("defined_in") and f.get("source_line"):  # an inline method found in a header
         kind = "inline in a header" if f["defined_in"].endswith((".h", ".hpp", ".hh")) else "included by the unit"
@@ -574,14 +575,22 @@ def data_rows(data: dict) -> str:
 def names(data: dict) -> str:
     out = []
     for r in data["rows"]:
-        if r.get("data"):
+        if r.get("ambiguous"):
+            out.append(f"{r['query']}: matches {len(r['ambiguous'])}{' or more' if r.get('more') else ''} functions: "
+                       + "; ".join(f"{c['address']} {c.get('demangled') or c['name']}" for c in r["ambiguous"]))
+        elif r.get("data"):
             s = r.get("symbol")
             out.append(f"{r.get('address') or r['query']} {s['name'] + ('+0x%X' % s['offset'] if s['offset'] else '') if s else '(no symbol)'}"
                        + (f" {s['section']} size 0x{s['size']:X}" if s else "") + "  [data]")
+        elif r.get("found") is False:
+            out.append(f"{r['query']}: no function or symbol" + (" at that address" if r.get("address") else " by that name"))
         else:
-            out.append(f"{r['address']} {r.get('demangled') or r['name']} size 0x{r['size']:X} [{status_word(r)}] {r.get('unit') or ''}")
+            offset = f" (+0x{r['offset']:X})" if r.get("offset") else ""
+            out.append(f"{r['address']} {r.get('demangled') or r['name']}{offset} size 0x{r['size']:X} [{status_word(r)}] "
+                       f"{r.get('unit') or ''}")
     if data.get("truncated"):
-        out.append(f"... {data['truncated']} more (total {data['total']}; narrow with --regex/--unit/--range or raise --limit)")
+        out.append(f"... {data['truncated']} more (total {data['total']}; narrow with regex, unit or a range, or raise "
+                   "limit)")
     return "\n".join(out) or "no matches"
 
 
@@ -590,8 +599,16 @@ def xrefs(data: dict) -> str:
     if batched is not None:
         return batched
     s = data.get("symbol")
-    out = [f"xrefs to {data['address']}" + (f" {s['name']} ({s['section']} size 0x{s['size']:X})" if s else "")
-           + f": {data.get('total', len(data['code']))} code refs " + str(data["kinds"]) + f", {len(data['data'])} data pointers"]
+    what = (f" {data['function']}" if data.get("function") else
+            (f" in {s['name']}+0x{s['offset']:X}" if s.get("offset") else f" {s['name']}")
+            + f" ({s['section']} size 0x{s['size']:X})" if s else "")
+    kinds = ", ".join(f"{k} {v}" for k, v in sorted(data["kinds"].items()))
+    total_data = data.get("data_total", len(data["data"]))
+    inner = total_data - data.get("data_to_start", total_data)
+    out = [f"xrefs to [{data['address']}, +0x{data['size']:X}){what}: {data.get('total', len(data['code']))} code refs"
+           + (f" ({kinds})" if kinds else "") + f", {total_data} data pointers"
+           + (f" ({inner} into it past the start: jump-table cases or interior addresses)" if inner and
+              data.get("function") else "")]
     modules = data.get("modules") or []
     if modules:
         from_rels = sum(n for _, n in modules)
@@ -603,7 +620,10 @@ def xrefs(data: dict) -> str:
         kinds = sorted({c['kind'] for c in data['code'] if c.get('function') == name})
         out.append(f"  {name}  x{n}" + (f" [{','.join(kinds)}]" if kinds else ""))
     for ref in data["data"][:12]:
-        out.append(f"  pointer at {ref['holder']} {ref.get('symbol', '')}+0x{ref.get('offset', 0):X}")
+        into = f" -> +0x{ref['into']:X}" if ref.get("into") else ""
+        out.append(f"  pointer at {ref['holder']} {ref.get('symbol', '')}+0x{ref.get('offset', 0):X}{into}")
+    if total_data > 12:
+        out.append(f"  ... {total_data - 12} more pointers (response_format=json lists {len(data['data'])})")
     return "\n".join(out)
 
 
@@ -943,9 +963,17 @@ def _bytes(part: int, whole: int) -> str:
 
 
 def compiled(data: dict) -> str:
+    if data.get("batch") is not None:
+        return "\n\n".join(item["error"] if item.get("error") else compiled(item) for item in data["batch"])
+    stale = f"\nnote: {data['stale']}" if data.get("stale") else ""
+    return _compiled(data) + stale
+
+
+def _compiled(data: dict) -> str:
     if "functions" in data:
         out = [f"unit {data.get('unit')}: {data['exact']}/{data['total']} functions identical to the original"
-               + (f"; compiled-only: {', '.join(data['compiled_only'][:6])}" if data["compiled_only"] else "")]
+               + (f"; compiled-only: {', '.join(data['compiled_only'][:6])}" if data["compiled_only"] else "")
+               + (f"; {len(data['gaps'])} splitter gap(s) not compiled (padding)" if data.get("gaps") else "")]
         for row in data["functions"]:
             if row.get("error"):
                 out.append(f"  error   {row['function']}: {row['error']}")
@@ -966,6 +994,8 @@ def compiled(data: dict) -> str:
         note = ""
         if row.get("original_reloc") or row.get("compiled_reloc"):
             note = f"  reloc {row.get('original_reloc')} vs {row.get('compiled_reloc')}"
+        if row.get("note"):
+            note += f" ({row['note']})"
         out.append(f"  +0x{row['offset']:04X}  {row['original']} vs {row['compiled']}{note}")
     if data["differences"] > len(data["rows"]):
         out.append(f"  ... {data['differences'] - len(data['rows'])} more")
