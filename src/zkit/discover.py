@@ -265,21 +265,12 @@ def name_sections(dol, sda: dict[int, int]) -> tuple[list[tuple[str, int, int]],
 
 def small_data_bases(dol) -> tuple[dict[int, int], int | None]:
     """r2 and r13 as `__init_registers` sets them, and where it is: the first function the entry point calls that
-    loads both with `lis` and `ori`/`addi`."""
+    sets both."""
+    from .program import _gamecube_sda
     for target in _straight_calls(dol, dol.entry):
-        registers: dict[int, int] = {}
-        for word in _words_from(dol, target, 64):
-            op, rd, ra, imm = word >> 26, (word >> 21) & 31, (word >> 16) & 31, word & 0xFFFF
-            if op == 15 and ra == 0:
-                registers[rd] = (imm << 16) & 0xFFFFFFFF
-            elif op == 24 and rd in registers:
-                registers[ra] = registers[rd] | imm
-            elif op == 14 and ra in registers and ra:
-                registers[rd] = (registers[ra] + _sext(imm)) & 0xFFFFFFFF
-            elif branch(word, 0) is not None:
-                break
-        if 2 in registers and 13 in registers:
-            return {2: registers[2], 13: registers[13]}, target
+        registers = _gamecube_sda(dol, target)
+        if len(registers) == 2:
+            return registers, target
     return {}, None
 
 
