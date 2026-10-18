@@ -114,6 +114,10 @@ def build_parser() -> argparse.ArgumentParser:
                             "functions, one name per virtual slot")
     c.add_argument("--class", dest="cls", help="only this class")
     c.add_argument("--limit", type=int, default=60)
+    c.add_argument("--headers", type=Path, metavar="DIR", help="write one header per recovered class into DIR")
+    c.add_argument("--types-include", default="types.h", help="with --headers: the header defining u8..f64")
+    c.add_argument("--prove", action="store_true", help="compile the recovered declarations with the project's "
+                                                        "compiler and compare tables, pointer offsets and sizes")
     c = add("renamed", help="Decomp symbols renamed since a git revision (old -> new)")
     c.add_argument("since")
     c = add("port-plan", help="Original call tree joined with native coverage: reuse / port / decompile-first")
@@ -473,6 +477,12 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         return data, render.unit(data)
     if command == "classes":
         from . import classes
+        if args.headers:
+            data = classes.write_headers(project, target, args.headers.expanduser().resolve(), args.types_include)
+            return data, f"wrote {data['headers']} headers to {data['folder']}"
+        if args.prove:
+            data = classes.prove(project, target, args.cls, args.limit)
+            return data, render.classes_proof(data)
         data = classes.audit_project(project, target, args.cls, args.limit)
         return data, render.classes(data)
     if command == "renamed":

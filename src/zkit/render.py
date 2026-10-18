@@ -833,6 +833,20 @@ def classes(data: dict) -> str:
     return "\n".join(out)
 
 
+def classes_proof(data: dict) -> str:
+    c = data["counts"]
+    out = [f"{data['classes']} classes compiled: tables {c.get('table_equal', 0)} equal, "
+           f"{c.get('table_differs', 0) + c.get('table_missing', 0)} different; pointer offsets "
+           f"{c.get('pointer_equal', 0)} equal, {c.get('pointer_differs', 0)} different; sizes {c.get('size_equal', 0)} "
+           f"equal, {c.get('size_differs', 0)} different"
+           + (f"; {c['family_failed_to_compile']} families failed to compile" if c.get("family_failed_to_compile") else "")]
+    for row in data["differences"]:
+        detail = {k: v for k, v in row.items() if k not in ("class", "problem")}
+        out.append(f"  {row['class']}: {row['problem']} {detail if detail else ''}".rstrip())
+    out.append("limits: " + data["limits"])
+    return "\n".join(out)
+
+
 def split_gaps(data: dict) -> str:
     out = ["split coverage by section:"]
     for s in data["sections"]:

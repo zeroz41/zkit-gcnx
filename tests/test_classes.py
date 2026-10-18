@@ -118,6 +118,22 @@ class ClassRecoveryTests(unittest.TestCase):
         self.assertEqual([s["inherited"] for s in slots], [False, True, False])
 
 
+class DeclarationTests(unittest.TestCase):
+    def test_declarations_place_the_pointer_and_skip_inherited_slots(self):
+        program, at = ClassRecoveryTests().program()
+        tables = vtables.find(program)
+        found = classes.recover(program, tables)
+        declared = classes.declarations(program, tables, found)
+        base, derived = declared[DATA], declared[DATA + 16]
+        lines = [line.strip() for line in base.text.splitlines()]
+        pointer_line = next(i for i, line in enumerate(lines) if line.startswith("virtual"))
+        self.assertTrue(any(line.startswith("u8 pad_0[0x18]") for line in lines[:pointer_line]), base.text)
+        self.assertNotIn("vf1", derived.text)                     # the inherited slot is not redeclared
+        self.assertIn(f"class {derived.name} : public {base.name}", derived.text)
+        self.assertEqual(derived.methods[1], base.methods[1])
+        self.assertIn("zkit_size_", classes.source(found, tables, declared, [DATA, DATA + 16]))
+
+
 class ScoreTests(unittest.TestCase):
     def test_reference_scores_itself_perfectly(self):
         reference = score.Split()
