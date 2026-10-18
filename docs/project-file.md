@@ -93,7 +93,8 @@ section count).
 
 | Field | Meaning |
 | --- | --- |
-| `m2c` | How to run m2c for `zkit m2c`: a command, or a path to `m2c.py` (default: `m2c` on PATH, then an m2c checkout beside a repository). |
+| `m2c` | How to run m2c for `zkit m2c` (GameCube): a command, a path to `m2c.py`, or an argv list such as a project's own adapter `[".venv/bin/python", "tools/m2c_runner.py", "../m2c"]`, run from the decomp root (default: `m2c` on PATH, then an m2c checkout beside a repository). |
+| `permuter` | A decomp-permuter checkout for `zkit permute` (GameCube; default: `$PERMUTER_DIR`, then `../decomp-permuter` beside a repository). |
 | `knowledge` | Folder of lesson notes (`*.md` with `title/applies/kind` front matter) for `zkit lessons`. |
 | `variants` | Named groups of sibling names for `reuse --variants`. |
 | `processes` | Extra program names (regexes) that `activity` reports, such as your emulator or test runner. |

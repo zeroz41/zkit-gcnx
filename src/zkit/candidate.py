@@ -98,6 +98,39 @@ def _restage(argv: list[str], source_arg: str, staged: Path, out_dir: Path, sour
     return out[:first_flag] + search + out[first_flag:], expected
 
 
+def compare(project: Project, target: str, unit: dict, name: str, text: str, keep: Path | None = None) -> dict:
+    """Compile `text` outside the tree with the unit's exact command and compare function `name` with the unit's
+    target object: {command, compiled, errors} or {command, compiled, exact, differences, reloc_only, rows...}."""
+    from . import objects
+    argv, workdir, source_arg = compile_command(project, target, unit)
+    root = project.root(project.target(target)["repository"])
+    source_path = root / unit["metadata"]["source_path"]
+    scratch = workdir / "build"  # ignored by the project; the compiler sees short relative paths
+    scratch_dir = scratch if scratch.is_dir() else None
+    with tempfile.TemporaryDirectory(prefix="zkit-try-", dir=scratch_dir) as work:
+        work = Path(work)
+        staged = work / source_path.name  # same basename: static initializer names embed it
+        staged.write_text(text, encoding="utf-8")
+        command, expected = _restage(argv, source_arg, staged, work, source_path.parent, workdir)
+        result = subprocess.run(command, cwd=workdir, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=300)
+        built = expected if expected.is_file() else next(iter(work.glob("*.o")), None)
+        out: dict[str, Any] = {"command": shlex.join(command)}
+        if result.returncode != 0 or built is None:
+            message = (result.stdout + result.stderr).strip()
+            if result.returncode in (-31, 159) or "Bad system call" in message:
+                message = ("the compiler was killed by the sandbox (SIGSYS): rerun this command with permission to "
+                           "run the compiler outside the sandbox\n" + message[-800:])
+            out.update(compiled=False, errors=message[-3000:])
+            return out
+        diff = objects.function_diff(root / unit["target_path"], built, name)
+        out.update(compiled=True, **{k: v for k, v in diff.items() if k not in ("target", "base")})
+        if keep:
+            keep.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(built, keep)
+    return out
+
+
 def _ledger(project: Project) -> Path:
     from .activity import state_dir
     return state_dir(project) / "attempts.jsonl"
@@ -147,39 +180,12 @@ def check(project: Project, target: str, query: str, candidate: Path, force: boo
     unit = units.get(row["unit"] or "")
     if unit is None:
         raise ValueError(f"{address} belongs to no objdiff unit ({row['unit']})")
-    argv, workdir, source_arg = compile_command(project, target, unit)
+    out: dict[str, Any] = {"address": address, "function": row["name"], "unit": row["unit"],
+                           "candidate": str(candidate), "attempt": len(tried | {fingerprint}),
+                           "attempts_so_far": len(tried), "cap": ATTEMPT_CAP}
+    out.update(compare(project, target, unit, row["name"], text, keep))
+    exact, differences = out.get("exact", False), out.get("differences")
     repo = project.target(target)["repository"]
-    root = project.root(repo)
-    source_path = root / unit["metadata"]["source_path"]
-    scratch = workdir / "build"  # ignored by the project; the compiler sees short relative paths
-    scratch_dir = scratch if scratch.is_dir() else None
-    with tempfile.TemporaryDirectory(prefix="zkit-try-", dir=scratch_dir) as work:
-        work = Path(work)
-        staged = work / source_path.name  # same basename: static initializer names embed it
-        staged.write_text(text, encoding="utf-8")
-        command, expected = _restage(argv, source_arg, staged, work, source_path.parent, workdir)
-        result = subprocess.run(command, cwd=workdir, capture_output=True, text=True, encoding="utf-8",
-                                errors="replace", timeout=300)
-        built = expected if expected.is_file() else next(iter(work.glob("*.o")), None)
-        out: dict[str, Any] = {"address": address, "function": row["name"], "unit": row["unit"],
-                               "candidate": str(candidate), "attempt": len(tried | {fingerprint}),
-                               "attempts_so_far": len(tried),
-                               "cap": ATTEMPT_CAP, "command": shlex.join(command)}
-        if result.returncode != 0 or built is None:
-            message = (result.stdout + result.stderr).strip()
-            if result.returncode in (-31, 159) or "Bad system call" in message:
-                message = ("the compiler was killed by the sandbox (SIGSYS): rerun this command with permission to "
-                           "run the compiler outside the sandbox\n" + message[-800:])
-            out.update(compiled=False, errors=message[-3000:])
-            exact, differences = False, None
-        else:
-            target_path = root / unit["target_path"]
-            diff = objects.function_diff(target_path, built, row["name"])
-            out.update(compiled=True, **{k: v for k, v in diff.items() if k not in ("target", "base")})
-            if keep:
-                keep.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(built, keep)
-            exact, differences = diff.get("exact", False), diff.get("differences")
     catalog = quality.patterns(project, repo)
     lines = text.splitlines()
     span = bridge.find_definition(lines, bridge.definition_names(row["name"], row["demangled"]))

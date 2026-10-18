@@ -315,7 +315,7 @@ def lookup(data: dict) -> str:
     if data["recipes"]:
         out.append("fidelity recipes: " + ", ".join(data["recipes"]))
     if data.get("decompile"):
-        out.append(f"Ghidra's C next to m2c: zkit decompile {f['address']} (MCP zkit_decompile)")
+        out.append(f"m2c's C: zkit m2c {f['address']} (MCP zkit_m2c); Ghidra's: zkit decompile {f['address']}")
     if data.get("body"):
         lo, hi = data["body_lines"]
         out.append(f"body ({f.get('source')}:{lo}-{hi}):")
@@ -518,6 +518,54 @@ def stale(data: dict) -> str:
         out.append(f"  up to date: {', '.join(fresh[:12])}" + (f" +{len(fresh) - 12}" if len(fresh) > 12 else ""))
     out.append("limits: " + data["limits"])
     return "\n".join(out)
+
+
+def m2c(data: dict) -> str:
+    out = []
+    for r in data["results"]:
+        head = f"// m2c {r['language']} for {r['address']} {r['function']} (asm {r['asm']})"
+        body = r["text"].rstrip() if r.get("text") else f"// m2c failed: {r.get('error', 'no output')}"
+        part = [head, body]
+        if r.get("ghidra_advice"):
+            if r.get("ghidra"):
+                part += [f"// Ghidra's reading of the same bytes: {r['ghidra_advice']}. Retype undefined4/param_N "
+                         "before compiling:", r["ghidra"].rstrip()]
+            else:
+                why = r.get("ghidra_error") or "Ghidra's reading was not requested"
+                part.append(f"// {r['ghidra_advice']} (zkit decompile {r['address']}; {why})")
+        out.append("\n".join(part))
+    tail = ("// Refine it as a real member in a candidate file and check it with `zkit try`. A near-miss whose gap is "
+            "register allocation or scheduling goes to `zkit permute`.")
+    return "\n\n".join(out) + "\n\n" + tail
+
+
+def permute(data: dict) -> str:
+    lines = [f"permuter scratch: {data['scratch']}",
+             f"  function : {data['function']} @ {data['address']}",
+             f"  unit     : {data['unit']}",
+             f"  seed     : {data['seed']} ({data.get('seed_differences')} differing words)",
+             f"  target.o : {data['target']}"]
+    if "verified" in data:
+        lines.append(f"ran {data['seconds']} s{' (time budget reached)' if data['timed_out'] else ''}: score "
+                     f"{data.get('base_score', '?')} -> {data.get('best_score', '?')}; log {data['log']}")
+        for row in data["verified"]:
+            lines.append(f"  zero-score output, checked against the target object: {row['state']}: {row['candidate']}")
+        if not data["verified"]:
+            lines.append("  no zero-score output: the gap is not register allocation or scheduling alone, or needs "
+                         "more time")
+        elif any(row["state"] == "exact" for row in data["verified"]):
+            lines.append("Bank the exact candidate through the repo's banking step; the build's objdiff report is "
+                         "the authority.")
+        return "\n".join(lines)
+    if data.get("permuter"):
+        lines += ["", "Run:", f"  {data['run']}"]
+    else:
+        lines += ["", "decomp-permuter not found: clone it beside the decomp (../decomp-permuter), set $PERMUTER_DIR, "
+                  "or set `permuter` in the project file:",
+                  "  git clone https://github.com/simonlindholm/decomp-permuter", f"  {data['run']}"]
+    lines.append("A zero score is an exact match: copy output-0-1/source.c back as a candidate and check it with "
+                 "`zkit try`.")
+    return "\n".join(lines)
 
 
 def decompiled(data: dict) -> str:

@@ -10,7 +10,7 @@ for every game.
 ```
 interfaces   cli.py · server.py (MCP) · render.py (text) · hooks · skills
                 │ one function per answer, called the same way from the CLI and MCP
-answers      bridge.py (lookup, refs, port-plan, check) · inspect_dol.py (asm, data) · decompile.py (Ghidra)
+answers      bridge.py (lookup, refs, port-plan, check) · inspect_dol.py (asm, data) · asmfile.py (m2c) · decompile.py (Ghidra) · permute.py (decomp-permuter)
              structure.py (unit, gaps, blocked) · objects.py (compiled vs original) · candidate.py (try)
              progress.py (reports, baselines, page) · quality.py · hygiene.py · session.py · activity.py
              native.py · fidelity.py · tiers.py · architecture.py · coverage.py (ports)

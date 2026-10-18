@@ -76,7 +76,32 @@ class McpTests(unittest.TestCase):
             close_connections()
         # Without an original, the tools that read it are left out; with one (and a CTest build), they are offered.
         self.assertNotIn("zkit_port_plan", names)
-        self.assertEqual(len(full), 33)
+        self.assertEqual(len(full), 35)  # GameCube: zkit_m2c and zkit_permute too
         self.assertTrue({"zkit_impact", "zkit_stale", "zkit_drift", "zkit_port_plan", "zkit_demand", "zkit_grounding",
                          "zkit_consts"} <= full)
         self.assertFalse({"zkit_recipes", "zkit_suspects", "zkit_test_plan", "zkit_architecture"} & full)
+
+    def test_decompiler_tools_follow_the_platform(self):
+        """m2c and the permuter read PowerPC: GameCube projects get them, Switch projects get Ghidra alone."""
+        from zkit.project import Project
+        from zkit.server import create_server
+        tools = {}
+        with tempfile.TemporaryDirectory() as temp:
+            manifest = Path(temp) / "project.json"
+            for platform in ("gamecube", "switch"):
+                manifest.write_text(json.dumps({"schema_version": 1, "id": platform, "repositories": {
+                    "decomp": {"root": ".", "role": "decomp"}},
+                    "targets": {"t": {"repository": "decomp", "module": "main", "original": "main.bin",
+                                      "platform": platform}}}))
+                server = create_server(Project.load(manifest))
+                tools[platform] = {t.name: t for t in server._tool_manager.list_tools()}
+                tools[platform + " instructions"] = server.instructions
+            from zkit.index import close_connections
+            close_connections()
+        self.assertTrue({"zkit_m2c", "zkit_permute", "zkit_decompile"} <= set(tools["gamecube"]))
+        self.assertIn("zkit_decompile", tools["switch"])
+        self.assertFalse({"zkit_m2c", "zkit_permute"} & set(tools["switch"]))
+        self.assertIn("second reading next to zkit_m2c", " ".join(tools["gamecube"]["zkit_decompile"].description.split()))
+        self.assertIn("decompiler reading to match from", " ".join(tools["switch"]["zkit_decompile"].description.split()))
+        self.assertIn("start from zkit_m2c", tools["gamecube instructions"])
+        self.assertIn("PowerPC only", tools["switch instructions"])

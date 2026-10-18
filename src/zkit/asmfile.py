@@ -159,11 +159,14 @@ def write(project: Project, target: str, addresses: list[int]) -> str:
 
 
 def find_m2c(project: Project) -> list[str] | None:
-    """How to run m2c: the project file's `m2c` (a command or a path to m2c.py), `m2c` on PATH, or an m2c checkout
-    beside a repository (../m2c/m2c.py)."""
+    """How to run m2c: the project file's `m2c` (a command, a path to m2c.py, or an argv list such as a project's own
+    adapter `["python", "tools/m2c_runner.py", "../m2c"]`, run from the decomp root), `m2c` on PATH, or an m2c
+    checkout beside a repository (../m2c/m2c.py)."""
     import shutil
     import sys
     configured = project.config.get("m2c")
+    if isinstance(configured, list) and configured:
+        return [str(part) for part in configured]
     candidates = [configured] if configured else []
     candidates.append(shutil.which("m2c"))
     candidates += [str(project.root(repo).parent / "m2c" / "m2c.py") for repo in project.config["repositories"]]
@@ -177,25 +180,74 @@ def find_m2c(project: Project) -> list[str] | None:
     return None
 
 
-def m2c(project: Project, target: str, address: int, language: str | None = None) -> dict:
-    """m2c's C for the function holding `address`, from an assembly file written by `write`."""
+FAILED = re.compile(r"Decompilation failure|M2C_ERROR|unknown instruction")
+
+
+def ghidra_advice(text: str) -> str | None:
+    """When Ghidra's reading is worth taking: where m2c failed or emitted goto, Ghidra's loops and branches were
+    closer to the matched source (111 of 160 differing functions on a 27.5k-function decomp); elsewhere m2c's
+    switch, return and call shape was, so m2c's seed stands on its own."""
+    gotos = len(re.findall(r"\bgoto\b", text))
+    if not text.strip() or re.search(r"Decompilation failure", text):
+        return "m2c failed: take loop and branch shape from Ghidra"
+    if FAILED.search(text):
+        return "m2c left errors (M2C_ERROR): take loop and branch shape from Ghidra"
+    if gotos:
+        return f"m2c emitted {gotos} goto(s): take loop and branch shape from Ghidra"
+    return None
+
+
+def m2c(project: Project, target: str, addresses: list[int], language: str | None = None,
+        context: Path | None = None, ghidra: bool = True) -> dict:
+    """m2c's C for the functions holding `addresses`, each from an assembly file written by `write`. Where m2c
+    fails or emits goto, Ghidra's reading of the same bytes follows when Ghidra is set up (`ghidra_advice`)."""
     from .delink import _image
+    from .platform import for_target
+    if for_target(project.target(target)).name != "gamecube":
+        raise ValueError("m2c reads PowerPC (and MIPS) code, not this target's: use zkit decompile (Ghidra)")
     command = find_m2c(project)
     if command is None:
-        raise ValueError("m2c not found: set `m2c` in the project file (a command or a path to m2c.py), put it on "
-                         "PATH, or check it out beside the decomp (../m2c)")
-    entry = _image(project, target).symbols.function_containing(address)
-    if entry is None:
-        raise ValueError(f"0x{address:08X} is in no known function")
-    language = language or ("c++" if re.search(r"__\d|__ct|__dt|^\w+__\w", entry.name) else "c")
+        raise ValueError("m2c not found: set `m2c` in the project file (a command, a path to m2c.py, or the argv of "
+                         "the project's own m2c adapter), put it on PATH, or check it out beside the decomp (../m2c)")
     from .activity import state_dir
     folder = state_dir(project) / "m2c"
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{entry.name}.s"
-    path.write_text(write(project, target, [address]), encoding="utf-8")
-    result = subprocess.run([*command, "--target", f"ppc-mwcc-{language}", "-f", entry.name, str(path)],
-                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
-    if result.returncode:
-        raise ValueError(f"m2c failed on {entry.name}: {(result.stderr or result.stdout).strip()[-800:]}")
-    return {"function": entry.name, "address": f"0x{entry.address:08X}", "language": language, "asm": str(path),
-            "text": result.stdout}
+    workdir = project.root(project.target(target)["repository"])
+    image = _image(project, target)
+    results = []
+    for address in dict.fromkeys(addresses):
+        entry = image.symbols.function_containing(address)
+        if entry is None:
+            raise ValueError(f"0x{address:08X} is in no known function")
+        lang = language or ("c++" if re.search(r"__\d|__ct|__dt|^\w+__\w", entry.name) else "c")
+        path = folder / f"{entry.name}.s"
+        path.write_text(write(project, target, [entry.address]), encoding="utf-8")
+        argv = [*command, "--target", f"ppc-mwcc-{lang}", "-f", entry.name]
+        if context:
+            argv += ["--context", str(context.resolve())]
+        result = subprocess.run([*argv, str(path.resolve())], cwd=workdir, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=300)
+        text = result.stdout if result.returncode == 0 else ""
+        row = {"function": entry.name, "address": f"0x{entry.address:08X}", "language": lang, "asm": str(path),
+               "text": text}
+        if result.returncode:
+            row["error"] = (result.stderr or result.stdout).strip()[-800:]
+        advice = ghidra_advice(text)
+        if advice:
+            row["ghidra_advice"] = advice
+        results.append(row)
+    wanted = [int(r["address"], 16) for r in results if r.get("ghidra_advice")]
+    if ghidra and wanted:
+        from .decompile import decompile
+        try:
+            readings = {int(r["address"], 16): r for r in decompile(project, target, wanted)["results"]}
+        except ValueError as error:  # Ghidra is optional: say how to get its reading instead
+            readings = {}
+            for r in results:
+                if r.get("ghidra_advice"):
+                    r["ghidra_error"] = str(error)
+        for r in results:
+            reading = readings.get(int(r["address"], 16))
+            if reading and reading.get("text"):
+                r["ghidra"] = reading["text"]
+    return {"command": command, "results": results}
