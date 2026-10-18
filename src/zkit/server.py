@@ -82,6 +82,9 @@ def create_server(project: Project) -> FastMCP:
     from .index import use_platform
     use_platform(project)
     has_native = bool(bridge.role_repos(project, "native"))
+    has_targets = bool(project.config.get("targets"))
+    gamecube = has_targets and any((t.get("platform") or "gamecube") == "gamecube"
+                                   for t in project.config["targets"].values())
     has_recipes = any(r.get("recipes") for r in project.config["repositories"].values())
     port = " and its native port" if has_native else ""
     rels = ""
@@ -281,23 +284,25 @@ def create_server(project: Project) -> FastMCP:
                              tuple(parts or ("commits", "files", "tree")))
         return out(data, render.hygiene(data), response_format)
 
-    @tool(enabled=has_native)
+    @tool(enabled=has_native and has_targets)
     def zkit_port_plan(query: str | None = None, depth: int = 2, repo: str | None = None,
                        address: str | None = None, response_format: Format = "text",
                        entry: str | None = None) -> str:
-        """Before implementing original behavior natively: the original direct-call tree under a function, each
-        node marked reuse (port cites it and the decomp is clean — extend that owner), reuse-unverified (port cites
-        it but the decomp is not clean), decompile-first (not exact), clean-first (exact but still decompiler
-        output or placeholder-named), shared-port (many original callers) or port. Port only port/shared-port/
-        reuse nodes; the rest is decomp work first. bctrl counts flag vtable dispatch the tree cannot follow."""
+        """Before implementing original behavior natively: the original direct-call tree under a function (depth
+        0-4), each node marked: reuse (the port cites it and the decomp is ready: extend that owner),
+        reuse-unverified (the port cites it, the decomp is not ready), decompile-first (not byte-exact),
+        clean-first (exact, but placeholder-named or still decompiler output: the reasons are listed),
+        shared-port (ready, many original callers: one shared owner), port (ready, not cited yet) or platform
+        (SDK/runtime library code the port replaces). Port only port/shared-port/reuse nodes; the rest is decomp
+        work first. bctrl counts flag vtable dispatch the tree cannot follow."""
         query = query or address or entry
         if not query:
             raise ValueError("Pass query (an address or name)")
         p = decomp(repo)
-        data = bridge.port_plan(p, query, max(0, min(depth, 4)), target(p))
+        data = bridge.port_plan(p, query, max(0, depth), target(p))
         return out(data, render.port_plan(data), response_format)
 
-    @tool(enabled=has_native)
+    @tool(enabled=has_native and has_targets)
     def zkit_demand(limit: int = 30, match_only: bool = False, need: Literal["match", "name", "link"] | None = None,
                     offset: int = 0, repo: str | None = None, response_format: Format = "text") -> str:
         """Decomp work the port is waiting on: functions native code cites that are not exact or provisionally
@@ -458,132 +463,136 @@ def create_server(project: Project) -> FastMCP:
         return _cap(bridge.read(p, f"{key}:{rest}", start, lines)["text"], 40000)
 
     @tool()
-    def zkit_check(repo: str | None = None, base: str = "HEAD", response_format: Format = "text") -> str:
-        """Lint a repo's working-tree change (repo may be a worktree path). Port: citations that do not resolve or
-        cite decomp that is not ready (hold-until-clean), new functions without an original address, forbidden
-        patterns, near-miss/folded constants. Decomp: added lines that bring in decompiler debt (hand-mangled
-        names, raw offsets, temporaries, placeholders). An edited line that already had the problem is debt, not new."""
+    def zkit_check(repo: str | None = None, base: str = "HEAD", paths: Paths = None, path: str | None = None,
+                   staged: bool = False, response_format: Format = "text") -> str:
+        """Lint a repo's change (repo may be a worktree path): the lines added since base (default HEAD, working
+        tree), the staged change (staged=true), or every line of the files/folders in paths. Port: citations
+        that do not resolve or cite decomp that is not ready (hold-until-clean, in every tier), new exact-tier
+        functions without an original address, forbidden patterns, include-boundary rules, near-miss/folded
+        constants. Decomp: added lines that bring in decompiler debt (hand-mangled names, raw offsets,
+        temporaries, placeholders). A problem the replaced lines already had is reported as debt, not new."""
         p, key = scoped(repo, native_default(current()))
-        data = bridge.check(p, key, base, None, target(p))
+        if key is None:
+            raise ValueError("Pass repo (decomp, native or a worktree path)")
+        data = bridge.check(p, key, base, _paths(paths, path), target(p), staged)
         return out(data, render.check(data), response_format)
 
-    @tool(enabled=has_native)
+    @tool(enabled=any(r.get("tests") for r in project.config["repositories"].values()))
     def zkit_impact(repo: str | None = None, paths: Paths = None, base: str = "HEAD", path: str | None = None,
-                    budget: float | None = None, response_format: Format = "text") -> str:
-        """Native port: for changed files (default: the working-tree diff) list the code that includes them and the
-        exact CTest names that compile them, direct/near with recorded run times and ready-to-run ctest -R commands.
-        budget (seconds of recorded test time): keep every direct test, add near tests cheapest first, and list the
-        deferred rest with their own command."""
-        from .native import impact
+                    budget: float | None = None, names: Paths = None, jobs: int = 2,
+                    response_format: Format = "text") -> str:
+        """Native port (CMake + CTest build): the tests to run for a change. For changed files (default: the
+        working-tree diff since base; paths: files or folders) the code that includes them and the exact CTest
+        names that compile or link them: direct, near (include distance 2), linked (a test program links the
+        changed object), broad (counted). Ready-to-run ctest -R commands come first, with recorded run times, the
+        fixture tests CTest adds, optional parallel prebuilds, and a warning when a selected program is older
+        than its sources. budget (seconds of recorded time): keep every direct test, fill the rest cheapest
+        first, every program before repeats; defer the others with their own command. names (exact CTest names):
+        plan those instead: missing/disabled names block, fixture closure, costs, prebuilds (jobs). Executes
+        nothing."""
+        from .native import impact, test_plan
         p, key = scoped(repo, native_default(current()))
+        if key is None:
+            raise ValueError("Pass repo (a native repo or a worktree path)")
+        if names:
+            data = test_plan(p, key, names, jobs)
+            return out(data, render.test_plan(data), response_format)
         data = impact(p, key, _paths(paths, path), base, target(p), budget)
         return out(data, render.impact(data), response_format)
 
     @tool(enabled=any(r.get("tests") for r in project.config["repositories"].values()))
-    def zkit_test_plan(repo: str, names: list[str], jobs: int = 2, response_format: Format = "text") -> str:
-        """Plan exact CTest names before running them: reject missing/disabled checks, show fixture costs and
-        optional consolidated parallel prebuild commands. Keeps CTest fixtures; executes no builds or tests."""
-        from .native import test_plan
-        p, key = scoped(repo)
-        data = test_plan(p, key, names, jobs)
-        return out(data, render.test_plan(data), response_format)
-
-    @tool(enabled=any(r.get("tests") for r in project.config["repositories"].values()))
     def zkit_stale(repo: str | None = None, programs: Paths = None, response_format: Format = "text") -> str:
         """Before asking anyone to run or test a native build: which built programs are older than a source or
-        header compiled into them (the manifest's tests.apps by default, else every linked program), from
-        build.ninja, compile_commands.json and file times. Executes no build."""
+        header compiled into them (the manifest's tests.apps by default, else every linked program), from Ninja's
+        build.ninja, compile_commands.json and file times. Program names that are not linked in this build are
+        listed. Executes no build."""
         from .native import stale
         p, key = scoped(repo, native_default(current()))
+        if key is None:
+            raise ValueError("Pass repo (a native repo or a worktree path)")
         data = stale(p, key, _paths(programs))
         return out(data, render.stale(data), response_format)
 
-    @tool(enabled=any(r.get("architecture") for r in project.config["repositories"].values()))
-    def zkit_architecture(repo: str, paths: Paths = None, base: str = "HEAD", all_files: bool = False,
-                          response_format: Format = "text") -> str:
-        """Check literal C/C++ include boundaries against this project's architecture rules. Default: changed
-        files; paths scopes a system, all_files scans configured roots. Reports lines and explicit exceptions.
-        A native-port guard; not semantic architecture proof or a request to refactor matching decomp."""
-        from .architecture import audit
-        p, key = scoped(repo)
-        data = audit(p, key, _paths(paths), base, all_files)
-        return out(data, render.architecture(data), response_format)
-
     @tool(enabled=any(r.get("coverage") for r in project.config["repositories"].values()))
-    def zkit_coverage(repo: str, name: str | None = None, response_format: Format = "text") -> str:
-        """Compare a configured reference inventory with import/integration/verification inventories. Discovers
-        identities from project files on every call; reports missing/duplicate/out-of-order records and provenance.
-        Presence is not valid import, runtime behavior or completed systems. Executes no converters."""
+    def zkit_coverage(repo: str | None = None, name: str | None = None, response_format: Format = "text") -> str:
+        """Compare a configured reference inventory (manifest `coverage`: a named list of original identities,
+        e.g. every effect or quest) with the stage inventories that should contain it (imported, integrated,
+        verified; each stage may require earlier ones). Reads the identities from the project files on every
+        call; reports missing, duplicate, out-of-order and extra records with provenance hashes. Without name:
+        the configured inventories. Presence is not valid import, runtime behavior or a completed system.
+        Executes no converters."""
         from .coverage import audit
-        p, key = scoped(repo)
+        p, key = scoped(repo, next((n for n, r in current().config["repositories"].items() if r.get("coverage")), None))
         if not name:
             names = sorted(p.config["repositories"][key].get("coverage", {}))
             return out(names, "inventories: " + (", ".join(names) or "none configured"), response_format)
         data = audit(p, key, name)
         return out(data, render.coverage(data), response_format)
 
-    @tool(enabled=has_native)
+    @tool(enabled=has_native and has_targets)
     def zkit_grounding(repo: str | None = None, paths: Paths = None, path: str | None = None,
-                       folder: str | None = None, response_format: Format = "text") -> str:
-        """Native port: per folder/file, what share of the original functions it cites are byte-exact and
-        semantically named in the decomp, and which files rest most on unmatched originals."""
-        from .native import grounding
+                       folder: str | None = None, limit: int = 20, response_format: Format = "text") -> str:
+        """Native port: how much of the original behavior it rests on is proven, and where it most likely behaves
+        slightly off. Headline and folders: the share of cited original functions that are ready references
+        (byte-exact, named on evidence, clean source; `zkit_port_plan` explains each), byte-exact and named, with
+        the main reasons. Then units (a source and its own header) ranked by not-exact/not-ready shares,
+        near-miss and unsourced constants, no test program compiling or linking it, no fidelity recipe, each with
+        the next action; and exact-tier units that cite no original. paths (files or folders) narrows it. Use
+        this for the port's state, `zkit_demand` for the decomp work the port waits on, `zkit_consts` for one
+        file's literals."""
+        from .fidelity import grounding
         p, key = scoped(repo, native_default(current()))
-        data = grounding(p, key, _paths(paths, path or folder), target(p))
+        data = grounding(p, key, _paths(paths, path or folder), target(p), max(1, min(limit, 100)))
         return out(data, render.grounding(data), response_format)
 
     @tool(enabled=has_native)
     def zkit_tiers(repo: str | None = None, paths: Paths = None, path: str | None = None,
                    response_format: Format = "text") -> str:
-        """Native port fidelity tiers set by the owner: EXACT (game behavior and data: reproduce the decomp),
-        EQUIVALENT (presentation such as rendering and audio: any implementation, but with enhancements off the
-        output must match the original), LIBERTY (owner-designed additions, opt-in, never changing behavior),
-        INFRASTRUCTURE (platform plumbing). Pass paths to see each file's tier. Unlisted code is EXACT."""
+        """Native port fidelity tiers, as the owner set them in the manifest (`fidelity_tiers`, first pattern
+        wins; each tier's own meaning and verification text is printed): exact (reproduce the original),
+        equivalent (any implementation, same observable output), liberty (owner-designed additions),
+        infrastructure (platform plumbing). A path no pattern matches is exact. paths (files or folders) gives
+        each file's tier; without paths, file counts per tier and folder."""
         from .tiers import summary
         p, key = scoped(repo, native_default(current()))
         data = summary(p, key, _paths(paths, path))
         return out(data, render.tiers(data), response_format)
 
-    @tool(enabled=has_native)
-    def zkit_suspects(repo: str | None = None, paths: Paths = None, limit: int = 20, path: str | None = None,
-                      response_format: Format = "text") -> str:
-        """Native port: files whose behavior is most likely slightly off, ranked, each with the next action
-        (decompile-first for unmatched cited originals, near-miss/unsourced constants, missing tests/recipes)."""
-        from .fidelity import suspects
-        p, key = scoped(repo, native_default(current()))
-        data = suspects(p, key, _paths(paths, path), target(p), max(1, min(limit, 100)))
-        return out(data, render.suspects(data), response_format)
-
-    @tool(enabled=has_native)
+    @tool(enabled=has_native and gamecube)
     def zkit_consts(repo: str | None = None, paths: Paths = None, path: str | None = None,
                     response_format: Format = "text") -> str:
-        """Native port: check float literals in functions that cite originals against the constants those originals
-        (and direct callees, and cited data tables) really load. near = check asm for folding/rounding first."""
+        """Native port (GameCube): every float literal in exact/equivalent-tier functions that cite originals (at
+        the definition or at its declaration in the unit's header), checked against the constants those
+        originals, their direct callees and cited data tables really load: verified (literal arithmetic is folded
+        first), folded (two loaded constants combined), near (within 2%: check the asm for folding or rounding
+        first) or unsourced. paths: files or folders."""
         from .fidelity import constant_audit
         p, key = scoped(repo, native_default(current()))
         data = constant_audit(p, key, _paths(paths, path), target(p))
         return out(data, render.consts(data), response_format)
 
-    @tool(writes, enabled=has_native)
-    def zkit_drift(accept: bool = False, repo: str | None = None, response_format: Format = "text") -> str:
-        """Cited decomp functions that became exact, regressed or changed body (exact->exact edits and renames are
-        counted, not listed) since the accepted baseline, and the native files to re-verify. accept=true records the
-        current state (writes only the toolkit's state file) — do it after re-verifying. repo is accepted and
-        ignored: drift always joins the decomp with every native repo."""
+    @tool(enabled=has_native and has_targets)
+    def zkit_drift(since: str | None = None, repo: str | None = None, response_format: Format = "text") -> str:
+        """Cited decomp functions whose state changed since the accepted baseline: now-exact, now-ready, regressed,
+        no-longer-ready or body edited (exact->exact edits and renames are counted, not listed), and the native
+        files to re-verify. since=<path of an old report.json> compares match state with that report instead.
+        Read only: after re-verifying, record the new baseline with the CLI `zkit drift --accept`. repo is
+        accepted and ignored: drift joins the decomp with every native repo."""
+        from pathlib import Path
         from .fidelity import drift
         p = current()
-        data = drift(p, target(p), accept)
+        data = drift(p, target(p), False, Path(since).expanduser().resolve() if since else None)
         return out(data, render.drift(data), response_format)
 
     @tool(enabled=has_native)
-    def zkit_reuse(repo: str | None = None, variants: str | None = None, terms: str | None = None,
+    def zkit_reuse(repo: str | None = None, variants: str | None = None, terms: Paths = None,
                    response_format: Format = "text") -> str:
-        """Find sharing opportunities: identical helper bodies copied across files, helper names defined in
-        many files, and the central files a new variant (e.g. variants="enemy-families" or
-        terms="Goblin,Wolf") must edit."""
+        """Find sharing opportunities in a native repo: the same free helper (name and body) defined in several
+        files, helper names defined in many files, and the central files a new variant must edit: files naming
+        several of terms (e.g. terms="Goblin,Wolf,Bear") or of a manifest variant group (variants="<group>"; an
+        unknown group lists the configured ones)."""
         p, key = scoped(repo, native_default(current()))
-        names = terms.split(",") if terms else p.config.get("variants", {}).get(variants or "", None)
-        data = bridge.reuse(p, key, names)
+        data = bridge.reuse(p, key, bridge.variant_terms(p, variants, terms))
         return out(data, render.reuse(data), response_format)
 
     @tool()

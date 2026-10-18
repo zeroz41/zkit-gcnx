@@ -46,7 +46,7 @@ def _ttl() -> float:
     return float(os.environ.get("ZKIT_REFRESH_TTL", "3"))
 # Cited addresses follow the platform (GameCube main RAM 8[01]xxxxxx, Switch 71xxxxxxxx); repositories may override
 # with "address_pattern". Hex-delimited, so glued forms such as Original801977D4 or Foo_80011824 count.
-DEFAULT_PROVISIONAL = r"^(fn|FUN|func|sub|lbl|text)_[0-9A-Fa-f]{8,16}$|__sub_[0-9A-Fa-f]{8,16}$|^zz_|^@"
+DEFAULT_PROVISIONAL = r"^(fn|FUN|func|sub|lbl|text)_[0-9A-Fa-f]{8,16}(__\w+)?$|__sub_[0-9A-Fa-f]{8,16}$|^zz_|^@"
 # REL modules have no fixed load address. Their functions are keyed (module_id << 32) | module-relative address,
 # so DOL addresses (module 0) keep their plain values and every module gets its own range.
 MODULE_SHIFT = 32

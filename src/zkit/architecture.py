@@ -57,7 +57,7 @@ def audit(project: Project, repo: str, paths: list[str] | None = None, base: str
             errors.append({'reference': f'{repo}:{value}', 'error': 'Requested architecture scope does not exist'})
     resolved = {}
     findings, exceptions, unknown = [], [], []
-    checked, edges, macro_includes = 0, 0, 0
+    checked, edges, macro_includes, system = 0, 0, 0, 0
     for rel in sorted(files):
         active = [rule for rule in rules if rule[1].search(rel)]
         if not active:
@@ -87,7 +87,9 @@ def audit(project: Project, repo: str, paths: list[str] | None = None, base: str
             line += match[0][:match[0].index('#')].count('\n')
             edge = {'reference': f'{repo}:{rel}:{line}', 'include': target, 'resolved': destination}
             edges += 1
-            if destination is None:
+            if destination is None and '<' in match[0]:
+                system += 1  # <vector>, <SDL3/SDL.h>: outside the repo, judged by spelling only
+            elif destination is None:
                 unknown.append(edge)
             for rule, _, forbidden, allowed in active:
                 if not any(forbidden.search(s) for s in (target, destination or '')):
@@ -99,7 +101,8 @@ def audit(project: Project, repo: str, paths: list[str] | None = None, base: str
                     findings.append(row)
     return {'repo': repo, 'scope': list(requested), 'rules': len(rules), 'files_checked': checked,
             'includes_checked': edges, 'findings': findings, 'allowed_exceptions': exceptions,
-            'unresolved_includes': unknown, 'macro_includes': macro_includes, 'errors': errors,
+            'unresolved_includes': unknown, 'system_includes': system, 'macro_includes': macro_includes,
+            'errors': errors,
             'ok': not findings and not errors, 'documents': config.get('documents', []),
             'limits': 'Literal C/C++ includes and configured policies only; all conditional branches are inspected. '
                       'Unresolved external/generated includes can only be checked by spelling; macros are not expanded. '
