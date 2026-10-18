@@ -21,7 +21,7 @@ from typing import Any
 
 from . import ppcflow
 from .program import Program
-from . import vtables
+from . import cwnames, vtables
 from .vtables import VTable, find
 
 ALLOCATOR_EVIDENCE = 3  # constant-size calls whose result reaches a constructor before a function counts as `new`
@@ -179,43 +179,33 @@ def graph(program: Program, tables: dict[int, VTable], classes: dict[int, ClassI
 
 # Auditing a decomp's names against the recovered classes
 
-CW_MEMBER = re.compile(r"^(?P<method>\w+?)__(?P<length>\d+)(?P<rest>\w+)$")  # method__<n>Class<params>
 ROLE_PLACEHOLDER = re.compile(r"^(?:fn|sub|func|vfunc|vf|virtual|slot|unk)_?[0-9A-Fa-f]*$|_[0-9A-Fa-f]{8}$")
 
 
-def member(name: str) -> tuple[str, str, str] | None:
-    """(method, class, parameter suffix) of a CodeWarrior member name: `run_task__7TObjectFv`."""
-    match = CW_MEMBER.match(name)
-    if not match or len(match["rest"]) < int(match["length"]):
-        return None
-    length = int(match["length"])
-    return match["method"], match["rest"][:length], match["rest"][length:]
-
-
 def class_named(name: str | None) -> str | None:
-    """The class a function name places it in: mangled member, `Class__sub_ADDR`, `Class__ct`, `Class::m`."""
+    """The class a function name places it in: a mangled member, `Class__sub_ADDR`, `Class__ct`, `Class::m`."""
     if not name:
         return None
     if "::" in name:
         return name.split("(")[0].rsplit("::", 1)[0]
-    parts = member(name)
-    if parts:
-        return parts[1]
+    parsed = cwnames.parse(name)
+    if parsed is not None and parsed.scope:
+        return parsed.qualified
     match = re.match(r"^([A-Za-z_]\w*?)__(?:sub_[0-9A-Fa-f]+|ct|dt|vt\d*|data_[0-9A-Fa-f]+)$", name)
     return match[1] if match else None
+
+
+def _method(name: str | None) -> cwnames.Name | None:
+    parsed = cwnames.parse(name or "")
+    return parsed if parsed is not None and parsed.scope else None
 
 
 def _placeholder(name: str | None) -> bool:
     from .score import placeholder
     if not name:
         return True
-    parts = member(name)
-    method = parts[0] if parts else name
-    return placeholder(name) or bool(ROLE_PLACEHOLDER.search(method))
-
-
-def _mangle(cls: str) -> str:
-    return f"{len(cls)}{cls}"
+    parsed = _method(name)
+    return placeholder(name) or bool(ROLE_PLACEHOLDER.search(parsed.method if parsed else name))
 
 
 def audit_project(project, target: str | None = None, class_filter: str | None = None,
@@ -261,23 +251,27 @@ def audit(program: Program, class_filter: str | None = None, limit: int = 60) ->
         if address not in labelled:
             findings["unnamed_class"].append({
                 "vtable": text(address), "class": cls, "evidence": how,
-                "suggested_symbol": f"__vt__{_mangle(cls)}" if cls else None,
+                "suggested_symbol": f"__vt__{len(cls)}{cls}" if cls else None,
                 "constructors": [names.get(f) for f in info.constructors], "destructor": names.get(info.destructor)})
         if not cls:
             continue
         for function, role in [(f, "constructor") for f in info.constructors] + \
                               ([(info.destructor, "destructor")] if info.destructor else []):
             current = names.get(function, "")
-            parts = member(current)
+            parsed = _method(current)
             wanted = "__ct" if role == "constructor" else "__dt"
-            if parts and parts[0] == wanted and parts[1] == cls:
+            if parsed and parsed.method == wanted and parsed.qualified == cls:
                 continue
             named = class_named(current)
-            suffix = parts[2] if parts and parts[1] == named else ("Fv" if role == "destructor" else "")
+            if role == "destructor":                  # CodeWarrior destructors take no declared parameters
+                suggested = cwnames.mangle(cwnames.Name("__dt", [cls], False, [cwnames.Type("v", "void")]))
+            elif parsed and parsed.params is not None:
+                suggested = cwnames.member("__ct", cls, parsed)
+            else:
+                suggested = f"{cls}::{cls}"
             findings["wrong_class" if named and named != cls else "role_named"].append({
                 "address": text(function), "current": current, "role": role, "class": cls,
-                "named_class": named, "suggested": f"{wanted}__{_mangle(cls)}{suffix}" if suffix else f"{cls}::"
-                f"{cls if role == 'constructor' else '~' + cls}"})
+                "named_class": named, "suggested": suggested})
     # methods: the class that defines a slot function is the one whose table has it first in its hierarchy
     defined_by: dict[int, set[int]] = collections.defaultdict(set)
     for address, table in tables.items():
@@ -304,9 +298,9 @@ def audit(program: Program, class_filter: str | None = None, limit: int = 60) ->
     for root in [a for a, info in found.items() if not info.base or info.base not in found]:
         for index in range(len(tables[root].slots)):
             family = _family(tables, children, root, index)
-            methods = collections.Counter(member(names.get(f, "") or "")[0] for _, f in family
+            methods = collections.Counter(_method(names.get(f)).method for _, f in family
                                           if f not in special and not _placeholder(names.get(f)) and
-                                          member(names.get(f, "") or ""))
+                                          _method(names.get(f)))
             if not methods:
                 continue
             method, votes = methods.most_common(1)[0]
@@ -314,18 +308,18 @@ def audit(program: Program, class_filter: str | None = None, limit: int = 60) ->
                 findings["slot_name_conflict"].append({
                     "root": label(root), "slot": index, "names": dict(methods.most_common(6))})
                 continue
-            suffix = next((member(names[f])[2] for _, f in family if names.get(f) and member(names[f])
-                           and member(names[f])[0] == method), "")
+            like = next((_method(names.get(f)) for _, f in family if _method(names.get(f)) and
+                         _method(names.get(f)).method == method), None)
             for owner, function in family:
-                current = member(names.get(function, "") or "")
-                if function in special or (current and current[0] == method):
+                current = _method(names.get(function))
+                if function in special or (current and current.method == method):
                     continue
                 cls = class_of.get(owner, (None, ""))[0]
                 if keep(cls):
                     findings["spread"].append({
                         "address": text(function), "current": names.get(function), "class": cls or label(owner),
                         "slot": index, "slot_name": f"{method} ({votes} of {sum(methods.values())} named)",
-                        "suggested": f"{method}__{_mangle(cls)}{suffix}" if cls else f"{label(owner)}::{method}"})
+                        "suggested": cwnames.member(method, cls or label(owner), like)})
     real_table = {cls: address for address, (cls, _) in class_of.items() if cls}
     for row in findings.get("not_a_table", []):
         cls = vtables._class_from_vtable(row["symbol"])
@@ -354,8 +348,8 @@ def _class_names(program: Program, tables: dict[int, VTable], found: dict[int, C
         if address in out:
             continue
         special = [names.get(f) for f in info.constructors + [info.destructor] if f]
-        strong = collections.Counter(member(n)[1] for n in special
-                                     if n and member(n) and member(n)[0] in ("__ct", "__dt"))
+        strong = collections.Counter(_method(n).qualified for n in special
+                                     if _method(n) and _method(n).method in ("__ct", "__dt"))
         weak = collections.Counter(class_named(n) for n in special + [names.get(f) for f in
                                    _own_slots(tables, found, address)])
         weak.pop(None, None)
@@ -400,5 +394,5 @@ def _peek(program: Program, address: int, size: int) -> bytes:
 
 
 def _rehome(name: str | None, cls: str) -> str:
-    parts = member(name or "")
-    return f"{parts[0]}__{_mangle(cls)}{parts[2]}" if parts else f"{cls}::{name}"
+    parsed = _method(name)
+    return cwnames.member(parsed.method, cls, parsed) if parsed else f"{cls}::{name}"
