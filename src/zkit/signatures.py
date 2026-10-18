@@ -115,7 +115,7 @@ def digest(words: list[int], relocations: Iterable[tuple[int, int]]) -> str:
     return h.hexdigest()
 
 
-def image_shape(program: Program, function: Function) -> Shape | None:
+def image_shape(program: Program, function: Function, sda: dict[int, int] | None = None) -> Shape | None:
     """The shape of a linked function and where its relocations point."""
     try:
         words = program.platform.words(program.image, function.address, function.size)
@@ -123,10 +123,27 @@ def image_shape(program: Program, function: Function) -> Shape | None:
         return None
     if not words:
         return None
-    found, cleared = ppc.code_relocations(words, function.address, program.sda, program.in_image)
+    found, cleared = ppc.code_relocations(words, function.address, program.sda if sda is None else sda,
+                                          program.in_image)
     masked = [cleared.get(function.address + 4 * i, word) for i, word in enumerate(words)]
     references = [((r.offset - function.address) // 4 * 4, r.kind, r.target) for r in found]
     return Shape(function.address, 4 * len(words), digest(masked, ((o, k) for o, k, _ in references)), references)
+
+
+def small_data(program: Program) -> dict[int, int]:
+    """r2 and r13: the program's own, or, where nothing names `__init_registers` (a fresh analysis), as the
+    first function the entry point calls that sets both sets them."""
+    from .program import _gamecube_sda
+    if program.sda or not hasattr(program.image, "entry"):
+        return program.sda
+    entry = program.image.entry
+    end = next((s.address + s.size for s in program.platform.sections(program.image)
+                if s.address <= entry < s.address + s.size), entry)
+    for _, target in program.platform.calls(program.image, entry, min(0x100, end - entry)):
+        found = _gamecube_sda(program.image, target)
+        if len(found) == 2:
+            return found
+    return {}
 
 
 def text_at(read, address: int) -> str | None:
@@ -358,13 +375,16 @@ def objects_in(paths: Iterable[Path]) -> Iterable[tuple[str, bytes]]:
 
 
 def map_program(platform, image: Path, map_path: Path) -> tuple[Program, list[tuple[int, int, str]]]:
-    """An original named by a CodeWarrior linker map, and the map's units."""
+    """An original named by a CodeWarrior linker map, and the map's units. A map does not mark file-local
+    symbols, but a name it lists twice can only be one."""
     from . import mwmap
     from .gc import Symbol
     split = mwmap.read(map_path)
-    symbols = [Symbol(name, ".text", address, "function", size, "global")
+    count = collections.Counter([n for _, n in split.functions.values()] + [o[1] for o in split.objects.values()])
+    scope = lambda name: "local" if count[name] > 1 else "global"
+    symbols = [Symbol(name, ".text", address, "function", size, scope(name))
                for address, (size, name) in split.functions.items()]
-    symbols += [Symbol(name, section, address, "object", size, "global")
+    symbols += [Symbol(name, section, address, "object", size, scope(name))
                 for address, (size, name, section) in split.objects.items()]
     units = [(start, end, unit) for unit, rows in split.units.items() for _, start, end in rows]
     return Program.from_symbol_list(platform, platform.open(image), symbols), units
@@ -469,6 +489,26 @@ class Proposal:
     agreed: int = 0               # references and neighbours the target agreed with when its shape matched
 
 
+def _canonical(donors: list[Donor]) -> dict[str, str]:
+    """{plain key: file-local key} where donors disagree on a symbol's linkage (one build's static is another's
+    global, a decomp's sources drop `static`) and only one file-local symbol has that name: one function."""
+    keys = {k for d in donors for s in d.signatures for k in (s.key, s.before, s.after) if k}
+    keys |= {r.token[1] for d in donors for s in d.signatures for r in s.references if r.token and r.token[0] == "n"}
+    local: dict[str, list[str]] = collections.defaultdict(list)
+    for k in keys:
+        if "\0" in k:
+            local[display(k)].append(k)
+    return {name: found[0] for name, found in local.items() if len(found) == 1 and name in keys}
+
+
+def _renamed_signature(signature: Signature, same: dict[str, str]) -> Signature:
+    from dataclasses import replace
+    get = lambda k: same.get(k, k) if k else k
+    return replace(signature, key=get(signature.key), before=get(signature.before), after=get(signature.after),
+                   references=tuple(Reference(r.offset, r.kind, ("n", get(r.token[1]), r.token[2]))
+                                    if r.token and r.token[0] == "n" else r for r in signature.references))
+
+
 class Matcher:
     """The target's shapes against every donor signature."""
 
@@ -478,14 +518,17 @@ class Matcher:
         self.by_key: dict[str, list[Signature]] = collections.defaultdict(list)
         self.tables: dict[str, list[list[str | None]]] = collections.defaultdict(list)
         self.sizes: dict[str, set[int]] = collections.defaultdict(set)
+        same = _canonical(donors)
         for donor in donors:
             for signature in donor.signatures:
+                if same:
+                    signature = _renamed_signature(signature, same)
                 self.by_shape[signature.shape].append(signature)
                 self.by_key[signature.key].append(signature)
             for name, slots in donor.tables.items():
-                self.tables[name].append(slots)
+                self.tables[same.get(name, name)].append([same.get(k, k) for k in slots])
             for name, size in donor.sizes.items():
-                self.sizes[name].add(size)
+                self.sizes[same.get(name, name)].add(size)
         functions = program.functions
         self.extent = {f.address: f.size for f in functions}
         self.neighbours = {f.address: (functions[i - 1].address if i else None,
@@ -493,8 +536,9 @@ class Matcher:
                            for i, f in enumerate(functions)}
         self.shapes: dict[int, Shape] = {}
         self.groups: dict[str, list[int]] = collections.defaultdict(list)
+        sda = small_data(program)
         for function in functions:
-            shape = image_shape(program, function)
+            shape = image_shape(program, function, sda)
             if shape is not None:
                 self.shapes[function.address] = shape
                 if shape.shape in self.by_shape:

@@ -70,6 +70,8 @@ extension for its Gekko language), installed with
 | What is wrong with the current split | `zkit units --check` |
 | Classes against the current names | `zkit classes` |
 | A header per class, proven with the compiler | `zkit classes --headers include/classes --prove` |
+| Names from other builds (libraries every game links, a debug build's map), cached once per donor | `zkit signatures build sdk --image other.dol --symbols other/symbols.txt`, `--map game.MAP`, `--objects libs/` |
+| Names those donors prove for this game | `zkit signatures match`, `zkit names --signatures` |
 | A fresh split, symbols and headers in one folder | `zkit analyze --out fresh/` |
 | Renames made in the source, back into the symbols | `zkit apply`, `zkit apply --write` |
 | How close a split is to a reference | `zkit score fresh/ config/ --report build/report.json` |
@@ -102,8 +104,9 @@ The rules behind the skills: `zkit contract decomp` and `zkit contract port`.
 
 ### Evidence
 
-Run them in your repo. They only read, except `handoff`, `report`, `delink`, `link`, `analyze`, `objects --save`
-and `cache --prune`, which write to zkit's own folders or the folder you name.
+Run them in your repo. They only read, except `handoff`, `report`, `delink`, `link`, `analyze`, `apply --write`,
+`objects --save`, `signatures build` and `cache --prune`, which write to zkit's own folders, the symbols file or
+the folder you name.
 
 | You want | Command |
 | --- | --- |
