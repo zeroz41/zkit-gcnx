@@ -385,11 +385,12 @@ def create_server(project: Project) -> FastMCP:
                   stride: Number = None, query: str | None = None, size: Number = None,
                   addresses: list[str] | str | None = None, repo: str | None = None,
                   response_format: Format = "text", length: Number = None) -> str:
-        """Typed reads of ORIGINAL data at an address or symbol name (lbl_*, jumptable_*, __vt__*); several
-        addresses (space separated, or addresses=[...]) read in one call. type: u8 s8 u16 s16 u32 s32 f32 f64 ptr
-        str (count = number of strings). count defaults to 16, or size (bytes) / element size. Tables: fields like
-        "u32,f32,ptr,pad4" (stride optional). .bss has no bytes in the executable: use zkit_xrefs to see who writes
-        it."""
+        """Typed reads of ORIGINAL data in the main executable at an address or symbol name (lbl_*, jumptable_*,
+        __vt__*); several addresses (space separated, or addresses=[...]) read in one call. type: u8 s8 u16 s16
+        u32 s32 u64 s64 f32 f64 ptr str (count = number of strings). Without count or size (bytes), the data symbol
+        at the address gives the extent, else 16 elements; reads stop at the end of the section. Tables: fields
+        like "u32,f32,ptr,pad4" (stride optional). .bss has no bytes in the executable: zkit_xrefs shows who
+        writes it. REL module data is not read here."""
         p = decomp(repo)
         wanted = bridge.query_list(address) + bridge.query_list(query) + bridge.query_list(addresses)
         if not wanted:
@@ -397,15 +398,14 @@ def create_server(project: Project) -> FastMCP:
         layout = fields.split(",") if fields else None
         type = bridge.data_type(type)
         size = _int(size, name="size") or _int(length, name="length")
-        n = _int(count, name="count") or (inspect_dol.count_for_size(size, type, layout, _int(stride, name="stride"))
-                            if size and type != "str" else 16)
+        n = _int(count, name="count")
 
         def one(q: str) -> dict:
             q, kind, rows = bridge.typed_query(q, type, n)  # `0x804CCE50:ptr:12` shorthand
             value = bridge.resolve_address(p, q, target(p))
             if value is None:
                 raise ValueError(f"No address or symbol matches {q}")
-            return inspect_dol.read_data(p, target(p), value, kind, rows, _int(stride, name="stride"), layout)
+            return inspect_dol.read_data(p, target(p), value, kind, rows, _int(stride, name="stride"), layout, size)
         data = bridge.batch(wanted, one)
         return out(data, render.data_rows(data), response_format)
 

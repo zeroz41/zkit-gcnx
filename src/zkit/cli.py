@@ -150,7 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("address", nargs="+", help="address(es) or symbol name(s) (lbl_*, jumptable_*, __vt__*)")
     c.add_argument("--type", default="u32", help="u8 s8 u16 s16 u32 s32 u64 s64 f32 f64 ptr str "
                                               "(also string, hex, bytes, float, double, int, pointer)")
-    c.add_argument("--count", type=int, help="elements, records or strings (default 16, or --size / element size)")
+    c.add_argument("--count", type=int, help="elements, records or strings (default: the symbol's extent, else 16)")
     c.add_argument("--size", type=lambda v: int(v, 0), help="bytes to cover instead of --count")
     c.add_argument("--fields", help="Record layout, e.g. u32,f32,ptr,pad4")
     c.add_argument("--stride", type=lambda v: int(v, 0))
@@ -630,15 +630,12 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
     if command == "data":
         fields = args.fields.split(",") if args.fields else None
         refresh(project, [])
-        count = args.count or (inspect_dol.count_for_size(args.size, args.type, fields, args.stride)
-                               if args.size and args.type != "str" else 16)
-
         def one(query: str) -> dict:
-            query, kind, n = bridge.typed_query(query, bridge.data_type(args.type), count)  # `0x804CCE50:ptr:12` shorthand
+            query, kind, n = bridge.typed_query(query, bridge.data_type(args.type), args.count)  # `ADDR:ptr:12`
             address = bridge.resolve_address(project, query, target)
             if address is None:
                 raise ValueError(f"No address or symbol matches {query}")
-            return inspect_dol.read_data(project, target, address, kind, n, args.stride, fields)
+            return inspect_dol.read_data(project, target, address, kind, n, args.stride, fields, args.size)
         data = bridge.batch(bridge.query_list(" ".join(args.address)), one)
         return data, render.data_rows(data)
     if command == "compiled":

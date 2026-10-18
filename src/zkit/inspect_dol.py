@@ -377,20 +377,13 @@ def _readable(project: Project, target: str, dol, address: int, width: int) -> N
     raise ValueError(f"{address_text(address)}+{width}{where} is not inside one section of the executable")
 
 
-def count_for_size(size: int, kind: str = "u32", fields: list[str] | None = None, stride: int | None = None) -> int:
-    """Element/record count that covers `size` bytes (agents ask for bytes as often as for a count)."""
-    if fields:
-        layout = [f.strip() for f in fields]
-        width = stride or sum(struct.calcsize(TYPES[f]) if f in TYPES else int(f[3:] or 0) for f in layout
-                              if f in TYPES or re.fullmatch(r"pad\d+", f))
-    else:
-        width = struct.calcsize(TYPES[kind]) if kind in TYPES else 1
-    return max(1, -(-size // max(width, 1)))
+READ_CAPS = {"rows": 1024, "records": 512, "strings": 256}
 
 
-def read_data(project: Project, target: str, address: int, kind: str = "u32", count: int = 16,
-              stride: int | None = None, fields: list[str] | None = None) -> dict:
-    """Typed reads; `fields` + `stride` decode a table of records."""
+def read_data(project: Project, target: str, address: int, kind: str = "u32", count: int | None = None,
+              stride: int | None = None, fields: list[str] | None = None, size: int | None = None) -> dict:
+    """Typed reads; `fields` + `stride` decode a table of records. Without count (or size, in bytes), the data
+    symbol at the address gives the extent, else 16 elements. Reads stop at the end of the section."""
     refresh(project, [])
     db = connect(project)
     dol = _dol(project, target)
@@ -400,13 +393,28 @@ def read_data(project: Project, target: str, address: int, kind: str = "u32", co
         if field.strip() not in TYPES and not re.fullmatch(r"pad\d+", field.strip()):
             raise ValueError(f"Unknown field {field!r}; use {', '.join(TYPES)} or padN")
     _readable(project, target, dol, address, 1)
-    rows = []
+    from .bridge import _symbol_lookup
+    symbol = _symbol_lookup(project, target, address)
+    extent = size or (symbol["size"] - symbol["offset"] if symbol and symbol["size"] > symbol["offset"] else None)
+    section = dol.section_at(address)
+    end = min(section.address + section.size, address + size) if size else section.address + section.size
+    rows, notes = [], []
+
+    def bounded(wanted: int, cap: str) -> int:
+        if wanted > READ_CAPS[cap]:
+            notes.append(f"first {READ_CAPS[cap]} of {wanted} {cap}; read the rest from a later address")
+        return min(wanted, READ_CAPS[cap])
+
     if fields:
         layout = [f.strip() for f in fields]
         width = sum(struct.calcsize(_format(project, target, f)) if f in TYPES else int(f.lstrip("pad")) for f in layout)
         stride = stride or width
-        for index in range(min(count, 512)):
+        wanted = count or (max(1, extent // stride) if extent else 16)
+        for index in range(bounded(wanted, "records")):
             base = address + index * stride
+            if base + width > end:
+                notes.append(f"stopped after {index} records at the end of the section or size")
+                break
             values, offset = [], 0
             for field in layout:
                 if field.startswith("pad"):
@@ -417,26 +425,32 @@ def read_data(project: Project, target: str, address: int, kind: str = "u32", co
             rows.append({"index": index, "address": address_text(base), "values": values})
     elif kind == "str":
         # count = number of consecutive NUL-terminated strings (padding NULs between them are skipped).
-        section = dol.section_at(address)
         cursor = address
-        for _ in range(min(max(count, 1), 256)):
-            limit = min(4096, section.address + section.size - cursor)
+        wanted = count or (READ_CAPS["strings"] if size else 1 if extent else 16)  # with size: every string in it
+        for _ in range(bounded(wanted, "strings") if count else wanted):
+            limit = min(4096, end - cursor)
             if limit <= 0:
                 break
             raw = dol.read(cursor, limit)
             text = raw.split(b"\0", 1)[0]
             rows.append({"address": address_text(cursor), "values": [_decode_text(project, target, text)]})
             cursor += len(text) + 1
-            while cursor < section.address + section.size and dol.read(cursor, 1) == b"\0":
+            while cursor < end and dol.read(cursor, 1) == b"\0":
                 cursor += 1
     else:
         width = struct.calcsize(_format(project, target, kind))
-        for index in range(min(count, 1024)):
-            base = address + index * (stride or width)
+        step = stride or width
+        wanted = count or (max(1, -(-extent // step)) if extent else 16)
+        for index in range(bounded(wanted, "rows")):
+            base = address + index * step
+            if base + width > end:
+                notes.append(f"stopped after {index} values at the end of the section or size")
+                break
             rows.append({"address": address_text(base), "values": [_value(db, target, dol, base, kind, project)]})
     owner = containing(db, target, address)
     return {"target": target, "address": address_text(address), "kind": kind if not fields else fields,
-            "rows": rows, "source": "original executable bytes",
+            "rows": rows, "source": "original executable bytes", "notes": notes,
+            "symbol": symbol["name"] + (f"+0x{symbol['offset']:X}" if symbol["offset"] else "") if symbol else None,
             "inside_function": (owner["demangled"] or owner["name"]) if owner else None}
 
 
@@ -470,5 +484,5 @@ def _value(db, target: str, dol, address: int, kind: str, project: Project | Non
     if kind == "f64":
         return value  # full precision: neighbouring magic doubles differ in the last digits
     if kind.startswith("u") and kind != "u8":
-        return f"0x{value:X}" if value > 0xFFFF else value
+        return f"0x{value:X}"  # one notation per column: words, flags and offsets read as hex
     return value

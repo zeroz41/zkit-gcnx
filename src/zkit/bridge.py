@@ -109,7 +109,7 @@ def data_type(kind: str) -> str:
     return kind
 
 
-def typed_query(query: str, kind: str, count: int) -> tuple[str, str, int]:
+def typed_query(query: str, kind: str, count: int | None) -> tuple[str, str, int | None]:
     """`ADDR:type[:count]` (as agents write it) -> (ADDR, type, count); anything else unchanged."""
     names = "|".join([*DATA_TYPES, *TYPE_ALIASES])
     match = re.fullmatch(rf"(.+?):({names})(?::(\d+))?", query.strip(), re.I)

@@ -153,13 +153,17 @@ class Arguments(unittest.TestCase):
     def test_data_batch_size_and_repo(self):
         text = self.call("zkit_data", {"repo": "decomp", "addresses": '["0x80003100","enemyTable"]', "type": "u8",
                                        "size": "2"})
-        self.assertIn("0x80003100 u8", text)
-        self.assertIn("0x80003104 u8", text)
+        self.assertIn("0x80003100 lbl_80003100 as u8", text)
+        self.assertIn("0x80003104 enemyTable as u8", text)
         self.assertIn("0x80003105:", text)
         self.assertNotIn("0x80003106:", text)  # size 2 bytes of u8 = 2 rows
         mixed = self.call("zkit_data", {"address": "0x80003104 0x80009000", "count": 1})
         self.assertIn("0x80009000: error:", mixed)  # one bad address does not sink the batch
-        self.assertIn("0x80003104 u32", mixed)
+        self.assertIn("0x80003104 enemyTable as u32", mixed)
+        whole = self.call("zkit_data", {"address": "lbl_80003100", "type": "u8"})
+        self.assertEqual(whole.count("\n  0x"), 4)  # the symbol's 4 bytes, not 16 rows past it
+        self.assertIn("stopped after 8 values at the end of the section", self.call("zkit_data", {
+            "address": "0x80003100", "type": "u8", "count": 12}))
         code, text = self.cli("data", "0x80003104", "0x80003100", "--size", "4")
         self.assertEqual(code, 0)
         self.assertEqual(text.count(" u32"), 2)
