@@ -95,6 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--unit")
     c.add_argument("--range", help="START-END addresses, e.g. 8013D000-8013F000")
     c.add_argument("--provisional", action="store_true", help="only provisional names")
+    c.add_argument("--signatures", action="store_true", help="names the signature cache proves for this target "
+                                                             "(new ones, and ones that differ from the current)")
     c.add_argument("--below", type=float, metavar="PERCENT", help="only functions matched below this %% (100 = not exact)")
     c.add_argument("--sort", choices=["address", "match", "size"], default="address",
                    help="match: closest near-misses first; size: largest first")
@@ -172,6 +174,22 @@ def build_parser() -> argparse.ArgumentParser:
                             "symbols.txt (recovered tables and destructors named), a header per class, analysis.json")
     c.add_argument("--out", type=Path, required=True)
     c.add_argument("--types-include", default="types.h")
+    c = add("signatures", help="Names from other builds: build a donor's function signatures into zkit's cache "
+                               "(an original named by its symbols.txt or a CodeWarrior .MAP, compiled objects or "
+                               "libraries, or this project), list or remove them, or match this target against them")
+    c.add_argument("action", choices=["build", "list", "remove", "match"])
+    c.add_argument("name", nargs="?", help="the donor (build, remove)")
+    c.add_argument("--image", type=Path, help="build: an original executable (.dol or disc image)")
+    c.add_argument("--symbols", type=Path, help="build: its symbols.txt")
+    c.add_argument("--splits", type=Path, help="build: its splits.txt (places file-local names)")
+    c.add_argument("--map", type=Path, help="build: its CodeWarrior linker map instead of a symbols.txt")
+    c.add_argument("--objects", type=Path, action="append", default=[], help="build: objects, libraries or "
+                                                                              "folders of them (repeatable)")
+    c.add_argument("--complete", action="store_true", help="build from this project: only the compiled objects "
+                                                           "of the units its report marks complete")
+    c.add_argument("--donor", action="append", default=[], help="match: only this donor (repeatable)")
+    c.add_argument("--all", action="store_true", help="match: also list names the target already has")
+    c.add_argument("--limit", type=int, default=60)
     c = add("units", help="Translation units from evidence in the original (source paths its code cites, literal "
                           "copies, data one run of code uses, classes): a fresh proposal, or --check the current splits")
     c.add_argument("--check", action="store_true", help="folds, splits and data claims for the existing splits.txt")
@@ -406,6 +424,9 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         proven = score.complete_units(args.report, args.module) if args.report else set()
         data = score.score(reference, score.load(args.proposal), proven)
         return data, render.score(data)
+    if args.command == "signatures" and (args.action in ("list", "remove") or args.image or args.objects):
+        from . import signatures
+        return signatures.command(args)
     if args.command == "contract":
         from importlib import resources
         text = resources.files("zkit").joinpath(f"contracts/{args.kind}.md").read_text(encoding="utf-8")
@@ -470,6 +491,11 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
     if command == "lookup":
         data = bridge.lookup(project, " ".join(args.query), target, body=args.body)
         return data, render.lookup(data)
+    if command == "signatures" or command == "names" and args.signatures:
+        from . import signatures
+        if command == "names":
+            args = argparse.Namespace(**{**vars(args), "action": "match", "donor": [], "all": False})
+        return signatures.command(args, project, target)
     if command == "names":
         start = end = None
         if args.range:

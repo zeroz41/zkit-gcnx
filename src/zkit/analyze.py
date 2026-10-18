@@ -1,9 +1,11 @@
 """A fresh analysis of an original, written the way decomp-toolkit's configuration is: a splits.txt with every
 unit's code and data, a symbols.txt, and a header per recovered class, plus the evidence behind each.
 
-Names are only what evidence proves. A class table is `__vt__` of its class and a CodeWarrior destructor is
-`__dt__<class>Fv` (destructors never declare parameters), so both are named; a constructor or a virtual method
-keeps its `fn_` placeholder until its parameters are known, because a mangled name claims a signature.
+Names are only what evidence proves. Functions and data other builds name (the signature cache: libraries every
+game links, another build of this one) take those names where the evidence admits one. A class table is `__vt__`
+of its class and a CodeWarrior destructor is `__dt__<class>Fv` (destructors never declare parameters), so both
+are named; a constructor or a virtual method keeps its `fn_` placeholder until its parameters are known, because
+a mangled name claims a signature.
 """
 
 from __future__ import annotations
@@ -18,14 +20,21 @@ from .program import Program
 
 def analyze(program: Program) -> dict[str, Any]:
     proposal = units.propose(program)
-    result: dict[str, Any] = {"units": proposal, "classes": None, "symbols": {}}
+    result: dict[str, Any] = {"units": proposal, "classes": None, "symbols": {}, "signatures": []}
     if program.platform.name != "gamecube":
         return result
+    from . import signatures
+    current = {f.address: f.name for f in program.functions} | {o.address: o.name for o in program.objects}
+    named = [p for p in (signatures.propose(program, signatures.donors()) if signatures.listed() else [])
+             if p.kind != "label" and _placeholder(current.get(p.address))]
+    program = signatures.renamed(program, named)
+    result["signatures"] = named
     tables = vtables.find(program)
     found = classes.recover(program, tables)
     declared = classes.declarations(program, tables, found)
     names = {f.address: f.name for f in program.functions}
-    symbols: dict[int, tuple[str, str, int]] = {}      # address -> (name, type, size)
+    symbols: dict[int, tuple[str, str, int]] = {      # address -> (name, type, size)
+        p.address: (p.name, "function" if p.kind == "function" else "object", 0) for p in named}
     for address, info in found.items():
         cls = declared[address].name
         symbols[address] = (f"__vt__{len(cls)}{cls}", "object", tables[address].size)
@@ -81,9 +90,12 @@ def write(program: Program, result: dict[str, Any], symbols_in: Path, folder: Pa
                 f"#endif\n", encoding="utf-8")
             headers += 1
     summary = {"units": result["units"]["counts"], "named_symbols": len(renamed), "class_headers": headers,
+               "signature_names": len(result["signatures"]),
                "classes": {k: v for k, v in (result["classes"] or {}).get("graph", {}).items() if k != "classes"}}
     (folder / "analysis.json").write_text(json.dumps({
         "summary": summary, "boundaries": result["units"]["boundaries"], "names": result["units"]["names"],
+        "signatures": [{"address": f"0x{p.address:08X}", "name": p.name, "kind": p.kind, "evidence": p.evidence,
+                        "donors": list(p.donors), "unit": p.unit} for p in result["signatures"]],
         "classes": (result["classes"] or {}).get("graph", {}).get("classes", [])}, indent=1) + "\n",
         encoding="utf-8")
     return {"folder": str(folder), **summary}

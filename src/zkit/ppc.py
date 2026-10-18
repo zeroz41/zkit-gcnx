@@ -153,8 +153,10 @@ def _step(state: State, pc: int, word: int, start: int, end: int, in_image, emit
     found = branch(word, pc)
     if found is not None:
         target, _, links = found
-        # leaving the function, or a call to its own start (recursion): the compiler names the symbol
-        if target is not None and op in (16, 18) and (not start <= target < end or (links and target == start)):
+        # leaving the function, or a call to its own start (recursion): the compiler names the symbol; an
+        # absolute branch to a fixed address outside the image (`bla 0x60`) is written as it is
+        if target is not None and op in (16, 18) and (not start <= target < end or (links and target == start)) \
+                and (not word & 2 or in_image(target)):
             emit(REL14 if op == 16 else REL24, pc, target, word, None)
         if links:
             for register in VOLATILE:
