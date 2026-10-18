@@ -191,6 +191,13 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--out", type=Path, required=True, help="folder for the objects (unit a/b.cpp: OUT/a/b.o)")
     c.add_argument("--objdiff", type=Path, help="also write objdiff's project file here")
     c.add_argument("--compiled", type=Path, help="where the build writes each unit's object (for --objdiff)")
+    c = add("asmfile", help="An assembly file of original functions for a decompiler (m2c): references as symbols, "
+                            "labels, and the data they read (GameCube)")
+    c.add_argument("addresses", nargs="+", help="addresses or names of functions")
+    c.add_argument("--out", type=Path, help="write here instead of printing")
+    c = add("m2c", help="m2c's C for an original function, from zkit's own assembly file (GameCube)")
+    c.add_argument("address", help="address or name of the function")
+    c.add_argument("--language", choices=("c", "c++"), help="default: c++ for a mangled name, else c")
     c = add("refs", help="Where a function or global is defined, declared and used in the source (any spelling)")
     c.add_argument("query", nargs="+")
     c.add_argument("--repo")
@@ -607,6 +614,23 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             units.write_splits(data, args.splits.expanduser().resolve())
             data["written"] = str(args.splits)
         return data, render.units_proposal(data, args.limit) + (f"\nwrote {args.splits}" if args.splits else "")
+    if command in ("asmfile", "m2c"):
+        from . import asmfile
+        def resolve(query: str) -> int:
+            exact = bridge.HEX.match(query.strip())
+            found = [int(exact[1], 16)] if exact else bridge.resolve(project, query, target)
+            if not found:
+                raise ValueError(f"No function matches {query}")
+            return found[0]
+        if command == "asmfile":
+            text = asmfile.write(project, target, [resolve(a) for a in args.addresses])
+            if args.out:
+                args.out.write_text(text, encoding="utf-8")
+                return {"written": str(args.out)}, f"wrote {args.out}"
+            return {"text": text}, text.rstrip()
+        data = asmfile.m2c(project, target, resolve(args.address), args.language)
+        return data, f"// {data['function']} ({data['address']}), m2c {data['language']}, asm {data['asm']}\n" + \
+            data["text"].rstrip()
     if command == "delink":
         from . import delink
         config = project.target(target)
