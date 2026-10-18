@@ -11,8 +11,8 @@ Most later repair work came from early shortcuts. Get these right before matchin
 1. The original stays local: the user's own dump, never committed, with its hash pinned in the build.
 2. Identify the toolchain: compiler and version, SDK and library versions (version strings, prologues, a seed
    probe). Pin donor sources for libraries before touching game code.
-3. Partition every address into units from boundary evidence (contract rule 4) and give each unit its data
-   (rule 7). Placeholder units for unknown ranges; no slices or wrappers, ever.
+3. Partition every address into units from boundary evidence ("Units come from boundary evidence") and give each unit its data
+   ("A unit owns its data"). Placeholder units for unknown ranges; no slices or wrappers, ever.
 4. Build the class graph and generate headers with bases and full virtual blocks before matching methods.
 5. Wire objdiff: `objdiff.json` with every unit, a `report.json` from the build, `zkit report` for the page.
 6. `zkit init <repo>` writes the project file with strict hygiene and quality gates; `zkit install git-hook
