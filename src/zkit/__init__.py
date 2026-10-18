@@ -4,4 +4,4 @@ import os
 
 __version__ = "0.9.0"
 # GitHub owner/name used by `setup` and in hints. ZKIT_REPOSITORY overrides it (a fork, or a local folder).
-REPOSITORY = os.environ.get("ZKIT_REPOSITORY") or "zeroz41/gcn-zkit"
+REPOSITORY = os.environ.get("ZKIT_REPOSITORY") or "zeroz41/gc-switch-tool-zkit"
