@@ -6,12 +6,13 @@ object, for a unit the report proves complete; or both at once, for a unit only 
 unit's layout with each function the report proves exact taken from the compiled object, its code and its
 relocations. So "linked" follows "matched" function by function instead of waiting for whole units.
 
-mwld lays out each output section by concatenating the objects' sections in command-line order, each at its own
-alignment. So the objects must tile every section in address order: the splits' units, plus one unit per gap that
-alignment padding cannot produce (non-zero bytes, or more zeros than an alignment leaves), minus what the linker
-writes itself (`_rom_copy_info` and `_bss_init_info` ending .init, `_eti_init_info` ending extabindex, the zero
-word ending .ctors and .dtors). One link order must agree with every section's address order, and each delinked
-section's alignment is the smallest that lands it on its original address after the object before it.
+mwld lays out each output section from the objects in command-line order, symbol by symbol (bytes no symbol
+covers vanish, so every byte of a delinked section gets one), each section at its own alignment. So the objects
+must tile every section in address order: the splits' units, plus one unit per gap that alignment padding cannot
+produce (non-zero bytes, a symbol, or more zeros than an alignment leaves), minus what the linker writes itself
+(`_rom_copy_info` and `_bss_init_info` ending .init, `_eti_init_info` ending extabindex, the zero word ending
+.ctors and .dtors). One link order must agree with every section's address order, and each delinked section's
+alignment is the smallest that lands it on its original address after the object before it.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ import re
 import shlex
 import struct
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +64,6 @@ def output_sections(program, symbols: delink.Symbols) -> list[OutputSection]:
         kind, flags, _, _ = delink.section_traits(delink.PPC, name)
         role = "code" if flags & delink.SHF_EXECINSTR else "bss" if kind == SHT_NOBITS else "data"
         tables = [by_name[n] for n in LINKER_OBJECTS if n in by_name and start <= by_name[n].address < end]
-        content, finish = start, start
         if tables:
             content = min(t.address for t in tables)
             finish = max(t.address + t.size for t in tables)
@@ -239,8 +239,8 @@ def _ninja(path: Path) -> tuple[dict[str, str], dict[str, dict[str, str]], list[
             edges.append((outputs.split(), rest.split()[0] if rest.split() else "", scope))
         else:
             scope = None
-            name, _, value = line.partition("=")
-            if _:
+            name, equals, value = line.partition("=")
+            if equals:
                 variables[name.strip()] = _expand(value.strip(), variables)
     return variables, rules, edges
 
@@ -261,7 +261,7 @@ def linker_command(root: Path, build: Path, module: str) -> list[str]:
     edge = next((e for e in edges if e[1] in rules and any(Path(o).name == f"{module}.elf" for o in e[0])), None)
     if edge is None:
         raise ValueError(f"{build} has no edge linking {module}.elf")
-    outputs, rule, own = edge
+    _, rule, own = edge
     scope = {k: _expand(v, variables) for k, v in own.items()}
     command = _expand(rules[rule]["command"], {"out": "\0out", "in": "\0in"}, scope, variables)
     argv, skip = [], False
@@ -297,7 +297,8 @@ def _owner_of(units: list[delink.Unit]):
 
 
 def shared_names(cuts: dict[str, delink.Cut], units: list[delink.Unit], symbols: delink.Symbols,
-                 wanted: dict[str, set[str]], exports: dict[str, set[str]], landing: set[int]) -> tuple[dict[int, str], dict[str, dict[str, int]], set[int]]:
+                 wanted: dict[str, set[str]], exports: dict[str, set[str]],
+                 landing: set[int]) -> tuple[dict[int, str], dict[str, dict[str, int]], set[int]]:
     """(global name of every address an object reaches in another delinked unit, {unit: {label: address}} of names a
     unit must define for others, addresses no object can name), from the delinked references and the names
     compiled code asks for (`wanted`: unit -> names).
@@ -456,13 +457,14 @@ def combine(delinked: Path, compiled: Path, exact: list[str], out: Path, comment
             kept.append((name, f"compiled as {compiled_function.size:#x} bytes in {source.name}"))
             continue
         lo, hi, shift = mine.value, mine.value + mine.size, mine.value - compiled_function.value
-        original = {r[0]: r for r in relocations[section.index] if lo <= r[0] < hi}
+        # by the instruction word: MWCC puts a small-data relocation on the half-word, the delinker on the word
+        original = {r[0] & ~3: r for r in relocations[section.index] if lo <= r[0] < hi}
         mapped, why = [], None
         for reloc in c.relocations(source):
             if not compiled_function.value <= reloc.offset < compiled_function.value + mine.size:
                 continue
             at, target = reloc.offset + shift, c.symbols[reloc.symbol]
-            theirs_at = original.get(at)
+            theirs_at = original.get(at & ~3)
             if target.bind != "local" and target.name and target.kind != "section":
                 reached = address_of.get(target.name)
                 if target.name not in linkable:
@@ -531,9 +533,10 @@ def stack_address(program) -> int | None:
     return None
 
 
-def compiled_units(project: Project, target: str, units: list[delink.Unit]) -> dict[str, dict[str, Any]]:
-    """{unit: {object, complete, exact, code}} for the units the project compiles: the object objdiff compares
-    (`base_path`), whether the report proves the whole unit, the functions it proves exact, the unit's code size."""
+def compiled_units(project: Project, target: str, units: list[delink.Unit]) -> tuple[dict[str, dict], dict]:
+    """({unit: {object, complete, exact, sizes, code}} for the units the project compiles, the report's measures):
+    the object objdiff compares (`base_path`), whether the report proves the whole unit, the functions it proves
+    exact and their sizes, the unit's code size."""
     from .objects import objdiff_units
     config = project.target(target)
     module, repository = config.get("module", ""), config["repository"]
@@ -554,7 +557,7 @@ def compiled_units(project: Project, target: str, units: list[delink.Unit]) -> d
                           "exact": [f["name"] for f in row.get("functions", []) if f.get("fuzzy_match_percent") == 100],
                           "sizes": {f["name"]: int(f.get("size", 0)) for f in row.get("functions", [])},
                           "code": int(row.get("measures", {}).get("total_code", 0))}
-    return out
+    return out, report.get("measures", {})
 
 
 def _placement_align(elf: Elf, section) -> int:
@@ -568,6 +571,67 @@ def _placement_align(elf: Elf, section) -> int:
     if first is not None and first.value == 0 and len(data) >= 0x2C + 8 * (first.index + 1):
         align = max(align, struct.unpack_from(">I", data, 0x2C + 8 * first.index)[0])
     return max(align, 1)
+
+
+def _wanted(elves: dict[str, Elf], combined: dict[str, dict]) -> dict[str, set[str]]:
+    """{unit: names its compiled code refers to}: every undefined name of a compiled object, and the global targets
+    of the exact functions a combined unit takes."""
+    wanted = {name: {s.name for s in elf.symbols[1:] if s.section == 0 and s.name} for name, elf in elves.items()}
+    for name, source in combined.items():
+        elf, exact = Elf.load(source["object"]), set(source["exact"])
+        functions = [s for s in elf.symbols if s.kind == "func" and s.name in exact and 0 < s.section < 0xFF00]
+        wanted[name] = {elf.symbols[r.symbol].name for f in functions for r in elf.relocations(elf.sections[f.section])
+                        if f.value <= r.offset < f.value + f.size and elf.symbols[r.symbol].bind != "local"}
+    return wanted
+
+
+def _sizes(units: list[delink.Unit], elves: dict[str, Elf], cuts: dict[str, delink.Cut]) -> tuple[dict, dict, list]:
+    """(size of each (unit, section) as mwld lays it out, alignment of each compiled one, problems). A compiled
+    section runs to its last symbol, within the unit's range (mwld drops unreferenced symbols past it)."""
+    sizes, fixed, problems = {}, {}, []
+    for unit in units:
+        for section, ranges in unit.ranges.items():
+            key = (unit.name, section)
+            if unit.name not in elves:
+                sizes[key] = next(s[2] if s[1] == SHT_NOBITS else len(s[2]) for s in cuts[unit.name].sections
+                                  if s[0] == section)
+                continue
+            elf = elves[unit.name]
+            held = elf.section(section)
+            if held is None:
+                problems.append(f"{unit.name}: the compiled object has no {section}")
+                sizes[key], fixed[key] = 0, 1
+                continue
+            extent = held.size if section in TABLE_SECTIONS else max(
+                (s.value + s.size for s in elf.symbols if s.section == held.index and s.kind in ("func", "object")),
+                default=0)
+            sizes[key], fixed[key] = min(extent, ranges[-1][1] - ranges[0][0]), _placement_align(elf, held)
+    return sizes, fixed, problems
+
+
+def _force_active(listed: list[str], sections: list[OutputSection], program, symbols: delink.Symbols) -> list[str]:
+    """The names mwld must keep however unreferenced: the project's list, and every function .ctors and .dtors
+    point at (nothing else refers to a static initializer)."""
+    keep = list(listed)
+    for section in (s for s in sections if s.name in TABLE_SECTIONS):
+        size = section.content - section.start
+        for word in struct.unpack(f">{size // 4}I", program.read(section.start, size)):
+            if word in symbols.functions and symbols.functions[word].name not in keep:
+                keep.append(symbols.functions[word].name)
+    return keep
+
+
+def _difference(dol: bytes, original: bytes, units: list[delink.Unit], symbols: delink.Symbols) -> dict | None:
+    """Where the first differing byte is: file offset, address, unit, symbol, and 8 bytes of each."""
+    found = first_difference(dol, original)
+    if found is None:
+        return None
+    offset, address = found
+    unit = _owner_of(units)(address) if address else None
+    holder = symbols.containing(address) if address else None
+    return {"offset": offset, "address": address, "unit": unit.name if unit else None,
+            "symbol": f"{holder.name}+{address - holder.address:#x}" if holder else None,
+            "ours": dol[offset:offset + 8].hex(), "original": original[offset:offset + 8].hex()}
 
 
 def link(project: Project, target: str, out: Path, compiled: str = "functions", splits: Path | None = None,
@@ -591,96 +655,62 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
     symbols = image.symbols
     sections = output_sections(program, symbols)
     units = link_order(link_units(delink.read_units(splits), sections, program.read, symbols), sections)
-    sources = compiled_units(project, target, units) if compiled != "none" else {}
-    kinds, elves, problems = {}, {}, []
-    for unit in units:
-        source = sources.get(unit.name)
-        if source and source["complete"]:
-            kinds[unit.name], elves[unit.name] = "compiled", Elf.load(source["object"])
-        else:
-            kinds[unit.name] = "combined" if compiled == "functions" and source and source["exact"] else "delinked"
-    cuts = {u.name: delink.cut_unit(image, u) for u in units if kinds[u.name] != "compiled"}
-    wanted = {name: {s.name for s in elf.symbols[1:] if s.section == 0 and s.name} for name, elf in elves.items()}
-    for name in (n for n, kind in kinds.items() if kind == "combined"):
-        elf = Elf.load(sources[name]["object"])
-        exact = set(sources[name]["exact"])
-        functions = [s for s in elf.symbols if s.kind == "func" and s.name in exact and 0 < s.section < 0xFF00]
-        wanted[name] = {elf.symbols[r.symbol].name for f in functions for r in elf.relocations(elf.sections[f.section])
-                        if f.value <= r.offset < f.value + f.size and elf.symbols[r.symbol].bind != "local"}
+    sources, measures = compiled_units(project, target, units) if compiled != "none" else ({}, {})
+    elves = {u.name: Elf.load(sources[u.name]["object"]) for u in units
+             if u.name in sources and sources[u.name]["complete"]}
+    combined = {u.name: sources[u.name] for u in units if compiled == "functions" and u.name in sources and
+                u.name not in elves and sources[u.name]["exact"]}
+    cuts = {u.name: delink.cut_unit(image, u) for u in units if u.name not in elves}
     exports = {name: {s.name for s in elf.symbols if 0 < s.section < 0xFF00 and s.bind != "local" and s.name}
                for name, elf in elves.items()}
-    elsewhere = set().union(*exports.values())
     linker = LINKER_NAMES | {f"_{edge}_{s.name.lstrip('.')}{rom}" for s in sections for edge in ("f", "e")
                              for rom in ("", "_rom")}
     placed = {e.name: e.address for e in [*symbols.entries, *program.labels] if e.name in linker}
     linker = {name: placed.get(name) for name in linker}
-    names, labels, unnamed = shared_names(cuts, units, symbols, wanted, exports, set(placed.values()))
-    sizes, fixed = {}, {}
-    for unit in units:
-        for section, ranges in unit.ranges.items():
-            key = (unit.name, section)
-            if unit.name in elves:
-                held = elves[unit.name].section(section)
-                if held is None:
-                    problems.append(f"{unit.name}: the compiled object has no {section}")
-                # what mwld lays out: up to the object's last symbol (it drops unreferenced ones past the range)
-                extent = max((s.value + s.size for s in elves[unit.name].symbols if held is not None and
-                              s.section == held.index and s.kind in ("func", "object")), default=0)
-                sizes[key] = min(extent if section not in TABLE_SECTIONS else held.size if held else 0,
-                                 ranges[-1][1] - ranges[0][0])
-                fixed[key] = _placement_align(elves[unit.name], held) if held is not None else 1
-            else:
-                sizes[key] = next(s[2] if s[1] == SHT_NOBITS else len(s[2]) for s in cuts[unit.name].sections
-                                  if s[0] == section)
+    names, labels, unnamed = shared_names(cuts, units, symbols, _wanted(elves, combined), exports,
+                                          set(placed.values()))
+    sizes, fixed, problems = _sizes(units, elves, cuts)
     align, script, troubles = alignments(units, sections, sizes, fixed)
     problems += troubles
     address_of = {e.name: e.address for e in symbols.entries}
     address_of.update((name, address) for address, name in names.items())
+    linkable = set().union(*exports.values()) | set(linker) | {name for d in labels.values() for name in d} | {
+        names.get(e.address, e.name) for cut in cuts.values() for e, _, _ in cut.entries(symbols)}
     for defined in labels.values():
         address_of.update(defined)
-    linkable = set(elsewhere) | set(linker) | {names.get(e.address, e.name) for cut in cuts.values()
-                                          for e, _, _ in cut.entries(symbols)}
-    linkable |= {name for defined in labels.values() for name in defined}
     objects, functions, kept = [], [], []
     for unit in units:
-        stem = unit.name.rsplit(".", 1)[0]
-        if kinds[unit.name] == "compiled":
+        if unit.name in elves:
             objects.append(sources[unit.name]["object"])
             continue
+        stem = unit.name.rsplit(".", 1)[0]
         path = out / "obj" / f"{stem}.o"
-        plan = delink.Plan(names, labels.get(unit.name, {}), linker, align.get(unit.name, {}), comment,
-                           frozenset(unit.ranges) - set(TABLE_SECTIONS), frozenset(unnamed))
-        delink.write_unit(image, cuts[unit.name], path, plan)
-        if kinds[unit.name] == "combined":
-            source = sources[unit.name]
-            combined = out / "combined" / f"{stem}.o"
-            taken, held = combine(path, source["object"], source["exact"], combined, comment, address_of, linkable)
+        delink.write_unit(image, cuts[unit.name], path, delink.Plan(
+            names, labels.get(unit.name, {}), linker, align.get(unit.name, {}), comment,
+            frozenset(unit.ranges) - set(TABLE_SECTIONS), frozenset(unnamed)))
+        if unit.name in combined:
+            source, path = combined[unit.name], out / "combined" / f"{stem}.o"
+            taken, held = combine(out / "obj" / f"{stem}.o", source["object"], source["exact"], path, comment,
+                                  address_of, linkable)
             functions += [(unit.name, name, source["sizes"].get(name, 0)) for name in taken]
             kept += [(unit.name, name, why) for name, why in held]
-            path = combined
         objects.append(path)
-    tables = [s for s in sections if s.name in TABLE_SECTIONS]
-    keep = list(settings["force_active"])
-    for section in tables:
-        for word in struct.unpack(f">{(section.content - section.start) // 4}I",
-                                  program.read(section.start, section.content - section.start)):
-            if word in symbols.functions and symbols.functions[word].name not in keep:
-                keep.append(symbols.functions[word].name)
     top = stack_address(program)
-    stack = top - sections[-1].end if top else 0x10000
     lcf = out / "link.lcf"
-    lcf.write_text(linker_script(script, sections[0].start, stack, keep), encoding="utf-8")
+    lcf.write_text(linker_script(script, sections[0].start, top - sections[-1].end if top else 0x10000,
+                                 _force_active(settings["force_active"], sections, program, symbols)),
+                   encoding="utf-8")
     elf_path, dol_path = out / f"{module}.elf", out / f"{module}.dol"
     elf_path.unlink(missing_ok=True)
     run = run_linker(linker_command(root, build or root / "build.ninja", module), lcf, objects, elf_path)
-    counts = collections.Counter(kinds.values())
     result: dict[str, Any] = {
         "target": target, "compiled": compiled, "objects": len(objects), "out": str(out),
-        "units": {"delinked": counts["delinked"], "compiled": counts["compiled"], "combined": counts["combined"],
+        "units": {"delinked": len(cuts) - len(combined), "compiled": len(elves), "combined": len(combined),
                   "gaps": sum(1 for u in units if u.name.startswith("gap_"))},
         "functions_from_compiled": len(functions),
-        "code_from_compiled": sum(s["code"] for n, s in sources.items() if kinds.get(n) == "compiled") +
-        sum(size for *_, size in functions),
+        "code_from_compiled": sum(sources[n]["code"] for n in elves) + sum(size for *_, size in functions),
+        "report": {k: int(measures[k]) for k in ("total_code", "matched_code", "complete_code") if k in measures},
+        "unnamed_references": len(unnamed),
         "kept_original": [{"unit": u, "function": f, "why": w} for u, f, w in kept],
         "problems": problems, "linker_output": (run.stdout + run.stderr).strip()[-4000:]}
     if run.returncode or not elf_path.is_file():
@@ -691,13 +721,7 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
     original = program.image.raw
     result.update(linked=True, dol=str(dol_path), sha1=hashlib.sha1(dol).hexdigest(),
                   original_sha1=hashlib.sha1(original).hexdigest(), identical=dol == original)
-    difference = first_difference(dol, original)
+    difference = _difference(dol, original, units, symbols)
     if difference:
-        offset, address = difference
-        unit = _owner_of(units)(address) if address else None
-        holder = symbols.containing(address) if address else None
-        result["first_difference"] = {
-            "offset": offset, "address": address, "unit": unit.name if unit else None,
-            "symbol": f"{holder.name}+{address - holder.address:#x}" if holder else None,
-            "ours": dol[offset:offset + 8].hex(), "original": original[offset:offset + 8].hex()}
+        result["first_difference"] = difference
     return result

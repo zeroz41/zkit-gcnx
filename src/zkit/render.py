@@ -1104,11 +1104,18 @@ def hygiene(data: dict) -> str:
 
 
 def link(data: dict) -> str:
-    units = data["units"]
+    units, report = data["units"], data.get("report", {})
     lines = [f"{data['objects']} objects ({units['delinked']} delinked, {units['compiled']} compiled, "
              f"{units['combined']} combined; {units['gaps']} of them gaps), {data['functions_from_compiled']} functions "
-             f"of partly matched units from compiled code; {data['code_from_compiled']:,} code bytes linked from "
-             "compiled objects"]
+             "of partly matched units from compiled code"]
+    total = report.get("total_code")
+    share = lambda value: f"{value:,} code bytes" + (f" ({100 * value / total:.2f}%)" if total else "")
+    lines.append(f"linked from compiled objects: {share(data['code_from_compiled'])}" + (
+        f"; whole units alone: {share(report['complete_code'])}; matched: {share(report['matched_code'])}"
+        if "complete_code" in report else ""))
+    if data["unnamed_references"]:
+        lines.append(f"{data['unnamed_references']} addresses are reached that a compiled object keeps local: those "
+                     "references keep the original's bytes")
     for problem in data["problems"][:8]:
         lines.append(f"  problem: {problem}")
     if data["kept_original"]:
@@ -1124,4 +1131,3 @@ def link(data: dict) -> str:
         lines.append(f"first difference at file offset {d['offset']:#x} (address {d['address']:#010x}, unit "
                      f"{d['unit']}, {d['symbol']}): ours {d['ours']}, original {d['original']}")
     return "\n".join(lines)
-

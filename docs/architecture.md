@@ -15,7 +15,8 @@ answers      bridge.py (lookup, refs, port-plan, check) · inspect_dol.py (asm, 
              progress.py (reports, baselines, page) · quality.py · hygiene.py · session.py · activity.py
              native.py · fidelity.py · tiers.py · architecture.py · coverage.py (ports)
                 │
-structure    delink.py (objects per unit) · units.py (unit boundaries) · vtables.py · classes.py (classes)
+structure    delink.py (objects per unit) · link.py (the original relinked) · units.py (unit boundaries)
+             vtables.py · classes.py (classes)
              analyze.py (all of it into a folder) · score.py · mwmap.py (CodeWarrior maps) · cwnames.py (names)
                 │
 program      program.py: functions, data objects, sections, small-data bases, references between them
@@ -60,6 +61,18 @@ pointer into the middle of a function is reported, since it means a start the sy
 The gate it is held to: on a large GameCube decomp, every function of every fully matched unit equals the compiled
 object (bytes and relocations; relocations to the same constant under another name count as equal), and every data
 pointer of those units is found.
+
+### Linking
+
+`link.py` puts a GameCube executable back together with the project's own CodeWarrior linker (the command its
+build.ninja links with) and requires the DOL it writes to equal the original byte for byte. Each unit is one
+object: delinked, the compiled object of a unit the report proves complete, or both combined, the original unit
+with each exact function's code and relocations taken from the compiled object, so linked code follows matched code
+function by function. mwld lays sections out symbol by symbol in command-line order, so the objects tile every
+section (gap units for what no unit claims, fill symbols over bytes no symbol covers, the linker's own tables left
+to it), one link order agrees with every section's address order, and each delinked section takes the smallest
+alignment that lands it on its original address. A combined function whose compiled relocations reach other
+addresses than the original's stays delinked: the report can call a function exact whose calls go elsewhere.
 
 ### Units, classes and names
 
@@ -106,6 +119,7 @@ they survive renames, unit folds and file moves.
 | `compiled` / `try` | Whether a compiled function equals the original, and where it differs | Why it differs |
 | `unit` | A unit's ranges, functions, data and the references crossing its boundary; `--blocked` and `--gaps` | Why a link fails (order and alignment need a link attempt) |
 | `delink` / `units` / `classes` / `analyze` | What the original proves about its structure, with the evidence | Anything the evidence does not reach; those stay placeholders |
+| `link` | Whether the units, compiled where matched, relink to the original, and the first byte where they do not | Whether a unit is right where the delinked original stands in for it |
 | `progress` | objdiff's numbers and what changed since a baseline | That the build is current |
 | `quality` / `hygiene` | Decompiler debt in the source; what must not be committed | Whether a name is right |
 | `check` / `gate` | Rule hits on added lines; the repo's finish gate | Semantics; whether the gate passes until it is run |
@@ -126,9 +140,9 @@ The contracts (`zkit contract decomp|port`) are the rules agents follow; the ski
   guesses a name, a boundary or a behavior.
 - **Measured against truth.** Structure recovery is scored against fully matched units and real symbol maps, and
   against what the tools zkit replaces produce; a change that scores worse does not ship.
-- **Read-only by default.** Only `handoff`, `report`, `delink`, `analyze`, `objects --save` and `cache --prune`
-  write, and only to zkit's own folders or the folder named. Builds, banking and emulators stay with each repo's
-  own tools and the user's permission model.
+- **Read-only by default.** Only `handoff`, `report`, `delink`, `link`, `analyze`, `objects --save` and
+  `cache --prune` write, and only to zkit's own folders or the folder named (`link` runs the project's linker
+  there). Builds, banking and emulators stay with each repo's own tools and the user's permission model.
 - **Compact text first**, JSON on request (`--json`, `response_format=json`), with output budgets so an answer
   never floods an agent's context.
 - **Installed as a normal command.** `uv tool install` puts `zkit` on PATH; the plugins call it by name and the
