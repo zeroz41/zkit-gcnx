@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-ANY_HEX = re.compile(r"^(?:0x)?([0-9A-Fa-f]{6,16})$")
+ANY_HEX = re.compile(r"^(?:0[xX])?([0-9A-Fa-f]{6,16})$")
 
 
 @dataclass(frozen=True)

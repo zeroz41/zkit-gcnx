@@ -37,6 +37,7 @@ from .platform import GameCube, Platform, for_target
 from .project import Project
 
 SCHEMA = 7
+CALLS_VERSION = 2  # bump when the decoding of calls/xrefs changes (2: r2/r13 read from all of __init_registers)
 TEXT_SUFFIXES = {".md", ".txt", ".c", ".h", ".cc", ".cpp", ".hpp", ".hh", ".inc", ".json", ".py",
                  ".s", ".cmake", ".toml", ".yaml", ".yml", ".lua", ".rs", ".cs", ".glsl", ".hlsl"}
 SKIP_DIRS = {"__pycache__", "node_modules"}
@@ -417,9 +418,9 @@ def _calls_stamp(project: Project, db: sqlite3.Connection, name: str, target: di
     original = _target_file(project, target, "original")
     if original is None or not original.is_file():
         return None
-    # Edges depend on the executable and the function boundaries, not on match percentages:
-    # a rebuild that only changes match state does not re-decode the image.
-    return f"{_stamp(original)}:{_meta(db, f'bounds:{name}')}"
+    # Edges depend on the executable, the function boundaries and how r2/r13 are found, not on match
+    # percentages: a rebuild that only changes match state does not re-decode the image.
+    return f"{_stamp(original)}:{_meta(db, f'bounds:{name}')}:{CALLS_VERSION}:{target.get('sda_bases')}"
 
 
 def _load_calls(project: Project, db: sqlite3.Connection, name: str, target: dict) -> None:

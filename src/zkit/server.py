@@ -2,8 +2,9 @@
 
 Tools run in worker threads, so one session's subagents calling in parallel do not queue
 behind each other. Arguments are forgiving where agents were observed to guess (hex strings
-for sizes, `query` for `words`, `path` for `paths`, `repository` for `repo`); any other
-unknown key is rejected with the list of valid ones instead of being silently ignored.
+for sizes, and the ALIASES below, such as `repository` for `repo` or `path` for `paths`); any
+other unknown key, or a value of the wrong kind, is rejected with the tool's valid arguments
+instead of being silently ignored. A tool's repo defaults to the repo the session works in.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import functools
 import json
 import re
+from pathlib import Path
 from typing import Literal
 
 import anyio
@@ -28,8 +30,8 @@ Paths = list[str] | str | None
 Number = int | str | None
 
 
-def _int(value: Number, default: int | None = None) -> int | None:
-    """int, decimal/0x string, or a bare 8-digit hex address ("80241B00", seen from Codex)."""
+def _int(value: Number, default: int | None = None, name: str = "value") -> int | None:
+    """int, decimal/0x string, or an address as the platform writes it ("80241B00", "mymodule+0x1C")."""
     if value is None or value == "":
         return default
     if isinstance(value, int):
@@ -37,7 +39,13 @@ def _int(value: Number, default: int | None = None) -> int | None:
     text = str(value).strip()
     if bridge.HEX.match(text):
         return int(bridge.HEX.match(text)[1], 16)
-    return int(text, 0)
+    keyed = bridge.module_address(text)
+    if keyed is not None:
+        return keyed
+    try:
+        return int(text, 0)
+    except ValueError:
+        raise ValueError(f"{name} must be a number (decimal or 0x hex) or an address, not {text!r}") from None
 
 
 def _paths(paths: Paths, path: str | None = None) -> list[str] | None:
@@ -138,9 +146,17 @@ def create_server(project: Project) -> FastMCP:
     def out(data, text: str, response_format: Format) -> str:
         return _json(data) if response_format == "json" else _cap(text)
 
-    def native_default(p: Project) -> str | None:
-        natives = bridge.role_repos(p, "native")
-        return natives[0] if len(natives) == 1 else None
+    def default_repo(role: str | None = None) -> str | None:
+        """The repo the session works in: the configured repo (or a worktree of it) holding the server's working
+        directory, when it has the wanted role; else the only native repo (native tools) or the decomp."""
+        p = current()
+        name, worktree = p.locate(Path.cwd())
+        if name and (role is None or p.config["repositories"][name].get("role") == role):
+            return worktree or name
+        if role == "native":
+            natives = bridge.role_repos(p, "native")
+            return natives[0] if len(natives) == 1 else None
+        return (bridge.role_repos(p, "decomp") or list(p.config["repositories"]) or [None])[0]
 
     @tool()
     def zkit_brief(repo: str | None = None, full: bool = False, response_format: Format = "text") -> str:
@@ -177,7 +193,7 @@ def create_server(project: Project) -> FastMCP:
         instead of grepping symbols.txt or parsing report.json."""
         p = decomp(repo)
         items = [queries] if isinstance(queries, str) else queries
-        data = bridge.names(p, items, target(p), regex, unit, _int(start), _int(end), max(1, min(limit, 2000)),
+        data = bridge.names(p, items, target(p), regex, unit, _int(start, name="start"), _int(end, name="end"), max(1, min(limit, 2000)),
                             provisional, below, sort)
         return out(data, render.names(data), response_format)
 
@@ -187,7 +203,7 @@ def create_server(project: Project) -> FastMCP:
         spaces for a batch), decoded from the original code (lis/addi and r2/r13 forms), plus data words pointing
         at it. Use before scanning the DOL."""
         p = decomp(repo)
-        data = bridge.batch(bridge.query_list(query), lambda q: bridge.xrefs(p, q, target(p), size=_int(size)))
+        data = bridge.batch(bridge.query_list(query), lambda q: bridge.xrefs(p, q, target(p), size=_int(size, name="size")))
         return out(data, render.xrefs(data), response_format)
 
     @tool(enabled=any(t.get("splits") for t in project.config.get("targets", {}).values()))
@@ -261,7 +277,7 @@ def create_server(project: Project) -> FastMCP:
         re-typings, inline asm. at=REV measures a git revision; since=REV compares it with the working tree (or
         with at). Measure cleanup with this, never with a tool's own summary line."""
         from . import quality
-        p, key = scoped(repo, (bridge.role_repos(current(), "decomp") or [None])[0])
+        p, key = scoped(repo, default_repo())
         if key is None:
             raise ValueError("Pass repo")
         if since:
@@ -279,7 +295,7 @@ def create_server(project: Project) -> FastMCP:
         bodies, AI co-author trailers and identity (since=REV judges REV..HEAD); uncommitted files, stashes,
         unmerged branches and worktrees."""
         from . import hygiene
-        p, key = scoped(repo, (bridge.role_repos(current(), "decomp") or list(current().config["repositories"]))[0])
+        p, key = scoped(repo, default_repo())
         data = hygiene.audit(p, key, f"{since}..HEAD" if since else None, max(1, min(limit, 500)),
                              tuple(parts or ("commits", "files", "tree")))
         return out(data, render.hygiene(data), response_format)
@@ -329,8 +345,8 @@ def create_server(project: Project) -> FastMCP:
             bridge.query_list(address)
         if not queries:
             raise ValueError("Pass query (address or name; several separated by spaces)")
-        size = _int(size) or _int(length)
-        cap = _int(lines) or _int(max_instructions) or 400
+        size = _int(size, name="size") or _int(length, name="length")
+        cap = _int(lines, name="lines") or _int(max_instructions, name="max_instructions") or 400
         for q in queries[:20]:
             start = bridge.resolve_address(p, q, target(p)) if size else None
             found = [start] if start is not None else bridge.resolve(p, q, target(p))
@@ -380,8 +396,8 @@ def create_server(project: Project) -> FastMCP:
             raise ValueError("Pass address (hex or symbol name)")
         layout = fields.split(",") if fields else None
         type = bridge.data_type(type)
-        size = _int(size) or _int(length)
-        n = _int(count) or (inspect_dol.count_for_size(size, type, layout, _int(stride))
+        size = _int(size, name="size") or _int(length, name="length")
+        n = _int(count, name="count") or (inspect_dol.count_for_size(size, type, layout, _int(stride, name="stride"))
                             if size and type != "str" else 16)
 
         def one(q: str) -> dict:
@@ -389,15 +405,17 @@ def create_server(project: Project) -> FastMCP:
             value = bridge.resolve_address(p, q, target(p))
             if value is None:
                 raise ValueError(f"No address or symbol matches {q}")
-            return inspect_dol.read_data(p, target(p), value, kind, rows, _int(stride), layout)
+            return inspect_dol.read_data(p, target(p), value, kind, rows, _int(stride, name="stride"), layout)
         data = bridge.batch(wanted, one)
         return out(data, render.data_rows(data), response_format)
 
     @tool(enabled=bool(project.config.get("targets")))
     def zkit_compiled(query: str, limit: int = 24, repo: str | None = None, response_format: Format = "text") -> str:
         """A function compiled vs the original (from the unit's objects in objdiff.json): identical, or each
-        differing word with relocations and both disassemblies side by side; a unit name lists every function of the
-        unit. Exact checks from the objects the build already wrote; objdiff's report stays the match authority."""
+        differing word with relocations and both disassemblies side by side; a unit name or its source path lists
+        every function of the unit; several queries (space separated) give a batch. Relocations to the same place,
+        constant or jump table under other names count as identical. Reads the objects the last build wrote (and
+        says when one is older than its source); objdiff's report stays the match authority."""
         p = decomp(repo)
         data = bridge.compiled(p, query, target(p), max(1, min(limit, 200)))
         return out(data, render.compiled(data), response_format)
@@ -446,13 +464,15 @@ def create_server(project: Project) -> FastMCP:
                   limit: Number = None) -> str:
         """Read repo:path or repo:path:line (centred on that line), up to 400 lines. Or pass repo + path, with
         start/end (inclusive) or line."""
-        start, lines = _int(start, 1), _int(max_lines, None) or _int(limit, None) or _int(lines, 120)
+        start, lines = _int(start, 1, "start"), _int(max_lines, None, "max_lines") or _int(limit, None, "limit") \
+            or _int(lines, 120, "lines")
         if not reference and path and not repo and path.partition(":")[0] in current().config["repositories"]:
             reference = path
-        if _int(end) is not None:
-            lines = max(1, _int(end) - start + 1)
-        if _int(line) is not None and (reference or (repo and path)) and not (reference and reference.count(":") >= 2):
-            reference = (reference or f"{repo}:{path}") + f":{_int(line)}"
+        end, line = _int(end, name="end"), _int(line, name="line")
+        if end is not None:
+            lines = max(1, end - start + 1)
+        if line is not None and (reference or (repo and path)) and not (reference and reference.count(":") >= 2):
+            reference = (reference or f"{repo}:{path}") + f":{line}"
         if not reference:
             if not (repo and path):
                 raise ValueError("Pass reference='repo:path[:line]' (or repo and path)")
@@ -471,7 +491,7 @@ def create_server(project: Project) -> FastMCP:
         functions without an original address, forbidden patterns, include-boundary rules, near-miss/folded
         constants. Decomp: added lines that bring in decompiler debt (hand-mangled names, raw offsets,
         temporaries, placeholders). A problem the replaced lines already had is reported as debt, not new."""
-        p, key = scoped(repo, native_default(current()))
+        p, key = scoped(repo, default_repo())
         if key is None:
             raise ValueError("Pass repo (decomp, native or a worktree path)")
         data = bridge.check(p, key, base, _paths(paths, path), target(p), staged)
@@ -491,7 +511,7 @@ def create_server(project: Project) -> FastMCP:
         plan those instead: missing/disabled names block, fixture closure, costs, prebuilds (jobs). Executes
         nothing."""
         from .native import impact, test_plan
-        p, key = scoped(repo, native_default(current()))
+        p, key = scoped(repo, default_repo("native"))
         if key is None:
             raise ValueError("Pass repo (a native repo or a worktree path)")
         if names:
@@ -507,7 +527,7 @@ def create_server(project: Project) -> FastMCP:
         build.ninja, compile_commands.json and file times. Program names that are not linked in this build are
         listed. Executes no build."""
         from .native import stale
-        p, key = scoped(repo, native_default(current()))
+        p, key = scoped(repo, default_repo("native"))
         if key is None:
             raise ValueError("Pass repo (a native repo or a worktree path)")
         data = stale(p, key, _paths(programs))
@@ -541,7 +561,7 @@ def create_server(project: Project) -> FastMCP:
         this for the port's state, `zkit_demand` for the decomp work the port waits on, `zkit_consts` for one
         file's literals."""
         from .fidelity import grounding
-        p, key = scoped(repo, native_default(current()))
+        p, key = scoped(repo, default_repo("native"))
         data = grounding(p, key, _paths(paths, path or folder), target(p), max(1, min(limit, 100)))
         return out(data, render.grounding(data), response_format)
 
@@ -554,7 +574,7 @@ def create_server(project: Project) -> FastMCP:
         infrastructure (platform plumbing). A path no pattern matches is exact. paths (files or folders) gives
         each file's tier; without paths, file counts per tier and folder."""
         from .tiers import summary
-        p, key = scoped(repo, native_default(current()))
+        p, key = scoped(repo, default_repo("native"))
         data = summary(p, key, _paths(paths, path))
         return out(data, render.tiers(data), response_format)
 
@@ -567,7 +587,7 @@ def create_server(project: Project) -> FastMCP:
         first), folded (two loaded constants combined), near (within 2%: check the asm for folding or rounding
         first) or unsourced. paths: files or folders."""
         from .fidelity import constant_audit
-        p, key = scoped(repo, native_default(current()))
+        p, key = scoped(repo, default_repo("native"))
         data = constant_audit(p, key, _paths(paths, path), target(p))
         return out(data, render.consts(data), response_format)
 
@@ -578,7 +598,6 @@ def create_server(project: Project) -> FastMCP:
         files to re-verify. since=<path of an old report.json> compares match state with that report instead.
         Read only: after re-verifying, record the new baseline with the CLI `zkit drift --accept`. repo is
         accepted and ignored: drift joins the decomp with every native repo."""
-        from pathlib import Path
         from .fidelity import drift
         p = current()
         data = drift(p, target(p), False, Path(since).expanduser().resolve() if since else None)
@@ -591,7 +610,7 @@ def create_server(project: Project) -> FastMCP:
         files, helper names defined in many files, and the central files a new variant must edit: files naming
         several of terms (e.g. terms="Goblin,Wolf,Bear") or of a manifest variant group (variants="<group>"; an
         unknown group lists the configured ones)."""
-        p, key = scoped(repo, native_default(current()))
+        p, key = scoped(repo, default_repo("native"))
         data = bridge.reuse(p, key, bridge.variant_terms(p, variants, terms))
         return out(data, render.reuse(data), response_format)
 
@@ -613,10 +632,10 @@ def create_server(project: Project) -> FastMCP:
         held in one checkout (repo or worktree path; default decomp), quiet for `settle` s; gives up after
         timeout (max 600 s). Use instead of pgrep/sleep loops. Advisory: still build under the repo's lock."""
         from .activity import wait_idle
-        p, key = scoped(repo, bridge.role_repos(current(), "decomp")[0] if bridge.role_repos(current(), "decomp") else None)
+        p, key = scoped(repo, default_repo())
         if key is None:
             raise ValueError("Pass repo (decomp, native or a worktree path)")
-        data = wait_idle(p, key, dict(p.overlays).get(key), min(max(_int(timeout, 120), 0), 600), max(float(settle), 0))
+        data = wait_idle(p, key, dict(p.overlays).get(key), min(max(_int(timeout, 120, "timeout"), 0), 600), max(float(settle), 0))
         return out(data, render.wait(data), response_format)
 
     @tool(writes)
@@ -628,7 +647,7 @@ def create_server(project: Project) -> FastMCP:
         if text is not None and note is not None and text != note:
             raise ValueError("Pass text or note, not conflicting notes")
         text = text if text is not None else note
-        p, key = scoped(repo, native_default(current()) or (bridge.role_repos(current(), "decomp") or [None])[0])
+        p, key = scoped(repo, default_repo())
         if key is None:
             raise ValueError("Pass repo")
         if not text or not text.strip():
@@ -666,7 +685,7 @@ def create_server(project: Project) -> FastMCP:
         """Before ending: the repo's finish gate (commands to run), copies that disagree, and what THIS session
         changed: progress delta since its start (by address), commits that break the commit rules, and what it
         leaves behind (uncommitted files, stashes, branches, worktrees)."""
-        p, key = scoped(repo, native_default(current()))
+        p, key = scoped(repo, default_repo())
         data = session.gate(p, key)
         return out(data, render.gate(data), response_format)
 
@@ -674,7 +693,7 @@ def create_server(project: Project) -> FastMCP:
     def zkit_recipes(repo: str | None = None, query: str = "", limit: int = 20, repository: str | None = None) -> str:
         """Existing fidelity recipes (boundary + exclusions) matching a word, before inventing a new check."""
         from .workflows import recipe_inventory
-        p, key = scoped(repo or repository, native_default(current()))
+        p, key = scoped(repo or repository, default_repo("native"))
         return _cap(json.dumps(recipe_inventory(p, key, query, max(1, min(limit, 50))), ensure_ascii=False))
 
     @tool(enabled=has_recipes)
@@ -700,9 +719,32 @@ def create_server(project: Project) -> FastMCP:
     return mcp
 
 
+# Argument names agents use for a parameter the tool calls otherwise: alias -> candidate parameters, first
+# one the tool has (and was not given) wins.
+ALIASES = {"repository": ("repo",), "path": ("paths",), "folder": ("paths",), "query": ("queries", "words"),
+           "queries": ("query",), "address": ("query", "addresses"), "addresses": ("query",), "addrs": ("query",)}
+
+
+def _explain(tool: str, fields: set[str], error) -> str:
+    """A validation error as one sentence naming the arguments, and the tool's valid ones."""
+    unknown, problems, seen = [], [], set()
+    for item in error.errors():
+        where = ".".join(str(part) for part in item["loc"][:1]) or "arguments"
+        if item["type"] == "extra_forbidden":
+            unknown.append(where)
+        elif where not in seen:
+            seen.add(where)
+            given = repr(item.get("input"))
+            problems.append(f"{where} is required" if item["type"] == "missing" else
+                            f"{where}: {item['msg']} (got {given[:60]})")
+    parts = ([f"unknown argument(s) {', '.join(unknown)}"] if unknown else []) + problems
+    return f"{'; '.join(parts)}. {tool} takes: {', '.join(sorted(fields))}"
+
+
 def _strict_arguments(mcp: FastMCP) -> None:
-    """Reject unknown argument names (pydantic ignores them by default, which silently widened scopes)."""
-    from pydantic import ConfigDict
+    """Reject unknown argument names (pydantic ignores them by default, which silently widened scopes), map
+    the ALIASES, and say in one line what was wrong instead of returning pydantic's error dump."""
+    from pydantic import ConfigDict, ValidationError
     try:
         tools = mcp._tool_manager.list_tools()
     except AttributeError:
@@ -712,7 +754,22 @@ def _strict_arguments(mcp: FastMCP) -> None:
         model = getattr(metadata, "arg_model", None)
         if model is None:
             continue
-        strict = type(model.__name__, (model,), {"model_config": ConfigDict(**model.model_config, extra="forbid")})
+        fields = set(model.model_fields)
+
+        def validate(cls, obj, *args, _base=model, _fields=fields, _tool=item.name, **kwargs):
+            if isinstance(obj, dict):
+                obj = dict(obj)
+                for alias, targets in ALIASES.items():
+                    if alias in obj and alias not in _fields:
+                        target = next((t for t in targets if t in _fields and t not in obj), None)
+                        if target:
+                            obj[target] = obj.pop(alias)
+            try:
+                return _base.model_validate.__func__(cls, obj, *args, **kwargs)
+            except ValidationError as error:
+                raise ValueError(_explain(_tool, _fields, error)) from None
+        strict = type(model.__name__, (model,), {"model_config": ConfigDict(**model.model_config, extra="forbid"),
+                                                 "model_validate": classmethod(validate)})
         try:
             metadata.arg_model = strict
             item.parameters["additionalProperties"] = False

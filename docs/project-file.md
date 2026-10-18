@@ -47,6 +47,7 @@ Relative `root` paths are relative to the project file. All other paths are rela
 | `module` | Name of the main module in the report (default `main`). |
 | `rels` | `false` to leave REL modules out. By default every REL in the report is indexed. |
 | `provisional_name_pattern` | Regex for auto names (default: `fn_`, `lbl_`, `FUN_`, `sub_` + address, ...). |
+| `library_categories` | objdiff progress categories whose units are SDK/runtime libraries (default `sdk`, `runtime`, `msl`). `port-plan` marks their functions `platform`; their hand-written assembly counts as its own reference. |
 | `sda_bases` | `{"r2": "0x...", "r13": "0x..."}` when `__init_registers` can't be decoded. |
 
 **REL modules.** REL functions have no fixed address, so they are written `module+0xOFFSET` (for example
@@ -57,7 +58,7 @@ disassembly (`build/<GAMEID>/<module>/asm/`). DOL lookups therefore list REL cal
 
 | Field | Meaning |
 | --- | --- |
-| `role` | `decomp` or `native`. A `native` repo enables the port tools (`port-plan`, `demand`, `impact`, `grounding`, `suspects`, `consts`, `drift`, `tiers`, `reuse`). |
+| `role` | `decomp` or `native`. A `native` repo enables the port tools (`port-plan`, `demand`, `grounding`, `consts`, `drift`, `tiers`, `reuse`; `impact` and `stale` with a `tests` block). |
 | `index_paths`, `index_exclude` | What `search` covers (folders or files; exclude takes regexes). |
 | `cite_paths`, `code_paths` | Where original addresses (`8xxxxxxx`) count as citations, and which of those are code. |
 | `address_pattern` | Regex with one hex group for citations (default: GameCube RAM `8[01]xxxxxx`). |
@@ -67,15 +68,15 @@ disassembly (`build/<GAMEID>/<module>/asm/`). DOL lookups therefore list REL cal
 | `rules` | Short rules shown in every brief. Keep them short; the repo's `AGENTS.md` stays the contract. |
 | `start`, `finish` | Commands shown in the brief. `finish` is the gate `zkit-finish` runs. |
 | `finish_sources` | `[{path, after, until}]` sections of docs that must list the same finish commands (`gate` reports drift). |
-| `checks` | Lint for `zkit check`: `source_globs`, `require_citation`, `citation_exempt`, `forbidden: [{pattern, paths, message}]`, and `hold_rule` (`error`, `warning` or `off`): native code citing decomp functions that are not ready (exact, named and clean). |
+| `checks` | Lint for `zkit check`: `source_globs`; `forbidden: [{pattern, paths, message}]`; native citations: `require_citation` (new exact-tier functions need an original address, at the definition or its declaration in the file's own header), `citation_min_lines` (shorter functions are exempt, default 6), `citation_exempt` (regex of the marker that declares a function native-only; none by default), `resolve_citations` (`false` silences unresolved-address warnings), `bare_citations` (message shown for `0x`-prefixed citations, when the project cites bare hex), `hold_rule` (`error`, `warning` or `off`: citing decomp that is not ready, in any tier). |
 | `quality` | Decomp source debt (`zkit quality`): `paths` and `exclude` (regexes) to measure, `disable` to drop catalog patterns, `patterns: {key: {regex, label, group}}` to add your own, `gate` (`error` makes added debt fail `check`). |
 | `hygiene` | What must not be committed (`zkit hygiene`, the commit hooks): `identity` (`Name <email>`), `subject_max` (72), `body` (commit bodies allowed, default no), `agent_docs` and `dated_docs` (`forbid` or `allow`), `max_docs`, `script_roots`, `script_users`, `ignore`, `forbidden_files`, `allowed_files`, `max_file_kb`. |
 | `locks`, `builders` | Build lock files and extra build-tool regexes that `wait` and `activity` watch. |
 | `gate_commands` | Extra regexes for your own tools, so `gate` can compare the finish steps your docs list. |
 | `router` | `{brief, lane_stats}`: JSON files your own work router writes (`{"next": {"lane", "commands"}}`); the brief shows its lane. |
 | `status_doc`, `status_section` | Native: the doc whose active-work section the brief excerpts. |
-| `fidelity_tiers` | Native: ordered `{tier, pattern}`; tiers are `exact`, `equivalent`, `liberty`, `infrastructure`. |
-| `tests` | `{build_dir, include_roots}` with CTest registration and a CMake `compile_commands.json` for `impact`; `test-plan` only needs the configured CTest catalog. Optional `catalog` names a saved JSON catalog relative to the repo. Optional `apps` lists the programs people run (for `stale` and the finish gate); `stale` also needs a Ninja `build.ninja`. |
+| `fidelity_tiers` | Native: ordered `{tier, pattern, meaning, verify}`, first match wins; tiers are `exact`, `equivalent`, `liberty`, `infrastructure`. A path no pattern matches is `exact`. |
+| `tests` | `{build_dir, include_roots}` with CTest registration and a CMake `compile_commands.json` for `impact`; exact-name plans (`impact` with names, CLI `test-plan`) only need the CTest catalog. Optional `catalog` names a saved JSON catalog relative to the repo; `scan` and `test_paths` (default `tests/`) say where sources and test sources are; `label_order` lists CTest labels to group tests by first (default: each test's first label). Optional `apps` lists the programs people run (for `stale` and the finish gate). A Ninja `build.ninja` adds the link closure: `stale`, and tests whose program links a changed object. |
 
 ## Top level
 
@@ -142,10 +143,12 @@ Codex (`zkit use <file>` only registers it).
 
 ## Native-port architecture and inventory audits
 
-`zkit architecture native src/simulation` checks a selected system; omit paths to check changed source
-files or use `--all` for configured roots. It checks literal C/C++ includes, including conditional branches,
-and reports explicit exceptions, unresolved headers and macro includes. It is not a compiler or semantic
-architecture proof. It does not apply native design refactors to matching decomp.
+`zkit check` applies these rules to the lines a change adds (an include the replaced lines already had is
+reported as debt); `zkit check native src/simulation` checks every line of a selected system, and
+`zkit architecture native --all` reports every include of the configured roots with explicit exceptions,
+unresolved quoted headers, system `<...>` headers and macro includes. It checks literal C/C++ includes,
+including conditional branches. It is not a compiler or semantic architecture proof. It does not apply
+native design refactors to matching decomp.
 
 ```json
 "architecture": {

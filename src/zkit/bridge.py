@@ -12,6 +12,7 @@ import collections
 import hashlib
 import json
 import marshal
+import math
 import os
 import re
 import sqlite3
@@ -62,16 +63,20 @@ def default_target(project: Project, target: str | None = None) -> str:
     return targets[0]
 
 
+QUOTES = "`'\";,"  # pasted around or after a query: `0x8000FFA4`, "TEnemy::update", 8000FFA4,
+
+
 def split_queries(text: str) -> list[str]:
-    """Several addresses (or several plain symbol names) in one query -> separate queries.
+    """Several addresses (or several plain symbol names or unit paths) in one query -> separate queries.
 
     `0x8013E990 0x8013E998`, `8013E990,8013E998` and `lbl_805DE138 lbl_805DE13C` are batches;
-    `TEnemy::update` or a phrase with spaces that is not all names stays one query."""
-    tokens = [t for t in QUERY_SPLIT.split(text.strip()) if t]
-    if len(tokens) > 1 and all(HEX.match(t) or MODULE_TOKEN.fullmatch(t) or re.fullmatch(r"[A-Za-z_~][\w:~]*", t)
-                               for t in tokens):
+    `TEnemy::update`, `operator new` or a phrase with spaces that is not all names stays one query. Quotes,
+    backticks and trailing commas pasted around a query are dropped."""
+    tokens = [t.strip(QUOTES) for t in QUERY_SPLIT.split(text.strip()) if t.strip(QUOTES)]
+    if len(tokens) > 1 and "operator" not in tokens and all(
+            HEX.match(t) or MODULE_TOKEN.fullmatch(t) or re.fullmatch(r"[A-Za-z_~][\w:~./-]*", t) for t in tokens):
         return tokens  # addresses, symbols and Class::method names, mixed or not, are looked up one by one
-    return [text.strip()]
+    return [text.strip().strip(QUOTES).strip()]
 
 
 def query_list(value: str | list | None) -> list[str]:
@@ -182,7 +187,7 @@ def status_word(info: dict) -> str:
     elif info.get("exact", info.get("match") == 100):
         state = "exact+linked" if info.get("linked") else "exact"
     else:
-        state = f"{info['match']:.1f}%"
+        state = f"{math.floor(info['match'] * 10) / 10:.1f}%"  # never rounds a near miss up to "100.0%"
     return state + (" provisional-name" if info.get("provisional_name") else "")
 
 
@@ -344,6 +349,9 @@ def resolve(project: Project, query: str, target: str | None = None, limit: int 
     text = query.strip()
     rows = db.execute("SELECT address FROM functions WHERE target=? AND (name=? OR demangled=?) LIMIT ?",
                       (target, text, text, limit)).fetchall()
+    if not rows and "(" not in text:  # Class::method without its parameters: every overload, nothing else
+        rows = db.execute("SELECT address FROM functions WHERE target=? AND substr(demangled, 1, ?)=? LIMIT ?",
+                          (target, len(text) + 1, text + "(", limit)).fetchall()
     if not rows:
         symbol = symbol_named(project, target, text)
         if symbol is not None:
@@ -355,16 +363,42 @@ def resolve(project: Project, query: str, target: str | None = None, limit: int 
     return [r[0] for r in rows]
 
 
+CANDIDATES = 8
+
+
+def _ambiguous(project: Project, query: str, target: str | None, found: list[int]) -> ValueError:
+    db = connect(project)
+    target = default_target(project, target)
+    names = [f"{address_text(a)} {r['demangled'] or r['name']}" if r else address_text(a)
+             for a in found[:CANDIDATES] for r in [containing(db, target, a)]]
+    more = " (and more)" if len(found) > CANDIDATES else ""
+    return ValueError(f"{query} matches {len(found[:CANDIDATES])}{more} functions: {'; '.join(names)}. Use an "
+                      "address or the full name")
+
+
 def resolve_address(project: Project, query: str, target: str | None = None) -> int | None:
-    """The exact address a query names: a hex address as given, else the symbol/function start."""
+    """The exact address a query names: a hex address as given, else the symbol/function start; None when nothing
+    matches. A name several functions match is an error that lists them."""
     match = HEX.match(query.strip())
     if match:
         return int(match[1], 16)
     keyed = module_address(query)
     if keyed is not None:
         return keyed
-    found = resolve(project, query, target, limit=2)
-    return found[0] if len(found) == 1 else None
+    found = resolve(project, query, target, limit=CANDIDATES + 1)
+    if len(found) > 1:
+        raise _ambiguous(project, query, target, found)
+    return found[0] if found else None
+
+
+def resolve_one(project: Project, query: str, target: str | None = None) -> int:
+    """The one function (or data) address a query names, or an error saying nothing or several match."""
+    found = resolve(project, query, target, limit=CANDIDATES + 1)
+    if not found:
+        raise ValueError(f"No function or symbol matches {query}")
+    if len(found) > 1:
+        raise _ambiguous(project, query, target, found)
+    return found[0]
 
 
 # ----------------------------------------------------------------------------
@@ -826,14 +860,16 @@ def lookup(project: Project, query: str, target: str | None = None, fresh: bool 
         return {"query": query, "batch": [lookup(project, q, target, fresh=False, body=body) for q in queries[:60]],
                 "truncated": max(0, len(queries) - 60)}
     db = connect(project)
-    addresses = resolve(project, query, target)
+    addresses = resolve(project, query, target, limit=CANDIDATES + 1)
     if not addresses:
         near = _near_names(db, target, query)
         return {"query": query, "found": False, "suggestions": near,
-                "hint": "No function or symbol matched; try an address, the mangled name, `names --regex`, or `search`."}
+                "hint": "No function or symbol matched; try an address, the mangled name, names with a regex, or "
+                        "search."}
     if len(addresses) > 1:
-        rows = [_status(containing(db, target, a)) for a in addresses]
-        return {"query": query, "found": True, "ambiguous": True, "candidates": rows}
+        rows = [_status(containing(db, target, a)) for a in addresses[:CANDIDATES]]
+        return {"query": query, "found": True, "ambiguous": True, "candidates": rows,
+                "more": len(addresses) > CANDIDATES}
     address = addresses[0]
     exact = HEX.match(query.strip())
     requested = int(exact[1], 16) if exact else (module_address(query) or address)
@@ -990,16 +1026,22 @@ def xrefs(project: Project, address: int | str, target: str | None = None, size:
                                                          "function_address": address_text(row['address']),
                                                          "status": status_word(_status(row))} if row else {})})
     data = []
+    span = (target, address, address + max(size, 1))
+    pointers = db.execute("SELECT count(*), sum(pointee=?) FROM refs WHERE target=? AND pointee>=? AND pointee<?",
+                          (address, *span)).fetchone()
     for holder, pointee in db.execute("SELECT holder, pointee FROM refs WHERE target=? AND pointee>=? AND pointee<? "
-                                      "ORDER BY holder LIMIT ?", (target, address, address + max(size, 1), limit)):
+                                      "ORDER BY pointee!=?, holder LIMIT ?", (*span, address, limit)):
         owner = _symbol_lookup(project, target, holder)
-        data.append({"holder": address_text(holder), "pointee": address_text(pointee),
+        data.append({"holder": address_text(holder), "pointee": address_text(pointee), "into": pointee - address,
                      **({"symbol": owner["name"], "offset": owner["offset"]} if owner else {})})
     functions = collections.Counter()
     for function, n in per_function.most_common(40):  # over every reference, not just the rows shown
         row = containing(db, target, function)
         functions[(row["demangled"] or row["name"]) if row else address_text(function)] += n
+    row = containing(db, target, address)
     return {"address": address_text(address), "size": size, "symbol": symbol, "code": code, "data": data,
+            "data_total": pointers[0], "data_to_start": pointers[1] or 0,
+            "function": (row["demangled"] or row["name"]) if row and row["address"] == address else None,
             "kinds": dict(kinds), "functions": functions.most_common(40), "total": sum(kinds.values()),
             "modules": modules.most_common(),
             "limits": "Code refs are straight-line lis/addi and r2/r13 forms decoded from the original; pointers "
@@ -1018,18 +1060,21 @@ def names(project: Project, queries: list[str] | None = None, target: str | None
     if queries:
         for query in queries:
             for q in split_queries(query):
-                match = HEX.match(q)
-                row = containing(db, target, int(match[1], 16)) if match else None
-                if row is None and not match:
-                    found = resolve(project, q, target, limit=2)
-                    row = containing(db, target, found[0]) if len(found) == 1 else None
-                if row is not None:
-                    rows.append(_status(row) | {"query": q})
+                hex_match = HEX.match(q)
+                value = int(hex_match[1], 16) if hex_match else module_address(q)
+                found = [value] if value is not None else resolve(project, q, target, limit=CANDIDATES + 1)
+                if len(found) > 1:
+                    rows.append({"query": q, "ambiguous": [_status(containing(db, target, a)) for a in found[:CANDIDATES]],
+                                 "more": len(found) > CANDIDATES})
                     continue
-                address = int(match[1], 16) if match else (resolve_address(project, q, target) or 0)
-                symbol = _symbol_lookup(project, target, address) if address else None
-                rows.append({"query": q, "address": address_text(address) if address else None,
-                             "name": symbol["name"] if symbol else None, "symbol": symbol, "data": True})
+                row = containing(db, target, found[0]) if found else None
+                if row is not None:
+                    rows.append(_status(row) | {"query": q, "offset": found[0] - row["address"]})
+                    continue
+                symbol = _symbol_lookup(project, target, found[0]) if found else None
+                rows.append({"query": q, "address": address_text(found[0]) if found else None,
+                             "name": symbol["name"] if symbol else None, "symbol": symbol, "data": bool(symbol),
+                             "found": bool(symbol)})
         return {"target": target, "rows": rows}
     sql, args = "SELECT * FROM functions WHERE target=?", [target]
     if start is not None:
@@ -1045,7 +1090,10 @@ def names(project: Project, queries: list[str] | None = None, target: str | None
     order = {"address": "address", "match": "coalesce(match, 0) DESC, address", "size": "size DESC, address"}
     if sort not in order:
         raise ValueError(f"sort must be one of {', '.join(order)}")
-    pattern = re.compile(regex) if regex else None
+    try:
+        pattern = re.compile(regex) if regex else None
+    except re.error as error:
+        raise ValueError(f"regex {regex!r} is not a valid regular expression: {error}") from None
     matched = []
     for row in db.execute(sql + " ORDER BY " + order[sort], args):
         if pattern and not (pattern.search(row["name"]) or (row["demangled"] and pattern.search(row["demangled"]))):
@@ -1879,22 +1927,33 @@ def refs(project: Project, query: str, target: str | None = None, repo: str | No
 
 def compiled(project: Project, query: str, target: str | None = None, limit: int = 24) -> dict[str, Any]:
     """A function's compiled bytes and relocations against the original's, from the unit's objects in objdiff.json;
-    a unit name gives every function of the unit."""
+    a unit name (or its source path) gives every function of the unit. Several queries give a batch."""
     from . import objects
     target = default_target(project, target)
     refresh(project)
+    queries = query_list(query)
+    if len(queries) > 1:
+        return batch(queries, lambda q: compiled(project, q, target, limit))
+    query = queries[0] if queries else query
     db = connect(project)
     units = objects.objdiff_units(project, target)
     root = project.root(project.target(target)["repository"])
-    if query in units or any(name.endswith("/" + query.strip("/")) for name in units):
-        name = query if query in units else next(n for n in units if n.endswith("/" + query.strip("/")))
+    named = query.strip("/")
+    by_source = {(u.get("metadata") or {}).get("source_path"): n for n, u in units.items()}
+    name = query if query in units else next((n for n in units if n.endswith("/" + named)), None) or by_source.get(named)
+    if name:
         unit = units[name]
+        if not unit.get("base_path"):
+            raise ValueError(f"Unit {name} has no compiled object in objdiff.json (no source for it yet)")
+        if not (root / unit["base_path"]).is_file() or not (root / unit["target_path"]).is_file():
+            raise ValueError(f"{unit['base_path']} or {unit['target_path']} is not built yet: build the project first")
         data = objects.unit_diff(root / unit["target_path"], root / unit["base_path"])
         data["unit"] = name
-        return data
+        return data | _compiled_age(root, unit)
     found = resolve(project, query, target, limit=2)
     if len(found) != 1:
-        raise ValueError(f"{query} names {'no' if not found else 'more than one'} function; use an address")
+        raise ValueError(f"{query} names {'no' if not found else 'more than one'} function; use an address, or a unit "
+                         "name or source path")
     row = containing(db, target, found[0])
     if row is None or not row["unit"]:
         raise ValueError(f"{query} is not a function of any objdiff unit")
@@ -1906,7 +1965,21 @@ def compiled(project: Project, query: str, target: str | None = None, limit: int
         raise ValueError(f"{unit['base_path']} is not built yet: build the project first")
     data = objects.function_diff(target_path, base_path, row["name"], limit=limit)
     data.update(unit=row["unit"], address=address_text(row["address"]), report_match=row["match"])
+    if data.get("missing"):
+        data["message"] = (f"the compiled object defines no function {row['name']}: not written yet, or written "
+                           "under another name or signature")
     if not data.get("exact") and not data.get("missing"):
         data["original_asm"] = objects.disassembly(project, target, target_path, row["name"], data["machine"])
         data["compiled_asm"] = objects.disassembly(project, target, base_path, row["name"], data["machine"])
-    return data
+    return data | _compiled_age(root, unit)
+
+
+def _compiled_age(root: Path, unit: dict) -> dict:
+    """A note when the compiled object is older than the unit's source (the answer is about the last build)."""
+    source = (unit.get("metadata") or {}).get("source_path")
+    try:
+        if source and (root / source).stat().st_mtime > (root / unit["base_path"]).stat().st_mtime:
+            return {"stale": f"{unit['base_path']} is older than {source}: this compares the last build; rebuild"}
+    except OSError:
+        pass
+    return {}
