@@ -45,7 +45,7 @@ class Split:
 
 
 def load(folder: Path) -> Split:
-    """A dtk configuration folder (splits.txt and symbols.txt), or the folder of a proposal written the same way."""
+    """A configuration folder (splits.txt and symbols.txt), or the folder of a proposal written the same way."""
     split = Split()
     splits, symbols = folder / "splits.txt", folder / "symbols.txt"
     if splits.is_file():

@@ -1,4 +1,4 @@
-"""A fresh analysis of an original, written the way decomp-toolkit's configuration is: a splits.txt with every
+"""A fresh analysis of an original, written as a project configuration: a splits.txt with every
 unit's code and data, a symbols.txt, and a header per recovered class, plus the evidence behind each.
 
 Names are only what evidence proves. Functions and data other builds name (the signature cache: libraries every
@@ -119,5 +119,5 @@ def analyze_project(project, target: str | None, folder: Path) -> dict[str, Any]
     elif config.get("symbols"):
         symbols = project.file(config["repository"], config["symbols"])
     else:
-        raise ValueError(f"Target {target} has no symbols file to start from (a decomp-toolkit symbols.txt)")
+        raise ValueError(f"Target {target} has no symbols file to start from (a symbols.txt)")
     return {"target": target, **write(program, analyze(program), symbols, folder)}

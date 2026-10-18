@@ -380,7 +380,7 @@ def _branch(data: dict[int, bytes], reloc: Reloc, destination: int) -> None:
 
 def split_sections(path: Path) -> list[str]:
     """The section names a splits.txt `Sections:` block lists, in order: they name a REL's sections that have a
-    size, in index order (decomp-toolkit's convention)."""
+    size, in index order."""
     names, inside = [], False
     for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
         if not line.strip() or line.lstrip().startswith("//"):
@@ -443,7 +443,7 @@ class Module:
         return None
 
     def offset(self, address: int) -> int:
-        """Section-relative offset of an address inside the module (what decomp-toolkit's objects record)."""
+        """Section-relative offset of an address inside the module (what the split objects record)."""
         index = self.section_at(address)
         return address if index is None else address - self.base[index]
 

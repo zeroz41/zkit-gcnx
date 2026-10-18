@@ -62,7 +62,7 @@ def saved_objdump_path() -> Path:
 
 
 def _objdump(project: Project) -> str | None:
-    """$ZKIT_OBJDUMP, manifest `objdump`, PATH, any repo's dtk binutils, then the path saved by setup."""
+    """$ZKIT_OBJDUMP, manifest `objdump`, PATH, any repo's downloaded binutils, then the path saved by setup."""
     import os
     candidates = [os.environ.get("ZKIT_OBJDUMP")]
     configured = project.config.get("objdump")
@@ -70,7 +70,7 @@ def _objdump(project: Project) -> str | None:
         repo, sep, rel = configured.partition(":")
         candidates.append(str(project.file(repo, rel)) if sep and repo in project.config["repositories"] else configured)
     candidates += [shutil.which(name) for name in OBJDUMP_NAMES]
-    # decomp-toolkit projects download GNU binutils for PowerPC on their first build (dtk-template:
+    # Many decomp projects download GNU binutils for PowerPC on their first build (into
     # build/binutils, older layouts: build/tools/binutils); .exe on Windows.
     for repo in project.config["repositories"]:
         for folder in ("build/binutils", "build/tools/binutils"):

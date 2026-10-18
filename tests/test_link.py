@@ -195,13 +195,13 @@ class ProjectFileTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 link.linker_command(root, root / "build.ninja", "other")
 
-    def test_dtk_config(self):
+    def test_config_yml(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "config.yml"
             path.write_text('name: x\nmw_comment_version: 10\n# note\nforce_active:\n  - "@28@f"\n  - g\n'
                             "block_relocations:\n  - source: 0x80001000\n")
-            self.assertEqual(link.dtk_config(path), {"force_active": ["@28@f", "g"], "mw_comment_version": 10})
-            self.assertEqual(link.dtk_config(Path(temp) / "missing.yml"), {"force_active": []})
+            self.assertEqual(link.config_yml(path), {"force_active": ["@28@f", "g"], "mw_comment_version": 10})
+            self.assertEqual(link.config_yml(Path(temp) / "missing.yml"), {"force_active": []})
 
 
 class CombineTests(unittest.TestCase):

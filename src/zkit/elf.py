@@ -1,6 +1,6 @@
 """Relocatable and executable ELF files, 32 or 64 bit, either byte order: sections, symbols, relocations.
 
-Enough to compare compiled objects with the original's split objects (GameCube PowerPC from decomp-toolkit,
+Enough to compare compiled objects with the original's split objects (GameCube PowerPC,
 Switch AArch64 from clang) without a dependency.
 """
 

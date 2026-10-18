@@ -197,7 +197,7 @@ def doctor(project: Project) -> dict:
         original = project.file(repo, target["original"]) if target.get("original") else None
         if original is None or not original.is_file():
             rows.append(_row("warn", f"{name}: original executable", str(original or "not configured"),
-                             "put the disc image in orig/<GAMEID>/ and build once (dtk extracts sys/main.dol), "
+                             "put the disc image in orig/<GAMEID>/ and build once (the build extracts sys/main.dol), "
                              "then rerun `zkit init`"))
         elif target.get("sha1"):
             same = digest(original, "sha1") == target["sha1"].lower()

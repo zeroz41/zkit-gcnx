@@ -50,7 +50,7 @@ class Program:
         self._calls: dict[int, list[int]] | None = None
         self._pointers: list[tuple[int, int]] | None = None
         self.cache: dict = {}  # results analyses share (register flows, tables), keyed by the analysis
-        self.labels: list[DataObject] = []  # names at addresses with no extent (dtk `type:label`)
+        self.labels: list[DataObject] = []  # names at addresses with no extent (`type:label`)
         self.sections: list[tuple[str, int, int]] = []  # (name, start, end) of every named section
 
     def in_image(self, address: int) -> bool:
@@ -73,7 +73,7 @@ class Program:
 
     @classmethod
     def from_symbols(cls, platform: Platform, image_path: Path, symbols_path: Path) -> "Program":
-        """An image and a decomp-toolkit symbols.txt (functions in code sections, sized objects elsewhere)."""
+        """An image and a symbols.txt (functions in code sections, sized objects elsewhere)."""
         return cls._build(platform, platform.open(image_path), symbols_path)
 
     @classmethod

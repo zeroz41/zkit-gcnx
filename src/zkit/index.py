@@ -279,7 +279,7 @@ def _target_file(project: Project, target: dict, field: str) -> Path | None:
 
 
 def _function_source(project: Project, target: dict) -> tuple[Path | None, Path | None, Path | None]:
-    """Where function boundaries and names come from, best first: the objdiff report, a function list (dtk
+    """Where function boundaries and names come from, best first: the objdiff report, a function list (a
     symbols.txt, or a CSV such as nx-decomp-tools'), or the original executable itself (its symbols, or its
     unwind table when stripped)."""
     report = _target_file(project, target, "report")

@@ -1,4 +1,4 @@
-"""A fresh decomp-toolkit project: `init`, project selection from the working directory, and REL modules
+"""A fresh decomp project: `init`, project selection from the working directory, and REL modules
 (functions, callers across DOL and RELs, disassembly and xrefs from the REL files themselves). No game assets."""
 
 import support  # noqa: F401  (isolates config, cache and state)
@@ -205,7 +205,7 @@ class FreshProject(unittest.TestCase):
         code, text = self.cli("projects")
         self.assertIn("* mine", text)
 
-    def test_not_a_dtk_project(self):
+    def test_not_a_decomp_project(self):
         code, _ = self.cli("init", str(self.outside))
         self.assertEqual(code, 2)
 
