@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .program import DataObject, Program
+from .program import CODE_SECTIONS, DataObject, Program
 
 TIGHT = 60          # functions: data used across a wider run is shared (a global), not one unit's
 LITERAL_SIZES = range(1, 65)
@@ -284,25 +284,40 @@ def check_project(project, target: str | None = None, limit: int = 60) -> dict[s
     return {"target": target, **check(Program.from_project(project, target), rows, limit)}
 
 
-def propose(program: Program) -> dict[str, Any]:
-    """Units for every function from the evidence: boundaries, a name per unit, and the data each unit owns."""
+def propose(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Units for every function from the evidence: boundaries, a name per unit, and the data each unit owns.
+    `fixed` units ({unit, how, ranges: [(section, start, end)]}, from a linker map: mapalign.py) are taken as
+    they are, code and data; the evidence decides the rest around them."""
     ev = evidence(program)
     cuts = boundaries(program, ev)
     text = program.platform.text
     functions = program.functions
     sections = [program.section_of(f.address) or "" for f in functions]
-    edges = sorted({0, len(functions), *(c.position for c in cuts),     # a unit never spans two code sections
-                    *(p for p in range(1, len(functions)) if sections[p] != sections[p - 1])})
+    held: dict[tuple[int, int], dict[str, Any]] = {}  # (first, end) function index -> the fixed unit
+    for unit in fixed or ():
+        for section, start, stop in unit["ranges"]:
+            if section in CODE_SECTIONS:
+                first = bisect.bisect_left(program._function_starts, start)
+                end = bisect.bisect_left(program._function_starts, stop)
+                if first < end:
+                    held[(first, end)] = unit
+    inside = {p for first, end in held for p in range(first + 1, end)}
+    edges = sorted({0, len(functions), *(c.position for c in cuts if c.position not in inside),
+                    *(p for p in range(1, len(functions)) if sections[p] != sections[p - 1]),   # a unit never
+                    *(p for span in held for p in span)})                                       # spans two
     class_of = _function_classes(program)
     units = []
-    taken: collections.Counter = collections.Counter()
+    taken: collections.Counter = collections.Counter(u["unit"] for u in held.values())
     for first, end in zip(edges, edges[1:]):
         if first >= end:
             continue
         span = range(first, end)
         files = collections.Counter(ev.files[i] for i in span if i in ev.files)
         classes = collections.Counter(class_of[i] for i in span if i in class_of)
-        if files:
+        if (first, end) in held:
+            name, how = held[(first, end)]["unit"], held[(first, end)]["how"]
+            taken[name] -= 1                          # its own name, reserved above
+        elif files:
             name, how = files.most_common(1)[0][0], "file string"
         elif classes:
             name, how = classes.most_common(1)[0][0] + ".cpp", "class"
@@ -322,7 +337,10 @@ def propose(program: Program) -> dict[str, Any]:
     for u in units:
         for i in range(u["first"], u["end"]):
             owner[i] = u["unit"]
-    data = _data_ownership(program, ev, owner)
+    fixed_data = [(start, stop, unit["unit"], section) for unit in fixed or ()
+                  for section, start, stop in unit["ranges"] if section not in CODE_SECTIONS]
+    firm = {unit["unit"] for unit in fixed or () if unit["how"] == "source"}
+    data = _data_ownership(program, ev, owner, fixed_data, firm)
     by_unit = collections.defaultdict(list)
     for row in data:
         by_unit[row[2]].append(row)
@@ -366,14 +384,22 @@ def _function_classes(program: Program) -> dict[int, str]:
 
 
 TABLES = (".ctors", ".dtors")      # pointer tables: one entry per unit's static initializer (finalizer)
+LEADING = 4                        # .dtors entries the runtime's own can lead with
 
 
-def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str]) -> list[tuple[int, int, str, str]]:
-    """(start, end, unit, section): data only one unit's code uses, and class tables whose constructors are all in
-    one unit. The linker lays out every section in link order, one contiguous block per object, so in each section
-    a unit owns one range, and the units' ranges come in the order of their code: a claim against that order is a
-    reference from another unit, not ownership, and is dropped (the fewest claims that restore the order). A range
-    always covers whole symbols."""
+FIXED, FIRM = 8, 1 << 30   # a linker map's placement against claims of one object each; a unit with a source
+
+
+def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
+                    fixed: list[tuple[int, int, str, str]] = (), firm: set[str] = frozenset()
+                    ) -> list[tuple[int, int, str, str]]:
+    """(start, end, unit, section): data only one unit's code uses, data only that data points to (a table of
+    strings), and class tables whose constructors are all in one unit. The linker lays out every section in link
+    order, one contiguous block per object, so in each section a unit owns one range, and the units' ranges come
+    in the order of their code: a claim against that order is a reference from another unit, not ownership, and is
+    dropped (the fewest claims that restore the order). A range always covers whole symbols. `fixed` ranges (a
+    linker map's) take part in that order as `FIXED` claims each (the `firm` units' never give way: they have a
+    source); one that stands is kept as given, and no claim crosses it or adds to its unit in its section."""
     from .link import LINKER_OBJECTS
     claims: list[tuple[int, int, str, str]] = []
     for o, fs in ev.local.items():
@@ -391,6 +417,7 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str]) -> li
             if len(homes) == 1:
                 claims.append((address, address + tables[address].size, next(iter(homes)), ".data"))
         claims += _exception_tables(program, owner)
+    claims += _through_data(program, ev, claims)
     order: dict[str, int] = {}                         # unit -> its place in link order (its first code)
     ordered = set()                                    # .init code says nothing of where its unit is linked
     for index in sorted(owner):
@@ -404,38 +431,91 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str]) -> li
     by_section: dict[str, list] = collections.defaultdict(list)
     for claim in claims:
         by_section[claim[3]].append(claim)
+    pinned = {row: FIRM if row[2] in firm else FIXED for row in fixed}
+    for row in pinned:
+        by_section[row[3]].append(row)
     for section, rows in by_section.items():
-        rows = _whole_symbols(program, sorted(rows))
-        while section in TABLES and len(rows) > 1 and rows[0][2] in order and \
+        rows = sorted(r if r in pinned else _whole_symbols(program, [r])[0] for r in rows)
+        if section in TABLES and len(rows) > 1 and rows[0] not in pinned and rows[0][2] in order and \
                 order[rows[0][2]] > min(order.get(r[2], 0) for r in rows[1:]):
-            out.append(rows.pop(0))                   # the runtime's leading entry: its own range (link.py)
-        kept = _in_link_order([r for r in rows if r[2] in ordered], order) + [r for r in rows if r[2] not in ordered]
+            lead = rows.pop(0)                        # the runtime's leading entries: one range of their own
+            while rows and rows[0][2] == lead[2] and rows[0][0] == lead[1] and rows[0] not in pinned:
+                lead = (lead[0], rows.pop(0)[1], lead[2], section)
+            out.append(lead)
+        kept = _in_link_order([r for r in rows if r[2] in ordered], order, pinned) + \
+            [r for r in rows if r[2] not in ordered]
+        stand = [r for r in kept if r in pinned]      # a fixed range that agrees with the order stands as given
+        fixed_units = {r[2] for r in stand}
+        kept = [r for r in kept if r not in pinned and r[2] not in fixed_units
+                and not any(a < r[1] and r[0] < b for a, b, _, _ in stand)]
         spans: dict[str, list[int]] = {}
         for start, stop, unit, _ in kept:
             span = spans.setdefault(unit, [start, stop])
             span[0], span[1] = min(span[0], start), max(span[1], stop)
-        for unit, (start, stop) in sorted(spans.items(), key=lambda item: item[1][0]):
-            start, stop = _word_bounds(program, start, stop)
-            if out and out[-1][3] == section and start < out[-1][1]:
+        ranges = [(*_word_bounds(program, start, stop), unit, section) for unit, (start, stop) in spans.items()]
+        last = None
+        for row in sorted(ranges + stand):
+            if last is not None and row[0] < last[1]:
                 continue                               # overlaps the previous unit's range: no claim is safe
-            out.append((start, stop, unit, section))
+            out.append(row)
+            last = row
     out.sort()
+    return out
+
+
+def _through_data(program: Program, ev: Evidence, claims: list[tuple[int, int, str, str]]
+                  ) -> list[tuple[int, int, str, str]]:
+    """Data no code uses that only data one unit owns points to (the strings of a table, the entries of a table of
+    tables) belongs to that unit too, as far as the pointers reach."""
+    used = {o.address for o in program.users()}
+    claimed = sorted((start, stop, unit) for start, stop, unit, _ in claims)
+    starts = [c[0] for c in claimed]
+
+    def claim_at(address: int) -> str | None:
+        index = bisect.bisect_right(starts, address) - 1
+        return claimed[index][2] if index >= 0 and address < claimed[index][1] else None
+    holders: dict[DataObject, set[str | None]] = collections.defaultdict(set)
+    pointed = [(h, program.object_at(p)) for h, p in program.pointers]
+    out: list[tuple[int, int, str, str]] = []
+    found = True
+    while found:
+        found = False
+        holders.clear()
+        for holder, target in pointed:
+            if target is not None and target.address not in used and not program.in_code(target.address):
+                holders[target].add(claim_at(holder))
+        for target, units in holders.items():
+            if len(units) == 1 and None not in units and claim_at(target.address) is None:
+                row = (target.address, target.address + max(target.size, 1), next(iter(units)), target.section)
+                out.append(row)
+                index = bisect.bisect_left(starts, row[0])
+                starts.insert(index, row[0])
+                claimed.insert(index, row[:3])
+                found = True
     return out
 
 
 def _initializer_tables(program: Program, owner: dict[int, str]) -> list[tuple[int, int, str, str]]:
     """.ctors and .dtors entries, each the unit's whose function it points to (its static initializer or
     finalizer), not the unit of code that walks the table. The C++ runtime's entries lead the tables although its
-    unit links late: the linker puts them first itself (see link.RUNTIME_MEMBER)."""
-    claims = []
+    unit links late: the linker puts them first itself (see link.RUNTIME_MEMBER). That unit is the one the first
+    `.ctors` entry points into, and the `.dtors` entries before the first that points into it are its own too
+    (CodeWarrior's runtime: `__destroy_global_chain_reference`, then `__fini_cpp_exceptions_reference`)."""
+    entries: dict[str, list[tuple[int, str | None]]] = collections.defaultdict(list)
     for o in program.objects:
         if o.section not in TABLES:
             continue
         for at in range(o.address, o.address + o.size - 3, 4):
-            unit = owner.get(program.function_index.get(int.from_bytes(program.read(at, 4), "big"), -1))
-            if unit is not None:
-                claims.append((at, at + 4, unit, o.section))
-    return claims
+            entries[o.section].append(
+                (at, owner.get(program.function_index.get(int.from_bytes(program.read(at, 4), "big"), -1))))
+    for rows in entries.values():
+        rows.sort()
+    runtime = entries[".ctors"][0][1] if entries.get(".ctors") else None
+    lead = next((k for k, (_, unit) in enumerate(entries.get(".dtors", [])[:LEADING]) if unit == runtime), None)
+    if runtime is not None and lead:                # its .dtors entries lead too, wherever they point (its
+        rows = entries[".dtors"]                    # reference to the global destructor chain's code)
+        rows[:lead] = [(at, runtime) for at, _ in rows[:lead]]
+    return [(at, at + 4, unit, section) for section, rows in entries.items() for at, unit in rows if unit is not None]
 
 
 def _exception_tables(program: Program, owner: dict[int, str]) -> list[tuple[int, int, str, str]]:
@@ -490,21 +570,28 @@ def _word_bounds(program: Program, start: int, stop: int) -> tuple[int, int]:
     return start, stop
 
 
-def _in_link_order(rows: list[tuple[int, int, str, str]], order: dict[str, int]) -> list[tuple[int, int, str, str]]:
-    """The longest run of claims (by address) whose units never go back in link order."""
-    tails: list[int] = []                              # tails[k]: the row ending the best run of length k+1
-    places: list[int] = []                             # places[k]: that row's unit place (non-decreasing)
-    links: list[int] = []
+def _in_link_order(rows: list[tuple[int, int, str, str]], order: dict[str, int],
+                   weights: dict[tuple, int] | None = None) -> list[tuple[int, int, str, str]]:
+    """The heaviest run of claims (by address) whose units never go back in link order: each claim weighs 1
+    unless `weights` says otherwise."""
+    weights = weights or {}
+    places = sorted({order[r[2]] for r in rows})
+    rank = {place: k + 1 for k, place in enumerate(places)}
+    tree: list[tuple[int, int]] = [(0, -1)] * (len(places) + 1)   # max (weight, row) over ranks up to k
+    best, links = [], []
     for position, row in enumerate(rows):
-        place = order[row[2]]
-        k = bisect.bisect_right(places, place)
-        if k == len(tails):
-            tails.append(position)
-            places.append(place)
-        else:
-            tails[k], places[k] = position, place
-        links.append(tails[k - 1] if k else -1)
-    kept, position = [], tails[-1] if tails else -1
+        k, found = rank[order[row[2]]], (0, -1)
+        while k > 0:
+            found = max(found, tree[k])
+            k -= k & -k
+        total = found[0] + weights.get(row, 1)
+        best.append(total)
+        links.append(found[1])
+        k = rank[order[row[2]]]
+        while k < len(tree):
+            tree[k] = max(tree[k], (total, position))
+            k += k & -k
+    kept, position = [], max(range(len(rows)), key=lambda i: (best[i], -i)) if rows else -1
     while position >= 0:
         kept.append(rows[position])
         position = links[position]
@@ -512,14 +599,21 @@ def _in_link_order(rows: list[tuple[int, int, str, str]], order: dict[str, int])
 
 
 def write_splits(data: dict, path: Path) -> Path:
-    """The proposal as a splits.txt: one block per unit, code then its data."""
-    lines = []
+    """The proposal as a splits.txt: one block per unit (a unit with code in two sections, `.init` and `.text`,
+    is one block), code then its data."""
+    blocks: dict[str, list[tuple[str, int, int]]] = {}
     for unit in data["units"]:
-        lines.append(f"{unit['unit']}:")
-        lines.append(f"\t{unit.get('section', '.text'):<12} start:0x{unit['start_key']:08X} "
-                     f"end:0x{unit['end_key']:08X}")
-        for row in unit.get("data", []):
-            lines.append(f"\t{row['section']:<12} start:0x{row['start_key']:08X} end:0x{row['end_key']:08X}")
+        rows = blocks.setdefault(unit["unit"], [])
+        rows.append((unit.get("section", ".text"), unit["start_key"], unit["end_key"]))
+        rows += [(row["section"], row["start_key"], row["end_key"]) for row in unit.get("data", [])]
+    lines = []
+    for name, rows in blocks.items():
+        lines.append(f"{name}:")
+        seen = set()
+        for section, start, end in rows:
+            if (section, start) not in seen:
+                seen.add((section, start))
+                lines.append(f"\t{section:<12} start:0x{start:08X} end:0x{end:08X}")
         lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")

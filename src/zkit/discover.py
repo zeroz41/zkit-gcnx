@@ -44,8 +44,12 @@ from `_rom_copy_info` when it is found.
 
 Data objects start where code forms an address (`addi`/`ori`), at every small-data access, where a data word
 points (`lbl_`), at every jump table (`jumptable_`) and exception record (`@eti_`, `@etb_`), and run to the next
-one. The target of a `lis` and a load or store starts one only in `.rodata` (a constant read whole); elsewhere it
-is left to the object before it, because CodeWarrior folds a member's offset into the access. Measured against
+one, less the zero padding that aligns the next: a jump table holds its cases, a literal string (used by its
+address, never loaded) ends at its NUL, and a small-data object code only loads and stores whole at one width,
+never forming its address, is that wide; nothing ends before an address the code or data reaches inside it (on
+Double Dash, 1,051 of 1,364 sizes the map gives come out exact, against 713 up to the next label). The target of
+a `lis` and a load or store starts one only in `.rodata` (a constant read whole); elsewhere it is left to the
+object before it, because CodeWarrior folds a member's offset into the access. Measured against
 Twilight Princess's map, 2,420 of 2,438 such `.bss` targets are inside an object, and taking them would cut the
 share of `.bss` and `.data` starts that are right from 65% and 92% to 18% and 29%; on PSO, units proposed from
 these objects find more of the decomp's boundaries (9.21%, 54.45% of them right) than with every target (9.19%,
@@ -61,6 +65,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .ppc import branch, writes
+from .ppc import code_relocations as ppc_relocations
 
 BLR, BCTR, RFI, NOP, MFLR_R0, MTLR_R0 = 0x4E800020, 0x4E800420, 0x4C000064, 0x60000000, 0x7C0802A6, 0x7C0803A6
 INVALID_OPS = {0, 1, 2, 5, 6, 9, 22, 30, 58, 62}       # no Gekko instruction has these primary opcodes
@@ -70,6 +75,10 @@ SLED_OPS = {36: 4, 32: 4, 54: 8, 50: 8}                # stw, lwz, stfd, lfd and
 TABLE_LIMIT = 1024            # jump-table cases read when no bound check is found
 CODE_SECTIONS = (".init", ".text")
 ZERO_SECTIONS = (".bss", ".sbss", ".sbss2")
+LITERAL_SECTIONS = (".rodata", ".sdata2")     # where CodeWarrior puts string literals (-str readonly)
+SMALL_SECTIONS = (".sdata", ".sbss", ".sdata2", ".sbss2")
+ACCESS_WIDTHS = {32: 4, 33: 4, 34: 1, 35: 1, 36: 4, 37: 4, 38: 1, 39: 1, 40: 2, 41: 2, 42: 2, 43: 2, 44: 2, 45: 2,
+                 48: 4, 49: 4, 50: 8, 51: 8, 52: 4, 53: 4, 54: 8, 55: 8}      # D-form loads and stores, bytes
 
 
 @dataclass
@@ -647,10 +656,16 @@ def find_objects(dol, finder: _Finder, sections: list[tuple[str, int, int]],
             mark(a)
     for a, _ in data_in_text:
         mark(a)
+    widths: dict[int, set[int]] = collections.defaultdict(set)   # address -> widths code accesses it with
+    whole: set[int] = set()                    # addresses code forms or data points to: an object's extent matters
     for start, walk in finder.walks.items():
         words = dol.words(start, walk.end - start)
         for pc, (value, kind) in track_addresses(words, start, finder.sda).items():
             held = section_of(value)
+            if kind == "addr":
+                whole.add(value)
+            else:
+                widths[value].add(ACCESS_WIDTHS.get(words[(pc - start) // 4] >> 26, 0))
             if kind == "addr" or (words[(pc - start) // 4] >> 16) & 31 in finder.sda or \
                     (held is not None and held[2] == ".rodata"):
                 mark(value)
@@ -659,6 +674,7 @@ def find_objects(dol, finder: _Finder, sections: list[tuple[str, int, int]],
             for value in dol.words(a, b - a):
                 if 0x80000000 <= value < 0x81800000:
                     mark(value)
+                    whole.add(value)
     for table in finder.tables:
         mark(table, f"jumptable_{table:08X}")
     for a, b, n in named:                             # .ctors/.dtors: one entry per unit's initializer (or finalizer);
@@ -683,6 +699,12 @@ def find_objects(dol, finder: _Finder, sections: list[tuple[str, int, int]],
         if eti is not None:
             mark(eti, "_eti_init_info")
     ordered = sorted(labels)
+    reached = set(widths) | whole              # and what the delinker's own flow analysis finds the code reaching
+    for start, walk in finder.walks.items():
+        found, _ = ppc_relocations(dol.words(start, walk.end - start), start, finder.sda,
+                                   lambda a: section_of(a) is not None)
+        reached.update(r.target for r in found)       # a branch into data too: the delinker relocates it
+    reached = sorted(reached)
     out = []
     for position, address in enumerate(ordered):
         _, end, name = section_of(address)
@@ -691,8 +713,38 @@ def find_objects(dol, finder: _Finder, sections: list[tuple[str, int, int]],
             stop = min(stop, next(b for a, b in data_in_text if a <= address < b))
         if name in (".ctors", ".dtors"):
             stop = min(stop, address + 4)             # one pointer: the zeros after are the linker's terminator
-        out.append((address, stop - address, name, labels[address]))
+        size = _own_size(dol, address, stop - address, name, finder.tables.get(address), widths, whole, reached)
+        out.append((address, size, name, labels[address]))
     return out
+
+
+def _own_size(dol, address: int, extent: int, section: str, cases: int | None, widths: dict[int, set[int]],
+              whole: set[int], reached: list[int]) -> int:
+    """An object's own size within the extent up to the next label: the zero bytes after it up to an aligned
+    next object are alignment padding, which belongs to the gap (a unit's data starts aligned), not to it. A jump
+    table holds its cases; a literal string (`.rodata`, `.sdata2`: used by its address, never loaded) ends at its
+    NUL; a small-data object code only
+    loads and stores whole, at one width, and that nothing points to, is that wide. Nothing shrinks past an
+    address code or data reaches inside its extent: that is a member CodeWarrior folded into the access."""
+    size = extent
+    if cases:
+        size = min(extent, 4 * cases)
+    elif section in LITERAL_SECTIONS and extent > 1 and address in whole and not widths.get(address):
+        raw = dol.read(address, extent)
+        end = raw.find(b"\0")
+        if end > 0 and all(0x20 <= c < 0x7F or c in (9, 10, 13) for c in raw[:end]):
+            size = end + 1
+    elif section in SMALL_SECTIONS and address not in whole and len(widths.get(address, ())) == 1:
+        width = next(iter(widths[address]))
+        if 0 < width < extent:
+            size = width
+    if size == extent or bisect.bisect_left(reached, address + extent) > bisect.bisect_left(reached, address + size):
+        return extent                                 # code or data reaches past it: a member, not padding
+    padding = extent - size
+    tail = dol.read(address + size, padding) if section not in ZERO_SECTIONS else b""
+    if any(tail) or padding >= 32 or (address + extent) % (1 << padding.bit_length()):
+        return extent                                 # what follows is data, or more than padding to a boundary
+    return size
 
 
 def _eti_init_info(start: int, words: list[int], code: list[tuple[int, int]]) -> int | None:

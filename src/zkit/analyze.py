@@ -18,8 +18,8 @@ from . import classes, cwnames, units, vtables
 from .program import Program
 
 
-def analyze(program: Program) -> dict[str, Any]:
-    proposal = units.propose(program)
+def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    proposal = units.propose(program, fixed)
     result: dict[str, Any] = {"units": proposal, "classes": None, "symbols": {}, "signatures": []}
     if program.platform.name != "gamecube":
         return result

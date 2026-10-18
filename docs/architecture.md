@@ -18,6 +18,7 @@ answers      bridge.py (lookup, refs, port-plan, check) · inspect_dol.py (asm, 
 structure    delink.py (objects per unit) · link.py (the original relinked) · units.py (unit boundaries)
              vtables.py · classes.py (classes)
              analyze.py (all of it into a folder) · score.py · mwmap.py (CodeWarrior maps) · cwnames.py (names)
+             mapalign.py (a map of another build of the same code, where it lines up)
                 │
 program      program.py: functions, data objects, sections, small-data bases, references between them
                 │
@@ -86,6 +87,22 @@ each literal, so two copies of one value separate their users and one copy share
 only one run of code uses belongs to it; source paths cited by the code name a unit. `--check` compares an existing
 split against the same evidence: folds (two units holding one unit's data), splits (one unit holding two copies of
 one literal) and data claims (data in no unit that one unit's code alone uses).
+
+A data object's size is its own: discovery ends a jump table at its last case, a literal string (used by its
+address, never loaded) at its NUL, and a small-data object code only loads and stores whole at one width at that
+width, leaving the zero padding before an aligned next object to the gap; nothing shrinks past an address the code
+or data reaches inside it. Data no code uses that only one unit's data points to (a table's strings) is that unit's.
+
+`mapalign.py` takes units, names and sizes from a CodeWarrior map of another build of the same code (a debug build's
+map shipped on the disc), only where that build holds the same object. Both builds link in one order, so their
+functions are aligned in order by size and spacing; a run counts when its sizes are improbable by chance beyond the
+places the search tried. An object whose every function lines up takes its name, its functions' names and its code
+range, and places its data pieces where the original's own references (from its code, then from its placed data)
+land on the map's symbols; an object whose code differs but whose neighbours line up takes its name and code range
+only. `units.propose` takes these units as given and weighs their data against the other claims in link order, so a
+placement the original contradicts gives way; on a decomp in progress, units with a source stay as they are. On
+Double Dash (a debug build's map), 318 of the original's units come from the map and the relink stays
+byte-identical.
 
 `vtables.py` finds class tables as data whose words have CodeWarrior's table shape (RTTI and offset words, then
 one function pointer per slot) and that the code stores into an object, or that holds a destructor; a dispatch
