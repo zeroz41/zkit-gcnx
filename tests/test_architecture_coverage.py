@@ -85,7 +85,7 @@ class ProjectAuditTests(unittest.TestCase):
         async def scenario():
             server = create_server(self.project)
             names = {tool.name for tool in await server.list_tools()}
-            self.assertNotIn('zkit_architecture', names)
+            self.assertNotIn('zkit_architecture', names)  # merged into zkit_check; never a separate tool
             self.assertNotIn('zkit_coverage', names)
         asyncio.run(asyncio.wait_for(scenario(), 15))
 
@@ -135,7 +135,7 @@ class ProjectAuditTests(unittest.TestCase):
         from zkit.cli import build_parser, run
         from zkit.server import create_server
         self.write('engine/simulation/Actor.cpp', '#include "device/Device.hpp"\n')
-        cases = [('architecture', ['port', '--all'], 'zkit_architecture', {'repo': 'port', 'all_files': True}),
+        cases = [('check', ['port', 'engine'], 'zkit_check', {'repo': 'port', 'paths': ['engine']}),
                  ('coverage', ['port', 'effects'], 'zkit_coverage', {'repo': 'port', 'name': 'effects'})]
         async def scenario():
             server = create_server(self.project)
@@ -144,4 +144,9 @@ class ProjectAuditTests(unittest.TestCase):
                 result = await server.call_tool(tool, {**args, 'response_format': 'json'})
                 blocks = result[0] if isinstance(result, tuple) else result
                 self.assertEqual(json.loads(''.join(b.text for b in blocks)), expected)
+            return expected
         asyncio.run(asyncio.wait_for(scenario(), 15))
+        # The include rules are part of the finish check (MCP zkit_check); the CLI keeps `architecture --all`.
+        found, _ = run(build_parser().parse_args(['--project', str(self.manifest), 'check', 'port', 'engine']))
+        self.assertEqual([(f['rule'], f['ref']) for f in found['findings']],
+                         [('include-boundary', 'engine/simulation/Actor.cpp:1')])

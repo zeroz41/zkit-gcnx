@@ -41,17 +41,27 @@ def _p(key: str, label: str, regex: str, group: str, blocks_port: bool = True, f
 # A project adds or replaces patterns in its manifest (`quality.patterns`: key -> {label, regex, group}).
 DEFAULT_PATTERNS: tuple[Pattern, ...] = (
     _p("extern_c", 'extern "C" declarations', r'\bextern\s+"C"', "linkage", blocks_port=False),
+    # A hand-mangled spelling names its callee in full: spelling debt that does not hide what the code does.
     _p("mangled_member", "hand-mangled member names (CodeWarrior)",
-       r"\b[A-Za-z_]\w*?__\d+[A-Za-z_]\w*?F\w*\b", "linkage"),
+       r"\b[A-Za-z_]\w*?__\d+[A-Za-z_]\w*?F\w*\b", "linkage", blocks_port=False),
     _p("mangled_free", "hand-mangled free functions (CodeWarrior name__F...)", r"\b[A-Za-z_]\w*?__F[A-Za-z]\w*\b",
-       "linkage"),
-    _p("mangled_itanium", "hand-mangled names (Itanium _Z...)", r"\b_Z(?:N|L|T[VIS])?\d*[A-Za-z_]\w*\b", "linkage"),
+       "linkage", blocks_port=False),
+    _p("mangled_itanium", "hand-mangled names (Itanium _Z...)", r"\b_Z(?:N|L|T[VIS])?\d*[A-Za-z_]\w*\b", "linkage",
+       blocks_port=False),
     _p("raw_offset", "raw pointer + offset accesses",
        r"\(\s*\(?\s*(?:const\s+)?(?:u8|s8|char|unsigned\s+char|signed\s+char|uint8_t|int8_t|byte|undefined1?)"
        r"\s*\*\s*\)\s*\(?\s*[\w.\->]+\s*\)?\s*\+\s*(?:0x[0-9A-Fa-f]+|\d+)\s*\)", "layout"),
+    _p("offset_member", "offset-named members (m_30c, unk_308, field_96, ->f30, getField1c)",
+       r"\b(?:m_|unk_?|field_?)(?:0x)?(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{2,4}\b|(?:->|\.)\s*f(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{2,4}\b"
+       r"|\b[a-z]\w*Field_?(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{1,4}\b", "layout"),
+    _p("punned_deref", "type-punned or cast-pointer derefs (*(f32 *)&x, *(s32 *)(p + 0x18))",
+       r"\*\s*\(\s*(?:(?:const|volatile)\s+)*[A-Za-z_][\w:]*(?:\s+[A-Za-z_]\w*)*\s*\*+\s*(?:const\s*)?\)\s*"
+       r"(?:&|\(\s*[^()]*?\+\s*(?:0x[0-9A-Fa-f]+|\d+)\s*\))", "layout"),
+    _p("fp_cast", "calls through function-pointer casts ((void (*)(T *))p)",
+       r"\(\s*[A-Za-z_][\w:\s\*&<>,]*\(\s*\*+\s*\)\s*\([^()]*\)\s*\)\s*[\w(*&]", "types"),
     _p("decomp_temp", "m2c temporaries (temp_r3, var_f31)", r"\b(?:temp|var)_[rfa]\d+(?:_\d+)?\b", "decompiler"),
     _p("stack_local", "stack-slot locals (sp8, sp1C)", r"\bsp[0-9A-F]{1,3}\b", "decompiler"),
-    _p("arg_name", "argN parameters", r"\barg\d+\b", "decompiler"),
+    _p("arg_name", "argN parameters (arg0, farg1)", r"\bf?arg\d+\b", "decompiler"),
     _p("ghidra_temp", "Ghidra temporaries (iVar1, puVar2, param_1, local_10)",
        r"\b(?:[a-z]{1,3}Var\d+|param_\d+|local_[0-9a-fA-F]+|in_[a-z]+\d*|unaff_\w+|extraout_\w+|auStack_\w+)\b",
        "decompiler"),
@@ -64,23 +74,26 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
     _p("address_in_name", "names built around an address (call_36A90_with_1)",
        r"\b(?!(?:lbl|fn|sub|func|dat|ptr|jumptable|switch|temp|var|arg|sp|text|data|bss|rodata)_[0-9A-F])"
        r"[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_(?=[0-9A-F]*\d)[0-9A-F]{5,8}_[A-Za-z0-9]\w*\b", "names"),
-    _p("address_type", "address-named types (Obj_800EB910, VObj_18_...)",
-       r"\b(?:struct|class|union)\s+[A-Za-z]\w*?_[0-9A-Fa-f]{8}\w*|\(\s*[A-Z][A-Za-z]*_[0-9A-Fa-f]{8}\w*\s*\*\s*\)",
+    _p("address_type", "address-named types (Obj_800EB910 *, TUnk_804806E8::, VObj_18_...)",
+       r"\b(?:struct|class|union)\s+[A-Za-z]\w*?_[0-9A-Fa-f]{8}\w*"
+       r"|\b(?!(?:lbl|fn|FUN|func|sub|DAT|PTR|dat|jumptable|switch)_)[A-Za-z]\w*?_[0-9A-Fa-f]{8}\w*(?=\s*(?:[*&]|::|<))",
        "types"),
     _p("vtable_symbol", "vtable symbols spelled in source (__vt__, _ZTV)", r"\b__vt__\d+\w+|\b_ZTV\w+|\b\w+__vtable\b",
        "vtables"),
     _p("hand_vtable", "hand-written function tables standing in for vtables",
        r"\bvoid\s*\*\s*(?:const\s+)?\w*(?:vt|vtable|vtbl)\w*\s*\[\s*\d*\s*\]\s*=", "vtables", flags=re.I),
     _p("filler_virtual", "filler virtuals (VA, CAT(f, __LINE__), reserved_N, slotNN)",
-       r"CAT\s*\(\s*\w+\s*,\s*__LINE__\s*\)|\bvirtual\s+\w[\w\s\*&]*\b(?:reserved|virtual|slot|vfunc|dummy|pad)_?\d+\s*\(",
+       r"CAT\s*\(\s*\w+\s*,\s*__LINE__\s*\)|\bvirtual\s+\w[\w\s\*&]*\b(?:reserved|virtual|slot|dummy|pad)_?\d+\s*\(",
+       "vtables"),
+    _p("slot_name", "vtable-slot names (vfunc_67, Class__vt82)", r"\bvfunc_?\d+(?!\d)|\b[A-Za-z_]\w*?__vt\d+(?!\d)",
        "vtables"),
     _p("local_virtual", "virtual declarations in source files (TU-local stand-in classes)",
        r"(?m)^\s*virtual\b[^;{]*[;{]", "vtables", sources_only=True),
     _p("retype_macro", "#define re-typings of globals or functions",
        r"#\s*define\s+(\w+)\s+\(\s*\*\s*\([^)]*\*\s*\)\s*&\s*\1\s*\)|#\s*define\s+(\w+)\s+\(\s*\([^)]*\(\s*\*\s*\)\s*\([^)]*\)\s*\)\s*\2\s*\)",
        "types"),
-    _p("inline_asm", "assembly in source (asm blocks, __asm__)", r"\basm\s*\{|\b__asm__\b|\basm\s+[\w\s\*]+\w+\s*\([^;]*\)\s*\{",
-       "asm"),
+    _p("inline_asm", "assembly in source (asm blocks, __asm__)",
+       r"\basm\s*\{|\b__asm__\b|\basm\s+[\w\s\*&:~<>,]+?\w+\s*\([^;]*\)\s*\{", "asm"),
 )
 SUMMARY_GROUPS = ("linkage", "layout", "types", "names", "vtables", "decompiler", "asm")
 
@@ -212,15 +225,15 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
             "worse": [r for r in rows if r["delta"] > 0]}
 
 
-def findings(text: str, catalog: Iterable[Pattern], port_only: bool = False) -> list[dict]:
-    """Every match in a piece of source (one line or a function body), for check and port readiness."""
+def findings(text: str, catalog: Iterable[Pattern]) -> list[dict]:
+    """Every match in a piece of source (one line or a function body), for check and port readiness; `blocks`
+    says whether it hides what the code does (spelling debt such as a hand-mangled call does not)."""
     code = _strip_comments(text)
     out = []
     for pattern in catalog:
-        if port_only and not pattern.blocks_port:
-            continue
         for match in pattern.regex.finditer(code):
-            out.append({"key": pattern.key, "label": pattern.label, "text": match.group(0)[:80]})
+            out.append({"key": pattern.key, "label": pattern.label, "text": match.group(0)[:80],
+                        "group": pattern.group, "blocks": pattern.blocks_port})
     return out
 
 

@@ -35,7 +35,8 @@ class ImpactTests(unittest.TestCase):
             {'name': 'disabled-check', 'command': [str(build / 'check')], 'properties': [
                 {'name': 'DISABLED', 'value': True}]}]}), encoding='utf-8')
         config = json.loads(self.manifest.read_text(encoding='utf-8'))
-        config['repositories']['native']['tests'] = {'build_dir': 'build', 'catalog': 'build/catalog.json'}
+        config['repositories']['native']['tests'] = {'build_dir': 'build', 'catalog': 'build/catalog.json',
+                                                     'label_order': ['gpu', 'unit']}
         self.manifest.write_text(json.dumps(config), encoding='utf-8')
         result = impact(Project.load(self.manifest), 'native', ['src/actors/Enemy.hpp', 'tests/check.py'])
         self.assertEqual(result['groups']['direct'], {'gpu': ['field-gpu'], 'unlabelled': ['script-check']})
@@ -114,14 +115,17 @@ class ImpactTests(unittest.TestCase):
         self.write_native('src/actors/Enemy.cpp', '// Original enemy update 80003000.\nvoid EnemyController::update() {}\n')
         data = gate(project, 'native')
         self.assertEqual(data['owning_tests']['tests'], 1)
-        self.assertIn('enemy\\-check', data['owning_tests']['commands'][0])
+        self.assertIn("-R '^(enemy-check)$'", data['owning_tests']['commands'][0])
         self.assertIn('owning checks for this diff', render_gate(data))
 
     def test_long_selection_never_expands_to_label(self):
         from zkit.native import _test_commands
-        names = [f'local-{i:04}-shared-render-scene-variant-check' for i in range(400)]
+        names = [f'{"abcdefghij"[i % 10]}{i:04}-shared-render-scene-variant-check{i % 7}' for i in range(400)]
         commands = _test_commands('build with spaces', names)
         self.assertGreater(len(commands), 1)
+        shared = _test_commands('build', [f'local-{i:04}-field' for i in range(400)])
+        self.assertEqual(len(shared), 1)  # the shared prefix and suffix are written once
+        self.assertTrue(shared[0][4].startswith('^local-0(000|001|') and shared[0][4].endswith(')-field$'))
         patterns = [re.compile(cmd[cmd.index('-R') + 1]) for cmd in commands]
         self.assertTrue(all(sum(bool(p.fullmatch(name)) for p in patterns) == 1 for name in names))
         self.assertFalse(any(p.fullmatch('local-unrelated-expensive-render-matrix') for p in patterns))
@@ -307,7 +311,7 @@ class TestPlanTests(unittest.TestCase):
             '--project', str(self.manifest), 'test-plan', 'native', 'a', 'b', '--jobs', '4']))
         self.assertIn('nothing executed', text)
         async def scenario():
-            result = await create_server(project).call_tool('zkit_test_plan', {
+            result = await create_server(project).call_tool('zkit_impact', {
                 'repo': 'native', 'names': ['a', 'b'], 'jobs': 4, 'response_format': 'json'})
             blocks = result[0] if isinstance(result, tuple) else result
             self.assertEqual(json.loads(''.join(b.text for b in blocks)), expected)

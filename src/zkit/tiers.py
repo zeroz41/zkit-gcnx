@@ -12,7 +12,7 @@ import collections
 import re
 from functools import lru_cache
 
-from .project import Project, under as _under
+from .project import Project
 
 DEFAULT = {"tier": "exact", "meaning": "No tiers configured: everything is held to the original.", "verify": ""}
 JUDGED = ("exact", "equivalent")          # tiers whose behavior must follow the original
@@ -29,6 +29,8 @@ def tiers(project: Project, repo: str) -> list[dict]:
 
 
 def tier_of(project: Project, repo: str, path: str) -> str:
+    """The first configured tier whose pattern matches the repo-relative path; a path no pattern matches is held
+    to the original (exact), so a gap in the configuration never exempts code."""
     rows = tiers(project, repo)
     if not rows:
         legacy = project.config["repositories"][repo].get("checks", {}).get("citation_required_paths")
@@ -36,7 +38,7 @@ def tier_of(project: Project, repo: str, path: str) -> str:
     for pattern, tier in _compiled(str(project.path), repo, tuple((r["pattern"], r["tier"]) for r in rows)):
         if pattern.search(path):
             return tier
-    return "infrastructure"
+    return "exact"
 
 
 def describe(project: Project, repo: str, tier: str) -> dict:
@@ -47,14 +49,16 @@ def describe(project: Project, repo: str, tier: str) -> dict:
 
 
 def summary(project: Project, repo: str, paths: list[str] | None = None) -> dict:
-    """Files per tier and per folder, so the owner can audit the mapping."""
+    """Files per tier and per folder, so the owner can audit the mapping; with paths, each file's tier (folders
+    expand to their files; any spelling of a path in the repo is accepted, missing paths are an error)."""
     from .index import connect, refresh
-    from .bridge import _is_code
+    from .bridge import _is_code, expand_paths
     refresh(project, [repo])
-    db = connect(project)
-    files = [r[0] for r in db.execute("SELECT path FROM files WHERE repo=?", (repo,)) if _is_code(project, r[0])]
     if paths:
-        files = [f for f in files if _under(f, paths) or f in paths]
+        files = expand_paths(project.root(repo), paths)
+    else:
+        db = connect(project)
+        files = [r[0] for r in db.execute("SELECT path FROM files WHERE repo=?", (repo,)) if _is_code(project, r[0])]
     counts = collections.Counter()
     folders: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     per_file = {}
@@ -66,5 +70,7 @@ def summary(project: Project, repo: str, paths: list[str] | None = None) -> dict
     return {"repo": repo, "counts": dict(counts),
             "folders": {k: dict(v) for k, v in sorted(folders.items())},
             "files": per_file if paths else {},
+            "outside_code_paths": sorted(f for f in per_file if paths and not _is_code(project, f)),
             "tiers": [describe(project, repo, t) for t in ("exact", "equivalent", "liberty", "infrastructure")
-                      if any(r["tier"] == t for r in tiers(project, repo))]}
+                      if any(r["tier"] == t for r in tiers(project, repo))],
+            "default": "exact (a path no tier pattern matches)"}
