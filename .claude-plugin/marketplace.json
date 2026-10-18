@@ -7,8 +7,8 @@
     {
       "name": "zkit",
       "source": "./",
-      "description": "GameCube decomp and port toolkit"
+      "description": "GameCube and Switch decomp and port toolkit"
     }
   ],
-  "description": "zkit: GameCube decomp and port toolkit for Claude Code and Codex"
+  "description": "zkit: GameCube and Switch decomp and port toolkit for Claude Code and Codex"
 }
