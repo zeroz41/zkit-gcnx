@@ -65,6 +65,10 @@ class RelocationTests(unittest.TestCase):
         self.assertEqual(found, [(2, ppc.ADDR16_HA, DATA + 0x0C30), (6, ppc.ADDR16_LO, DATA + 0x0C30),
                                  (12, ppc.EMB_SDA21, SDA[2] + 0x18)])
 
+    def test_absolute_branch_is_not_a_relocation(self):
+        found, _ = relocs([(18 << 26) | 0x60 | 2, BLR])          # ba 0x60: a fixed vector
+        self.assertEqual(found, [])
+
     def test_constant_lis_is_not_a_relocation(self):
         found, _ = relocs([lis(3, 0x43300000), addi(3, 3, 0x43300000), BLR])
         self.assertEqual(found, [])
