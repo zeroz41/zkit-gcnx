@@ -225,19 +225,18 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("repo")
     c.add_argument("names", nargs="+")
     c.add_argument("--jobs", type=int, default=2, help="parallel jobs for suggested prebuilds (nothing is executed)")
-    c = add("grounding", help="Native: how much cited original behavior is proven exact in the decomp")
+    c = add("grounding", aliases=["suspects"],
+            help="Native: how much cited original behavior is a ready reference in the decomp, and the units most "
+                 "likely to behave slightly off, with the next action")
     c.add_argument("repo", nargs="?")
     c.add_argument("paths", nargs="*", help="folders/files (default: code_paths)")
+    c.add_argument("--limit", type=int, default=25)
     c = add("tiers", help="Native: which fidelity tier (exact/equivalent/liberty/infrastructure) each path is in")
     c.add_argument("repo", nargs="?")
     c.add_argument("paths", nargs="*")
     c = add("consts", help="Native: float literals vs the constants the cited originals load")
     c.add_argument("repo", nargs="?")
     c.add_argument("paths", nargs="*")
-    c = add("suspects", help="Native: files most likely to behave slightly off, with the next action")
-    c.add_argument("repo", nargs="?")
-    c.add_argument("paths", nargs="*")
-    c.add_argument("--limit", type=int, default=25)
     c = add("drift", help="Decomp changes under cited functions since the accepted baseline (what to re-verify)")
     c.add_argument("repo", nargs="?", help=argparse.SUPPRESS)  # agents write `drift native`; drift spans every repo
     c.add_argument("--accept", action="store_true", help="accept the current state as the new baseline")
@@ -443,7 +442,7 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
 
     target = bridge.default_target(project, args.target) if project.config.get("targets") else None
     command = "check-recipe" if args.command == "recipe-preflight" else args.command
-    native_only = ("impact", "grounding", "consts", "suspects", "tiers", "stale")
+    native_only = ("impact", "grounding", "suspects", "consts", "tiers", "stale")
     path_commands = ("check", "quality") + native_only
     here, worktree = project.locate(Path.cwd())
     if getattr(args, "repo", None):
@@ -647,9 +646,9 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from .native import test_plan
         data = test_plan(project, args.repo, args.names, args.jobs)
         return data, render.test_plan(data)
-    if command == "grounding":
-        from .native import grounding
-        data = grounding(project, args.repo, args.paths or None, target)
+    if command in ("grounding", "suspects"):
+        from .fidelity import grounding
+        data = grounding(project, args.repo, args.paths or None, target, args.limit)
         return data, render.grounding(data)
     if command == "tiers":
         from .tiers import summary
@@ -659,18 +658,12 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from .fidelity import constant_audit
         data = constant_audit(project, args.repo, args.paths or None, target)
         return data, render.consts(data)
-    if command == "suspects":
-        from .fidelity import suspects
-        data = suspects(project, args.repo, args.paths or None, target, args.limit)
-        return data, render.suspects(data)
     if command == "drift":
         from .fidelity import drift
         data = drift(project, target, args.accept, args.since.resolve() if args.since else None)
         return data, render.drift(data)
     if command == "reuse":
-        terms = args.terms.split(",") if args.terms else \
-            project.config.get("variants", {}).get(args.variants, []) if args.variants else None
-        data = bridge.reuse(project, args.repo, terms, args.min_files)
+        data = bridge.reuse(project, args.repo, bridge.variant_terms(project, args.variants, args.terms), args.min_files)
         return data, render.reuse(data)
     if command == "activity":
         data = activity(project)

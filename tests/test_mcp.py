@@ -67,8 +67,16 @@ class McpTests(unittest.TestCase):
             manifest.write_text(json.dumps({"schema_version": 1, "id": "ported", "repositories": {
                 "decomp": {"root": ".", "role": "decomp"}, "native": {"root": ".", "role": "native"}}}))
             names = {t.name for t in create_server(Project.load(manifest))._tool_manager.list_tools()}
+            manifest.write_text(json.dumps({"schema_version": 1, "id": "ported", "repositories": {
+                "decomp": {"root": ".", "role": "decomp"},
+                "native": {"root": ".", "role": "native", "tests": {"build_dir": "build"}}},
+                "targets": {"t": {"repository": "decomp", "module": "main", "original": "main.dol"}}}))
+            full = {t.name for t in create_server(Project.load(manifest))._tool_manager.list_tools()}
             from zkit.index import close_connections
             close_connections()
-        self.assertEqual(len(names), 30)
-        self.assertTrue({"zkit_impact", "zkit_drift", "zkit_port_plan", "zkit_demand"} <= names)
-        self.assertNotIn("zkit_recipes", names)
+        # Without an original, the tools that read it are left out; with one (and a CTest build), they are offered.
+        self.assertNotIn("zkit_port_plan", names)
+        self.assertEqual(len(full), 33)
+        self.assertTrue({"zkit_impact", "zkit_stale", "zkit_drift", "zkit_port_plan", "zkit_demand", "zkit_grounding",
+                         "zkit_consts"} <= full)
+        self.assertFalse({"zkit_recipes", "zkit_suspects", "zkit_test_plan", "zkit_architecture"} & full)

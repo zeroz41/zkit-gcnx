@@ -1,14 +1,13 @@
-"""Native-port answers: which tests prove a change, and how well a system is grounded.
+"""Native-port build answers: which tests prove a change, and whether built programs are current.
 
-impact     changed files -> other code that includes them (the "other consumers" a shared change
-           must be re-tested against) -> test executables that compile them -> CTest names,
-           grouped by label, with recorded run times and ready-to-run commands.
-grounding  for native files/folders: how many cited original functions are exact, linked,
-           semantically named, unmatched or unresolved in the decomp, and which ported functions
-           cite nothing.
+impact     changed files -> other code that includes or links them (the "other consumers" a shared change
+           must be re-tested against) -> test executables that compile or link them -> CTest names,
+           grouped by tier and label, with recorded run times and ready-to-run commands.
+test_plan  exact CTest names -> their fixture closure, costs and optional consolidated prebuilds.
+stale      built programs older than a source or header compiled into them.
 
-Both read the build's own files (compile_commands.json, `ctest --show-only=json-v1`,
-CTestCostData.txt). Nothing here builds or runs tests.
+All read the build's own files (CMake's compile_commands.json, `ctest --show-only=json-v1`,
+CTestCostData.txt, Ninja's build.ninja). Nothing here builds or runs tests.
 """
 
 from __future__ import annotations
@@ -23,9 +22,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .bridge import _changed_files, _normalize, _status, default_target
-from .index import connect, containing, refresh
-from .project import Project, under as _under
+from .bridge import _changed_files
+from .project import Project
 
 INCLUDE = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.M)
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".inl", ".inc"}
@@ -82,6 +80,15 @@ class IncludeGraph:
                     if name is not None:
                         self.includers[name].add(rel)
                         break
+
+    def implemented(self, rel: str) -> set[str]:
+        """Headers a source without a header of its own implements: the ones it includes from its own folder that
+        it is named after (GameWorldSounds.cpp -> GameWorld.hpp), so its tests are that header's tests."""
+        path = Path(rel)
+        if path.suffix not in {".c", ".cc", ".cpp", ".cxx"} or len(_companions(rel, set(self.files))) > 1:
+            return set()
+        return {h for h, users in self.includers.items() if rel in users and Path(h).parent == path.parent
+                and len(Path(h).stem) >= 3 and path.stem.startswith(Path(h).stem)}
 
     def distances(self, seeds: set[str]) -> dict[str, int]:
         """Breadth-first include distance from the seeds (0 = the changed file or its pair)."""
@@ -231,20 +238,38 @@ def _command_files(test: dict, build: Path, root: Path) -> set[str]:
     return result
 
 
-def _test_commands(test_dir: str, names: list[str]) -> list[list[str]]:
-    """Bound command size without widening a selection to an entire label."""
-    chunks, chunk, length = [], [], 0
+CMAKE_SPECIAL = set("\\^$.|?*+()[]{}")
+
+
+def _cmake_escape(text: str) -> str:
+    """Escape for CMake's regex (ctest -R): only its special characters; '-' is literal there."""
+    return "".join("\\" + c if c in CMAKE_SPECIAL else c for c in text)
+
+
+def _test_regex(names: list[str]) -> str:
+    """^(a|b)$ for exact names, with a prefix and suffix all of them share written once. CMake's regex allows
+    few groups, so this is one group, never a nested trie."""
+    prefix = os.path.commonprefix(names) if len(names) > 1 else ""
+    suffix = os.path.commonprefix([n[len(prefix):][::-1] for n in names])[::-1] if len(names) > 1 else ""
+    if any(len(n) <= len(prefix) + len(suffix) for n in names):  # a name would become an empty alternative
+        prefix = suffix = ""
+    middles = [n[len(prefix):len(n) - len(suffix)] for n in names]
+    return f"^{_cmake_escape(prefix)}(" + "|".join(_cmake_escape(m) for m in middles) + f"){_cmake_escape(suffix)}$"
+
+
+def _test_commands(test_dir: str, names: list[str], limit: int = 3000) -> list[list[str]]:
+    """ctest commands selecting exactly these names, each regex within about `limit` characters (never widened to
+    a whole label)."""
+    chunks, chunk = [], []
     for name in names:
-        escaped = re.escape(name)
-        if chunk and length + len(escaped) > 3000:
+        if chunk and len(_test_regex(chunk + [name])) > limit:
             chunks.append(chunk)
-            chunk, length = [], 0
-        chunk.append(escaped)
-        length += len(escaped) + 1
+            chunk = []
+        chunk.append(name)
     if chunk:
         chunks.append(chunk)
-    return [["ctest", "--test-dir", test_dir, "-R", "^(" + "|".join(c) + ")$",
-             "--output-on-failure", "--no-tests=error"] for c in chunks]
+    return [["ctest", "--test-dir", test_dir, "-R", _test_regex(c), "--output-on-failure", "--no-tests=error"]
+            for c in chunks]
 
 
 def _display_command(argv: list[str]) -> str:
@@ -290,8 +315,17 @@ def _fixture_build(test: dict, build: Path) -> tuple[tuple[str, ...], list[str]]
     return (str(directory.resolve()), *prefix), targets
 
 
-def test_plan(project: Project, repo: str, names: list[str], jobs: int = 2) -> dict:
+def _load_catalog(root: Path, config: dict, build: Path) -> list[dict]:
+    """The CTest catalog: a saved `ctest --show-only=json-v1` file (`tests.catalog`), else ctest's live answer."""
+    catalog_file = config.get("catalog")
+    return (json.loads((root / catalog_file).read_text(encoding="utf-8")).get("tests", [])
+            if catalog_file else _catalog(build))
+
+
+def test_plan(project: Project, repo: str, names: list[str] | str, jobs: int = 2) -> dict:
     """Resolve exact tests and their fixture closure; suggest commands without executing them."""
+    if isinstance(names, str):
+        names = [n for n in re.split(r"[\s,]+", names) if n]
     if not names or any(not isinstance(n, str) or not n.strip() for n in names):
         raise ValueError('Pass one or more exact CTest names')
     if isinstance(jobs, bool) or jobs < 1 or jobs > 1024:
@@ -299,10 +333,11 @@ def test_plan(project: Project, repo: str, names: list[str], jobs: int = 2) -> d
     config = _tests_config(project, repo)
     root = project.root(repo)
     build = root / config.get('build_dir', 'build')
-    catalog_file = config.get('catalog')
-    catalog = (json.loads((root / catalog_file).read_text(encoding='utf-8')).get('tests', [])
-               if catalog_file else _catalog(build))
-    catalog = {t['name']: t for t in catalog}
+    return _plan(repo, _load_catalog(root, config, build), build, names, jobs)
+
+
+def _plan(repo: str, tests: list[dict], build: Path, names: list[str], jobs: int) -> dict:
+    catalog = {t['name']: t for t in tests}
     props = {n: {p['name']: p['value'] for p in t.get('properties', [])} for n, t in catalog.items()}
     selected = sorted(set(names))
     missing = [n for n in selected if n not in catalog]
@@ -357,7 +392,7 @@ def test_plan(project: Project, repo: str, names: list[str], jobs: int = 2) -> d
             prebuilds.append({'cwd': key[0], 'argv': argv, 'command': _display_command(argv),
                              'targets': targets, 'fixture_tests': group['fixtures']})
     ready = not (missing or disabled or unresolved)
-    commands = _test_commands(str(build), selected) if ready else []
+    commands = _test_commands(str(build), [n for n in selected if n not in missing]) if ready else []
     return {'repo': repo, 'ok': ready, 'selected': selected, 'missing': missing, 'disabled': disabled,
             'unresolved_fixtures': sorted(unresolved), 'fixture_tests': fixture_tests,
             'costs': {'selected': cost([n for n in selected if n in catalog]), 'fixtures': cost(fixture_tests)},
@@ -371,22 +406,31 @@ def test_plan(project: Project, repo: str, names: list[str], jobs: int = 2) -> d
 
 def impact(project: Project, repo: str, paths: list[str] | None = None, base: str = "HEAD",
            target: str | None = None, budget: float | None = None) -> dict[str, Any]:
+    """Changed files -> the code that includes or links them -> the exact CTest names that can run that code.
+
+    Tiers: direct (a test source includes the change, or its pair X.cpp/X.hpp, or the header a split source is
+    named after, at include distance 0-1, or a test command names the file), near (distance 2), linked (the
+    test's program links an object built from the change), broad (distance 3 or more: counted and named, not
+    selected). Direct tests always run and near tests are selected (with a budget: cheapest first, every program
+    before repeats); linked tests are a sample (the cheapest test of each linking program) only for a file nothing
+    else reaches, otherwise deferred like the rest, with their own command."""
     config = _tests_config(project, repo)
     root = project.root(repo)
     build = root / config.get("build_dir", "build")
     paths = [p for p in paths or [] if p.strip() not in ("", ".", "./")]  # "." = the whole working-tree diff
-    changed = [_normalize(root, p) for p in paths] if paths else _changed_files(root, base)
+    from .bridge import expand_paths
+    changed = expand_paths(root, paths) if paths else list(_changed_files(root, base))
     if not changed:
-        return {"repo": repo, "changed": [], "note": "No changed source files (pass paths or --base)."}
+        return {"repo": repo, "changed": [], "note": "No changed source files (pass paths or base)."}
     graph = IncludeGraph(root, config.get("include_roots", ["src", "tests", "."]),
                          config.get("scan", ["src", "tests"]))
     known = set(graph.files)
     code_prefix = tuple(project.config["repositories"][repo].get("code_paths", ["src/"]))
     test_prefix = tuple(config.get("test_paths", ["tests/"]))
     targets = _targets(build, root)
-    catalog_file = config.get("catalog")  # saved `ctest --show-only=json-v1` output (tests, offline use)
-    catalog = json.loads((root / catalog_file).read_text(encoding="utf-8")).get("tests", []) if catalog_file else _catalog(build)
+    catalog = _load_catalog(root, config, build)
     costs = _costs(build)
+    closures = {Path(output).name: sources for output, sources in link_closures(build, root).items()}
     by_program: dict[str, list[dict]] = collections.defaultdict(list)
     by_file: dict[str, list[dict]] = collections.defaultdict(list)
     programs: dict[str, set[str]] = {}
@@ -409,25 +453,25 @@ def impact(project: Project, repo: str, paths: list[str] | None = None, base: st
                 program_sources[owner].append(source)
     resolved: dict[str, list[str]] = {}
     texts = _Sources(root)
+    order = ["direct", "near", "broad", "linked"]  # include evidence first; linking alone is the weakest
 
     def case_sources(test: dict, program: str) -> list[str]:
         if test["name"] not in resolved:
             resolved[test["name"]] = _case_sources(texts, test, sorted(program_sources.get(program, [])))
         return resolved[test["name"]]
 
-    per_file, all_tests = [], {}
+    per_file, all_tests, sample = [], {}, set()
     for rel in changed:
-        seeds = _companions(rel, known)
+        seeds = _companions(rel, known) | graph.implemented(rel)
         distance = graph.distances(seeds)
         consumers = sorted(d for d, n in distance.items() if n == 1 and d.startswith(code_prefix) and d not in seeds)
         test_sources = {d: n for d, n in distance.items() if d.startswith(test_prefix)}
-        tests_here = {"direct": set(), "near": set(), "broad": set()}
+        tests_here: dict[str, set[str]] = {tier: set() for tier in order}
 
         def record(test: dict, tier: str) -> None:
             tests_here[tier].add(test["name"])
             props = {p["name"]: p["value"] for p in test.get("properties", [])}
-            previous = all_tests.get(test["name"], {}).get("tier", "broad")
-            order = ["direct", "near", "broad"]
+            previous = all_tests.get(test["name"], {}).get("tier", order[-1])
             all_tests[test["name"]] = {"labels": props.get("LABELS", []), "seconds": costs.get(test["name"]),
                                        "disabled": bool(props.get("DISABLED")),
                                        "tier": order[min(order.index(previous), order.index(tier))],
@@ -439,55 +483,71 @@ def impact(project: Project, repo: str, paths: list[str] | None = None, base: st
             tier = "direct" if n <= 1 else "near" if n == 2 else "broad"
             for program in targets.get(source, ()):
                 for test in by_program.get(program, []):
-                    if source not in case_sources(test, program):
-                        continue
-                    record(test, tier)
-        tests_here["near"] -= tests_here["direct"]
-        tests_here["broad"] -= tests_here["direct"] | tests_here["near"]
+                    if source in case_sources(test, program):
+                        record(test, tier)
+        built_from = {s for s in seeds if not s.startswith(test_prefix)}  # a test source runs only in its suite
+        linkers = sorted(name for name, sources in closures.items() if sources & built_from)
+        for program in linkers:
+            for test in by_program.get(program, []):
+                record(test, "linked")
+        for index, tier in enumerate(order[1:], 1):
+            tests_here[tier] -= set().union(*(tests_here[t] for t in order[:index]))
+        if not tests_here["direct"] and not tests_here["near"]:
+            sample |= tests_here["linked"]  # nothing closer reaches this file: sample the programs linking it
         per_file.append({"file": rel, "consumers": consumers, "consumer_count": len(consumers),
-                         "transitive_dependents": len(distance) - len(seeds),
+                         "transitive_dependents": len(distance) - len(seeds), "linked_by": linkers,
+                         "implements": sorted(seeds - _companions(rel, known)),
                          "tests": {k: len(v) for k, v in tests_here.items()}})
-    deferred: list[str] = []
+    live = {n: i for n, i in all_tests.items() if not i["disabled"]}
+    family = lambda n: tuple(sorted(programs.get(n) or ())) or (n,)
+    cheapest = lambda n: (all_tests[n]["seconds"] is None, all_tests[n]["seconds"] or 0, n)
+    direct = [n for n, i in live.items() if i["tier"] == "direct"]
+    covered = {family(n) for n in direct}
+    linked_first, linked_rest = [], []
+    for name in sorted((n for n, i in live.items() if i["tier"] == "linked"), key=cheapest):
+        (linked_first if name in sample and family(name) not in covered else linked_rest).append(name)
+        covered.add(family(name))
+    candidates = sorted((n for n, i in live.items() if i["tier"] == "near"), key=cheapest) + linked_first
+    deferred = list(linked_rest)
+    notes = []
     if budget is not None:
-        # Direct tests always run. Near tests then fill the recorded-time budget: first the cheapest test of each
-        # test program not yet exercised, then the cheapest of the rest; unmeasured tests go last. Cheapest-only
-        # skipped whole programs, and a real failure hid in one of them.
-        live = {n: i for n, i in all_tests.items() if not i["disabled"]}
-        spent = sum(i["seconds"] or 0 for i in live.values() if i["tier"] == "direct")
-        near = sorted((n for n, i in live.items() if i["tier"] == "near"),
-                      key=lambda n: (all_tests[n]["seconds"] is None, all_tests[n]["seconds"] or 0, n))
-        family = lambda n: tuple(sorted(programs.get(n) or ())) or (n,)
-        covered = {family(n) for n, i in live.items() if i["tier"] == "direct"}
+        # Direct tests always run. Near tests and the linked sample then fill the recorded-time budget: first the
+        # cheapest test of each program not yet exercised, then the cheapest of the rest; unmeasured tests last.
+        spent = sum(live[n]["seconds"] or 0 for n in direct)
+        if spent > budget or any(live[n]["seconds"] is None for n in direct):
+            notes.append(f"direct tests alone need {spent:.1f} s recorded"
+                         + (f" + {sum(live[n]['seconds'] is None for n in direct)} unmeasured" if any(
+                             live[n]['seconds'] is None for n in direct) else "")
+                         + f" against the {budget:g} s budget; they are never dropped")
+        seen = {family(n) for n in direct}
         first = []
-        for name in near:
-            if family(name) not in covered:
-                covered.add(family(name))
+        for name in sorted(candidates, key=cheapest):
+            if family(name) not in seen:
+                seen.add(family(name))
                 first.append(name)
-        near = first + [n for n in near if n not in set(first)]
-        for name in near:
-            seconds = all_tests[name]["seconds"]
+        for name in first + [n for n in sorted(candidates, key=cheapest) if n not in set(first)]:
+            seconds = live[name]["seconds"]
             if seconds is not None and spent + seconds <= budget:
                 spent += seconds
             else:
                 deferred.append(name)
-                all_tests[name]["tier"] = "deferred"
-    groups: dict[str, dict[str, list[str]]] = {"direct": collections.defaultdict(list),
-                                               "near": collections.defaultdict(list)}
-    broad = 0
+    for name in deferred:
+        all_tests[name]["tier"] = "deferred"
+    label_order = config.get("label_order", [])
+    groups: dict[str, dict[str, list[str]]] = {t: collections.defaultdict(list) for t in ("direct", "near", "linked")}
+    broad = []
     for name, info in sorted(all_tests.items()):
-        if info["disabled"]:
+        if info["disabled"] or info["tier"] == "deferred":
             continue
         if info["tier"] == "broad":
-            broad += 1
+            broad.append(name)
             continue
-        if info["tier"] == "deferred":
-            continue
-        label = next((l for l in ("gpu", "unit", "reference", "local") if l in info["labels"]),
+        label = next((l for l in label_order if l in info["labels"]),
                      info["labels"][0] if info["labels"] else "unlabelled")
         groups[info["tier"]][label].append(name)
     commands, totals, command_argvs, build_targets, fixtures = {}, {}, {}, {}, {}
     compiled = set().union(*targets.values()) if targets else set()
-    test_dir = config.get("build_dir", "build")
+    test_dir = str(build)
     for tier, labels in groups.items():
         for label, names in labels.items():
             seconds = sum(all_tests[n]["seconds"] or 0 for n in names)
@@ -498,78 +558,33 @@ def impact(project: Project, repo: str, paths: list[str] | None = None, base: st
             commands[key] = "\n".join(_display_command(a) for a in command_argvs[key])
             build_targets[key] = sorted(set().union(*(programs.get(n, set()) for n in names)) & compiled)
             fixtures[key] = sorted({f for n in names for f in all_tests[n]["fixtures"]})
-    groups = {tier: dict(labels) for tier, labels in groups.items()}
-    totals["broad"] = {"tests": broad, "note": "reach the change through hub headers; expand only for a concrete risk"}
-    if budget is not None:
+    groups = {tier: dict(labels) for tier, labels in groups.items() if labels}
+    totals["broad"] = {"tests": len(broad), "names": broad[:30],
+                       "note": "reach a changed file only at include distance 3 or more; run them for a shared change"}
+    if deferred:
         totals["deferred"] = {"tests": len(deferred), "budget_seconds": budget,
                               "serial_seconds": round(sum(all_tests[n]["seconds"] or 0 for n in deferred), 1),
                               "unknown_costs": sum(all_tests[n]["seconds"] is None for n in deferred)}
-        if deferred:
-            command_argvs["deferred"] = _test_commands(test_dir, sorted(deferred))
-            commands["deferred"] = "\n".join(_display_command(a) for a in command_argvs["deferred"])
-    untested = [f["file"] for f in per_file if not f["tests"]["direct"] and not f["tests"]["near"]]
-    return {"repo": repo, "changed": changed, "files": per_file, "groups": dict(groups), "totals": totals,
-            "commands": commands, "untested_files": untested, "deferred": sorted(deferred),
+        command_argvs["deferred"] = _test_commands(test_dir, sorted(deferred))
+        commands["deferred"] = "\n".join(_display_command(a) for a in command_argvs["deferred"])
+    selected = sorted(n for tier in groups.values() for names in tier.values() for n in names)
+    plan = _plan(repo, catalog, build, selected, 2) if selected else None
+    used = sorted({Path(p).name for n in selected for p in programs.get(n, ())} & set(closures))
+    stale_programs = [r for r in stale(project, repo, used)["outputs"] if r["stale"]] if used else []
+    untested = [f["file"] for f in per_file if not any(f["tests"][t] for t in ("direct", "near", "linked"))]
+    return {"repo": repo, "changed": changed, "files": per_file, "groups": groups, "totals": totals,
+            "commands": commands, "untested_files": untested, "deferred": sorted(deferred), "notes": notes,
             "command_argvs": command_argvs, "build_targets": build_targets, "fixtures": fixtures,
-            "limits": "Coverage = test executables that compile a file including the change (transitively). "
-                      "Tests driving code only through a linked library without including it are missed; "
-                      "literal CTest script/file arguments are mapped, but script imports and dynamic paths are not. "
-                      "Recorded test time excludes build fixtures and unknown costs. No mapping is not proof of no test. "
-                      "This focused selection does not replace the repository's required finish gate."}
-
-
-def grounding(project: Project, repo: str, paths: list[str] | None = None, target: str | None = None,
-              limit: int = 25) -> dict[str, Any]:
-    """Per folder/file: evidence quality of the original functions native code cites."""
-    target = default_target(project, target)
-    refresh(project, [repo])
-    db = connect(project)
-    code_prefix = tuple(project.config["repositories"][repo].get("code_paths", ["src/"]))
-    prefixes = tuple(p.rstrip("/") for p in (paths or list(code_prefix)))
-    rows = db.execute("SELECT address, path FROM cites WHERE repo=?", (repo,)).fetchall()
-    per_file: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
-    weak: dict[str, list] = collections.defaultdict(list)
-    cache: dict[int, Any] = {}
-    for address, path in rows:
-        if not _under(path, prefixes) or not path.startswith(code_prefix):
-            continue
-        if address not in cache:
-            row = containing(db, target, address)
-            cache[address] = _status(row) if row else None
-        info = cache[address]
-        counter = per_file[path]
-        counter["cites"] += 1
-        if info is None:
-            counter["not_function"] += 1
-            continue
-        counter["exact"] += info["exact"]
-        counter["linked"] += info["linked"]
-        counter["provisional"] += info["provisional_name"]
-        if not info["exact"]:
-            counter["unmatched"] += 1
-            weak[path].append(info["address"] + " " + info["name"])
-    folders: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
-    for path, counter in per_file.items():
-        folders[str(Path(path).parent)].update(counter)
-
-    def score(c: collections.Counter) -> dict:
-        functions = c["cites"] - c["not_function"]
-        return dict(c) | {"exact_pct": round(100 * c["exact"] / functions, 1) if functions else None,
-                          "named_pct": round(100 * (functions - c["provisional"]) / functions, 1) if functions else None}
-
-    from .tiers import tier_of
-    folder_rows = sorted(({"folder": k, "tier": tier_of(project, repo, k + "/x.cpp"), **score(v)}
-                          for k, v in folders.items()),
-                         key=lambda r: (r["exact_pct"] if r["exact_pct"] is not None else 101, -r["cites"]))
-    weakest = sorted(((p, sorted(set(v))) for p, v in weak.items()), key=lambda x: -len(x[1]))
-    total = collections.Counter()
-    for counter in per_file.values():
-        total.update(counter)
-    return {"repo": repo, "scope": list(prefixes), "total": score(total), "files_with_cites": len(per_file),
-            "folders": folder_rows[:limit],
-            "weakest_files": [{"path": p, "unmatched": len(v), "examples": v[:5]} for p, v in weakest[:limit]],
-            "meaning": "exact_pct: share of cited original functions that are byte-exact in the decomp. "
-                       "This does not verify native behavior, the live caller path, or uncited dependencies."}
+            "fixture_tests": plan["fixture_tests"] if plan else [], "prebuilds": plan["prebuilds"] if plan else [],
+            "plan_blocked": {k: plan[k] for k in ("missing", "disabled", "unresolved_fixtures") if plan[k]}
+            if plan else {},
+            "stale_programs": [{"program": r["output"], "newer": r["newer"][:2]} for r in stale_programs],
+            "limits": "Coverage = test programs that compile a file including the change (include distance) or "
+                      "link an object built from it (Ninja link closure). Literal CTest script/file arguments are "
+                      "mapped; script imports and dynamic paths are not. Recorded test time excludes build fixtures "
+                      "and unknown costs. No mapping is not proof of no test. This focused selection does not "
+                      "replace the repository's required finish gate. Needs CMake's compile_commands.json and CTest "
+                      "(and build.ninja for the linked tier)."}
 
 
 NINJA_BUILD = re.compile(r"^build (.+?): (\S+)(.*)$")
@@ -595,39 +610,33 @@ def _ninja_links(build: Path) -> dict[str, tuple[str, list[str]]]:
     return links
 
 
-def stale(project: Project, repo: str, outputs: list[str] | None = None) -> dict[str, Any]:
-    """Built programs older than a source compiled into them (or a header those sources include)."""
-    config = _tests_config(project, repo)
-    root = project.root(repo)
-    build = root / config.get("build_dir", "build")
-    links = _ninja_links(build)
-    if not links:
-        return {"repo": repo, "checked": False, "outputs": [],
-                "note": f"No link statements in {build / 'build.ninja'}: staleness needs a Ninja build."}
+def _object_sources(build: Path, root: Path) -> dict[str, str]:
+    """Ninja's build-relative object path -> repo-relative source, from compile_commands.json."""
     objects: dict[str, str] = {}
     compile_db = build / "compile_commands.json"
-    if compile_db.is_file():
-        for entry in json.loads(compile_db.read_text(encoding="utf-8")):
-            output = entry.get("output")
-            if not output:
-                argv = entry.get("arguments") or shlex.split(entry.get("command", ""))
-                output = next((argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "-o"), None)
-            if not output:
-                continue
-            directory = Path(entry.get("directory", build))
-            file = Path(entry["file"])
-            try:
-                key = os.path.relpath(directory / output, build).replace(os.sep, "/")  # Ninja paths are build-relative
-                objects[key] = (directory / file).resolve().relative_to(root.resolve()).as_posix()
-            except ValueError:
-                continue
-    executables = [o for o, (rule, _) in links.items() if "EXECUTABLE" in rule and (build / o).is_file()]
-    if outputs:
-        wanted = {Path(o).name for o in outputs}
-        selected = [o for o in executables if Path(o).name in wanted]
-    else:  # configured apps (what a person runs), else every linked executable
-        selected = [o for o in executables if Path(o).name in set(config["apps"])] if config.get("apps") else executables
+    if not compile_db.is_file():
+        return objects
+    for entry in json.loads(compile_db.read_text(encoding="utf-8")):
+        output = entry.get("output")
+        if not output:
+            argv = entry.get("arguments") or shlex.split(entry.get("command", ""))
+            output = next((argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "-o"), None)
+        if not output:
+            continue
+        directory = Path(entry.get("directory", build))
+        try:
+            key = os.path.relpath(directory / output, build).replace(os.sep, "/")  # Ninja paths are build-relative
+            objects[key] = (directory / entry["file"]).resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            continue
+    return objects
 
+
+def link_closures(build: Path, root: Path) -> dict[str, set[str]]:
+    """Linked executable (build-relative output) -> every source compiled into it, through static and shared
+    libraries, from build.ninja's link statements and compile_commands.json. Empty without a Ninja build."""
+    links = _ninja_links(build)
+    objects = _object_sources(build, root)
     closures: dict[str, set[str]] = {}
 
     def sources(output: str, seen: set[str]) -> set[str]:
@@ -641,7 +650,26 @@ def stale(project: Project, repo: str, outputs: list[str] | None = None) -> dict
                 found |= sources(item, seen | {item})
         closures[output] = found
         return found
+    return {output: sources(output, {output}) for output, (rule, _) in links.items() if "EXECUTABLE" in rule}
 
+
+def stale(project: Project, repo: str, outputs: list[str] | None = None) -> dict[str, Any]:
+    """Built programs older than a source compiled into them (or a header those sources include)."""
+    config = _tests_config(project, repo)
+    root = project.root(repo)
+    build = root / config.get("build_dir", "build")
+    closures = link_closures(build, root)
+    if not closures:
+        return {"repo": repo, "checked": False, "outputs": [],
+                "note": f"No executable link statements in {build / 'build.ninja'}: staleness needs a Ninja build."}
+    executables = [o for o in closures if (build / o).is_file()]
+    unknown: list[str] = []
+    if outputs:
+        wanted = {Path(o).name for o in outputs}
+        selected = [o for o in executables if Path(o).name in wanted]
+        unknown = sorted(wanted - {Path(o).name for o in selected})
+    else:  # configured apps (what a person runs), else every linked executable
+        selected = [o for o in executables if Path(o).name in set(config["apps"])] if config.get("apps") else executables
     built = {o: (build / o).stat().st_mtime for o in selected}
     oldest = min(built.values(), default=0)
     newer_headers: dict[str, float] = {}
@@ -660,7 +688,7 @@ def stale(project: Project, repo: str, outputs: list[str] | None = None) -> dict
         reach = {h: set(graph.distances(_companions(h, set(graph.files)))) for h in newer_headers}
     rows = []
     for output in sorted(selected):
-        compiled = sources(output, {output})
+        compiled = closures[output]
         newer = []
         for source in compiled:
             try:
@@ -679,6 +707,7 @@ def stale(project: Project, repo: str, outputs: list[str] | None = None) -> dict
     apps = set(config.get("apps", []))
     rows.sort(key=lambda r: (Path(r["output"]).name not in apps, not r["stale"], -built[r["output"]]))
     return {"repo": repo, "checked": True, "outputs": rows, "stale": sum(r["stale"] for r in rows),
+            "unknown_programs": unknown,
             "limits": "Compares file times: a program is stale when a source linked into it, or a header such a source "
                       "includes, is newer than the program (what Ninja's own check does for these inputs). Generated "
                       "files, content packages and data read at run time are not compared; build to be sure."}
