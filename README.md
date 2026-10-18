@@ -18,6 +18,10 @@ On Phantasy Star Online Episode I & II Plus (GameCube, 27,572 functions):
 
 Twilight Princess and Animal Crossing come out about the same.
 
+On Mario Kart: Double Dash!! (GameCube, 13,434 functions), from the disc image alone with nothing set up by hand:
+`zkit new` in 35 seconds, then `zkit build --download` fetches the toolchain and relinks the executable
+byte-identical from 553 delinked objects.
+
 ## Install
 
 You need [uv](https://docs.astral.sh/uv/getting-started/installation/) and git, and ninja to build projects.

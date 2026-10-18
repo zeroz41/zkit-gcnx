@@ -637,8 +637,9 @@ def find_objects(dol, finder: _Finder, sections: list[tuple[str, int, int]],
 
     def mark(address: int, name: str | None = None) -> None:
         found = section_of(address)
-        if found is None or (in_code(found[2]) and not any(a <= address < b for a, b in data_in_text)):
-            return
+        if found is None or (in_code(found[2]) and (address % 4 or not any(a <= address < b
+                                                                          for a, b in data_in_text))):
+            return                                    # in code, only whole words: an odd value is not a label
         if name or address not in labels:
             labels[address] = name or f"lbl_{address:08X}"
     for a, _, n in named:
@@ -660,12 +661,27 @@ def find_objects(dol, finder: _Finder, sections: list[tuple[str, int, int]],
                     mark(value)
     for table in finder.tables:
         mark(table, f"jumptable_{table:08X}")
+    for a, b, n in named:                             # .ctors/.dtors: one entry per unit's initializer (or finalizer);
+        if n in (".ctors", ".dtors"):                 # the zero words after them are the linker's terminator
+            for at, word in zip(range(a, b, 4), dol.words(a, b - a)):
+                if word:
+                    mark(at)
+    if init_tables:                                   # the linker's own tables, where its copy loop reads them
+        mark(init_tables[0], "_rom_copy_info")
+        words = dol.words(init_tables[0], init_tables[1] - init_tables[0])
+        rows = next((k for k in range(0, len(words) - 2, 3) if not any(words[k:k + 3])), None)
+        if rows is not None and init_tables[0] + 4 * (rows + 3) < init_tables[1]:
+            mark(init_tables[0] + 4 * (rows + 3), "_bss_init_info")
     index = next(((a, b) for a, b, n in named if n == "extabindex"), None)
     if index:
         words = dol.words(index[0], index[1] - index[0])
-        for offset in range(0, len(words) - 2, 3):
+        eti = _eti_init_info(index[0], words, [(a, b) for a, b, n in named if in_code(n)])
+        entries = (eti - index[0]) // 4 if eti is not None else len(words)
+        for offset in range(0, entries - 2, 3):
             mark(index[0] + 4 * offset, f"@eti_{index[0] + 4 * offset:08X}")
             mark(words[offset + 2], f"@etb_{words[offset + 2]:08X}")
+        if eti is not None:
+            mark(eti, "_eti_init_info")
     ordered = sorted(labels)
     out = []
     for position, address in enumerate(ordered):
@@ -673,8 +689,21 @@ def find_objects(dol, finder: _Finder, sections: list[tuple[str, int, int]],
         stop = min(ordered[position + 1], end) if position + 1 < len(ordered) else end
         if in_code(name):
             stop = min(stop, next(b for a, b in data_in_text if a <= address < b))
+        if name in (".ctors", ".dtors"):
+            stop = min(stop, address + 4)             # one pointer: the zeros after are the linker's terminator
         out.append((address, stop - address, name, labels[address]))
     return out
+
+
+def _eti_init_info(start: int, words: list[int], code: list[tuple[int, int]]) -> int | None:
+    """Where the linker's `_eti_init_info` begins in extabindex: records of (first entry, end of the entries, code
+    start, code size), the first starting at the section and ending where the records begin, then a zero record."""
+    for offset in range(0, len(words) - 3, 3):
+        at = start + 4 * offset
+        first, end, code_start, size = words[offset:offset + 4]
+        if first == start and end == at and size and any(a <= code_start < b for a, b in code):
+            return at
+    return None
 
 
 # Everything

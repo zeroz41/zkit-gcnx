@@ -1,0 +1,105 @@
+import support  # noqa: F401  (isolates config, cache and state)
+import struct
+import tempfile
+import unittest
+from pathlib import Path
+
+from zkit import delink, discover, link, units
+from zkit.gc import read_renames
+from zkit.program import DataObject
+
+from test_link import section, unit, words
+
+
+class _Objects:
+    """Just the data objects of a program, for the unit bounds rules."""
+
+    def __init__(self, objects):
+        from zkit.program import Program
+        self.objects = sorted(objects, key=lambda o: o.address)
+        self._object_starts = [o.address for o in self.objects]
+        self.object_at = Program.object_at.__get__(self)
+
+
+class UnitBoundsTests(unittest.TestCase):
+    """What a CodeWarrior link shows about where one object's data ends and the next begins."""
+
+    def test_a_range_ends_where_the_next_object_could_start(self):
+        shorts = _Objects([DataObject(0x100, 2, "a", ".sdata"), DataObject(0x102, 2, "b", ".sdata"),
+                           DataObject(0x104, 2, "c", ".sdata"), DataObject(0x106, 2, "d", ".sdata"),
+                           DataObject(0x108, 4, "e", ".sdata")])
+        # no object's section starts off a word: the shorts up to 0x108 are the unit's
+        self.assertEqual(units._word_bounds(shorts, 0x100, 0x102), (0x100, 0x104))
+        self.assertEqual(units._word_bounds(shorts, 0x102, 0x106), (0x100, 0x108))
+        self.assertEqual(units._word_bounds(shorts, 0x108, 0x10C), (0x108, 0x10C))
+        last = _Objects([DataObject(0x200, 4, "x", ".rodata"), DataObject(0x204, 3, "y", ".rodata")])
+        self.assertEqual(units._word_bounds(last, 0x204, 0x207), (0x204, 0x207))   # a section's end stays its own
+
+    def test_claims_against_link_order_are_dropped(self):
+        rows = [(0x10, 0x14, "a", ".data"), (0x14, 0x18, "c", ".data"), (0x18, 0x1C, "b", ".data"),
+                (0x1C, 0x20, "b", ".data"), (0x20, 0x24, "c", ".data")]
+        kept = units._in_link_order(rows, {"a": 0, "b": 1, "c": 2})
+        self.assertEqual([r[2] for r in kept], ["a", "b", "b", "c"])          # c's early claim is a reference
+
+
+class LinkerTableTests(unittest.TestCase):
+    def test_eti_init_info_is_found_where_its_record_says(self):
+        start, code = 0x80005660, [(0x800056C0, 0x80100000)]
+        entries = [0x800FF0F8, 0x7C, 0x80005600, 0x800FF174, 0x78, 0x80005608]   # two 12-byte entries
+        record = [start, start + 4 * len(entries), 0x800056C0, 0x2D2E60, 0, 0, 0, 0]
+        self.assertEqual(discover._eti_init_info(start, entries + record, code), start + 4 * len(entries))
+        self.assertIsNone(discover._eti_init_info(start, entries, code))
+
+    def test_renamed_ranges_are_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "splits.txt"
+            path.write_text("rt.cpp:\n\t.text       start:0x80000000 end:0x80000010\n"
+                            "\t.ctors      start:0x80001000 end:0x80001004 rename:.ctors$10\n")
+            self.assertEqual(read_renames(path), {("rt.cpp", ".ctors", 0x80001000): ".ctors$10"})
+            read = delink.read_units(path)[0]
+            self.assertEqual(read.renames, {(".ctors", 0x80001000): ".ctors$10"})
+            self.assertEqual(delink.section_traits(delink.PPC, ".ctors$10"),
+                             delink.section_traits(delink.PPC, ".ctors"))
+
+
+class RuntimeMemberTests(unittest.TestCase):
+    """The C++ runtime links late but leads .ctors and .dtors: mwld puts the tables of the archive member named
+    __init_cpp_exceptions.o first (a CodeWarrior link map: 372nd object in .text, first in .ctors)."""
+
+    def test_the_leading_entries_become_the_runtime_member(self):
+        sections = [section(".text", 0x1000, 0x1100, "code"), section(".ctors", 0x1100, 0x1110),
+                    section(".dtors", 0x1200, 0x1210)]
+        game = unit("game.cpp", text=(0x1000, 0x1080), ctors=(0x1104, 0x1108))
+        runtime = unit("runtime.cpp", text=(0x1080, 0x1100), ctors=(0x1100, 0x1104), dtors=(0x1200, 0x1208))
+        out = link._runtime_member([game, runtime], sections)
+        self.assertEqual([u.name for u in out], ["game.cpp", "runtime.cpp", link.RUNTIME_MEMBER])
+        self.assertEqual(dict(out[-1].ranges), {".ctors": [(0x1100, 0x1104)], ".dtors": [(0x1200, 0x1208)]})
+        self.assertEqual(dict(out[1].ranges), {".text": [(0x1080, 0x1100)]})
+        renamed = unit("runtime.cpp", text=(0x1080, 0x1100), ctors=(0x1100, 0x1104))
+        renamed.renames[(".ctors", 0x1100)] = ".ctors$10"                  # the later runtime: sorted by name
+        game = unit("game.cpp", text=(0x1000, 0x1080), ctors=(0x1104, 0x1108))
+        self.assertEqual([u.name for u in link._runtime_member([game, renamed], sections)],
+                         ["game.cpp", "runtime.cpp"])
+
+    def test_the_archive_indexes_every_global(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            symbols = [{"name": "__init_cpp_exceptions_reference", "section": ".ctors", "value": 0, "size": 4,
+                        "kind": "object", "bind": "global", "address": 0},
+                       {"name": "local_one", "section": ".ctors", "value": 0, "size": 0, "kind": "notype",
+                        "bind": "local", "address": 0}]
+            delink.write_object(delink.PPC, [(".ctors", 1, words(0), 4)], symbols, {}, root / "m.o")
+            blob = link.write_archive(root / "rt.a", [root / "m.o"], [link.RUNTIME_MEMBER]).read_bytes()
+            self.assertTrue(blob.startswith(b"!<arch>\n/ "))
+            size = int(blob[8 + 48:8 + 58])
+            table = blob[8 + 60:8 + 60 + size]
+            count, offset = struct.unpack(">II", table[:8])
+            self.assertEqual(count, 1)
+            self.assertEqual(table[8:].rstrip(b"\0"), b"__init_cpp_exceptions_reference")
+            self.assertEqual(blob[offset:offset + 2], b"/0")                 # the member, by its long name
+            self.assertIn(f"{link.RUNTIME_MEMBER}/\n".encode(), blob)
+            self.assertEqual(blob[offset + 60:offset + 64], b"\x7fELF")
+
+
+if __name__ == "__main__":
+    unittest.main()

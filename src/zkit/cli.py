@@ -451,7 +451,7 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
                         + (f"; {result['unassigned_references']:,} referenced addresses are in no unit yet"
                            if result["unassigned_references"] else "") + f"\nproject file: {result['manifest']}"
                         + "".join(f"\nnote: {note}" for note in result["build"]["notes"])
-                        + f"\nnext: cd {result['folder']} && zkit build")
+                        + f"\nnext: cd {result['folder']} && zkit build --download")
     if args.command == "init":
         from .onboard import init
         result = init(args.decomp, args.version, args.native, args.name, write=not args.dry_run)

@@ -148,6 +148,23 @@ def read_splits(path: Path) -> list[tuple[str, str, int, int]]:
     return rows
 
 
+def read_renames(path: Path) -> dict[tuple[str, str, int], str]:
+    """{(unit, section, start): section name in its object} for ranges written `rename:<name>` (`.ctors$10`: the
+    runtime's entry the linker puts first)."""
+    out, unit = {}, None
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip() or line.lstrip().startswith("//"):
+            continue
+        if not line[0].isspace():
+            match = SPLIT_UNIT.match(line)
+            unit = match["unit"] if match and match["unit"] != "Sections" else None
+            continue
+        match, renamed = SPLIT_RANGE.match(line), re.search(r"\brename:(\S+)", line)
+        if unit and match and renamed:
+            out[(unit, match["section"], int(match["start"], 16))] = renamed[1]
+    return out
+
+
 def _sext16(value: int) -> int:
     return value - 0x10000 if value & 0x8000 else value
 

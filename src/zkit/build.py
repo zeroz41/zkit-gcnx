@@ -379,8 +379,8 @@ def configure(project: Project, repository: str | None = None, only: str | None 
         elif tool:
             notes.append(f"no report: objdiff-cli reads a file named objdiff.json, not {objdiff.name}")
         else:
-            notes.append("no report: objdiff-cli not found (set build.objdiff_cli, or put it in build/tools/ or "
-                         "on PATH)")
+            notes.append("no report: objdiff-cli not found (`zkit build --download` fetches it; or set "
+                         "build.objdiff_cli, or put it on PATH)")
         linked = _link(ninja, project, name, target, config, root, paths, [*objects, *compiled, *filter(None, [report])],
                        notes, zkit)
         ninja.lines.append("")

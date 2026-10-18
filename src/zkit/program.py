@@ -89,6 +89,8 @@ class Program:
         objects = [DataObject(a, s, n, section) for a, s, section, n in found.objects]
         program = cls(platform, image, functions, objects, found.sda)
         program.labels = [DataObject(a, 0, f"lbl_{a:08X}", found.section_of(a) or "") for a in found.labels]
+        program.labels += [DataObject(a, 0, f"_{n.lstrip('.')}", n) for n, a, _ in found.sections
+                           if n in (".ctors", ".dtors")]   # the linker's names for where the tables begin
         program.sections = list(found.sections)
         program.cache["discovered"] = found
         return program

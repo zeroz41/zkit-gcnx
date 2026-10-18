@@ -42,6 +42,10 @@ LINKER_NAMES = frozenset({*LINKER_OBJECTS, "_ctors", "_dtors", "_SDA_BASE_", "_S
                           "_ABS_SDA2_BASE_", "_stack_addr", "_stack_end", "_db_stack_addr", "_db_stack_end",
                           "__ArenaLo", "__ArenaHi", "_heap_addr", "_heap_end", "_nbfunctions", "SIZEOF_HEADERS"})
 TABLE_SECTIONS = (".ctors", ".dtors")   # pointer tables the linker ends with a zero word
+# mwld puts the .ctors and .dtors of the archive member of this name first (the C++ runtime's entries): the unit
+# whose entries lead those tables is linked as that member, where it is in the link order (a CodeWarrior link map:
+# __init_cpp_exceptions.cpp is the 372nd object in .text and the first in .ctors and .dtors).
+RUNTIME_MEMBER = "__init_cpp_exceptions.o"
 DOL_ALIGN = 32                          # a DOL section's size is a multiple of 32 bytes
 ARENA_HI = 0x81700000                   # the arena's top in the SDK's linker script
 
@@ -95,7 +99,7 @@ def link_units(units: list[delink.Unit], sections: list[OutputSection], read,
     data and symbols do when padding can take it from there: those zeros are the DOL's padding, not data (the
     linker's table of sections records each one's true size); inside a section a gap runs to the next unit, whose
     compiled object may align less than the gap needs."""
-    out = [delink.Unit(u.name) for u in units]
+    out = [delink.Unit(u.name, renames=dict(u.renames)) for u in units]
     for section in sections:
         rows = sorted((start, min(end, section.content), unit) for source, unit in zip(units, out)
                       for start, end in source.ranges.get(section.name, []) if start < section.content)
@@ -273,6 +277,60 @@ def linker_command(root: Path, build: Path, module: str) -> list[str]:
         elif "\0" not in word:
             argv.append(str(root / word) if not os.path.isabs(word) and (root / word).exists() else word)
     return argv
+
+
+def _runtime_member(units: list[delink.Unit], sections: list[OutputSection]) -> list[delink.Unit]:
+    """The units with the entries leading .ctors and .dtors (the C++ runtime's, linked late but first in those
+    tables) moved out of their unit into a unit of their own, linked as the archive member mwld puts first. A range
+    named `.ctors$10` (`rename:`, the later runtime's way) stays: the linker sorts that by its name."""
+    leading = {}
+    for section in (s for s in sections if s.name in TABLE_SECTIONS):
+        for unit in units:
+            for start, end in unit.ranges.get(section.name, []):
+                if start == section.start and (section.name, start) not in unit.renames:
+                    leading[section.name] = (unit, (start, end))
+    owners = {id(unit) for unit, _ in leading.values()}
+    if not leading or id(units[0]) in owners:     # already first in link order: nothing to move
+        return units
+    member = delink.Unit(RUNTIME_MEMBER)
+    for name, (unit, span) in leading.items():
+        unit.ranges[name].remove(span)
+        if not unit.ranges[name]:
+            del unit.ranges[name]
+        member.ranges[name].append(span)
+    return [u for u in units if u.ranges] + [member]
+
+
+def _globals(path: Path) -> set[str]:
+    return {s.name for s in Elf.load(path).symbols if 0 < s.section < 0xFF00 and s.bind != "local" and s.name}
+
+
+def write_archive(path: Path, members: list[Path], names: list[str]) -> Path:
+    """A System V archive mwld reads: a symbol index (`/`) of every global each member defines, the long member
+    names (`//`), then the members, each named as given."""
+    datas = [m.read_bytes() for m in members]
+    defined = [[s.name for s in Elf.load(m).symbols if 0 < s.section < 0xFF00 and s.bind != "local" and s.name]
+               for m in members]
+    longnames = b"".join(f"{n}/\n".encode() for n in names)
+    header = lambda name, size: f"{name:<16}{0:<12}{0:<6}{0:<6}{644:<8}{size:<10}`\n".encode()
+    pad = lambda blob: blob + (b"\n" if len(blob) % 2 else b"")
+    count = sum(len(d) for d in defined)
+    table_size = 4 + 4 * count + sum(len(n) + 1 for d in defined for n in d)
+    cursor = 8 + 60 + len(pad(b"\0" * table_size)) + 60 + len(pad(longnames))
+    offsets, name_at, at = [], [], 0
+    for data, name in zip(datas, names):
+        offsets.append(cursor)
+        name_at.append(at)
+        at += len(name) + 2
+        cursor += 60 + len(pad(data))
+    table = struct.pack(">I", count) + b"".join(struct.pack(">I", offsets[i]) for i, d in enumerate(defined)
+                                                for _ in d)
+    table += b"".join(n.encode() + b"\0" for d in defined for n in d)
+    blob = b"!<arch>\n" + header("/", len(table)) + pad(table) + header("//", len(longnames)) + pad(longnames)
+    for data, at in zip(datas, name_at):
+        blob += header(f"/{at}", len(data)) + pad(data)
+    path.write_bytes(blob)
+    return path
 
 
 def run_linker(argv: list[str], lcf: Path, objects: list[Path], out: Path) -> subprocess.CompletedProcess:
@@ -592,9 +650,9 @@ def _sizes(units: list[delink.Unit], elves: dict[str, Elf], cuts: dict[str, deli
     for unit in units:
         for section, ranges in unit.ranges.items():
             key = (unit.name, section)
-            if unit.name not in elves:
-                sizes[key] = next(s[2] if s[1] == SHT_NOBITS else len(s[2]) for s in cuts[unit.name].sections
-                                  if s[0] == section)
+            if unit.name not in elves:                # a renamed range is its own object section
+                sizes[key] = sum(s[2] if s[1] == SHT_NOBITS else len(s[2]) for s in cuts[unit.name].sections
+                                 if s[0].split("$", 1)[0] == section)
                 continue
             elf = elves[unit.name]
             held = elf.section(section)
@@ -654,7 +712,8 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
     program = Program.from_project(project, target)
     symbols = image.symbols
     sections = output_sections(program, symbols)
-    units = link_order(link_units(delink.read_units(splits), sections, program.read, symbols), sections)
+    units = _runtime_member(link_order(link_units(delink.read_units(splits), sections, program.read, symbols),
+                                       sections), sections)
     sources, measures = compiled_units(project, target, units) if compiled != "none" else ({}, {})
     elves = {u.name: Elf.load(sources[u.name]["object"]) for u in units
              if u.name in sources and sources[u.name]["complete"]}
@@ -695,14 +754,24 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
             functions += [(unit.name, name, source["sizes"].get(name, 0)) for name in taken]
             kept += [(unit.name, name, why) for name, why in held]
         objects.append(path)
+    member = next((i for i, u in enumerate(units) if u.name == RUNTIME_MEMBER), None)
+    if member is not None:                             # an archive member of that name, kept by FORCEACTIVE
+        objects[member] = write_archive(out / "runtime.a", [objects[member]], [RUNTIME_MEMBER])
     top = stack_address(program)
     lcf = out / "link.lcf"
-    lcf.write_text(linker_script(script, sections[0].start, top - sections[-1].end if top else 0x10000,
-                                 _force_active(settings["force_active"], sections, program, symbols)),
+    keep = _force_active(settings["force_active"], sections, program, symbols)
+    if member is not None:
+        keep += [n for n in sorted(_globals(objects[member].parent / "obj" / RUNTIME_MEMBER)) if n not in keep]
+    lcf.write_text(linker_script(script, sections[0].start, top - sections[-1].end if top else 0x10000, keep),
                    encoding="utf-8")
     elf_path, dol_path = out / f"{module}.elf", out / f"{module}.dol"
     elf_path.unlink(missing_ok=True)
-    run = run_linker(linker_command(root, build or root / "build.ninja", module), lcf, objects, elf_path)
+    argv = linker_command(root, build or root / "build.ninja", module)
+    if "-m" not in argv:                              # mwld's default entry is `__start`: name the original's own
+        entry = program.image.entry
+        held = symbols.by_address.get(entry)
+        argv += ["-m", names.get(entry) or (held.name if held is not None else "__start")]
+    run = run_linker(argv, lcf, objects, elf_path)
     result: dict[str, Any] = {
         "target": target, "compiled": compiled, "objects": len(objects), "out": str(out),
         "units": {"delinked": len(cuts) - len(combined), "compiled": len(elves), "combined": len(combined),
