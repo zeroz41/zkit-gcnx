@@ -1,5 +1,5 @@
 """A fresh decomp-toolkit project: `init`, project selection from the working directory, and REL modules
-(functions, callers across DOL and RELs, disassembly and xrefs from dtk's asm output). No game assets."""
+(functions, callers across DOL and RELs, disassembly and xrefs from the REL files themselves). No game assets."""
 
 import support  # noqa: F401  (isolates config, cache and state)
 import contextlib
@@ -11,31 +11,26 @@ import tempfile
 import unittest
 
 import test_bridge
-from test_bridge import TEXT, build_dol
+from test_bridge import DATA, TEXT, build_dol
+from zkit import rel
 
-ASM = """.include "macros.inc"
-.file "obj_test.cpp"
-
-# .text:0x0 | 0x40 | size: 0x14
-.fn ObjTest_Draw__FPv, global
-/* 00000040 00000100  94 21 FF F0 */\tstwu r1, -0x10(r1)
-/* 00000044 00000104  48 00 00 01 */\tbl update__6TEnemyFv
-/* 00000048 00000108  3C 60 00 00 */\tlis r3, enemyTable@ha
-/* 0000004C 0000010C  80 63 00 00 */\tlwz r3, enemyTable@l(r3)
-/* 00000050 00000110  C0 22 00 00 */\tlfs f1, "@123"@sda21(r2)
-.endfn ObjTest_Draw__FPv
-
-# .text:0x14 | 0x54 | size: 0x8
-.fn ObjTest_Execute__FPv, local
-/* 00000054 00000114  48 00 00 01 */\tbl ObjTest_Draw__FPv
-/* 00000058 00000118  4E 80 00 20 */\tblr
-.endfn ObjTest_Execute__FPv
-
-.section .rodata, "a"
-.obj "@123", local
-\t.4byte 0x3FA00000
-.endobj "@123"
-"""
+def build_rel() -> bytes:
+    """Module 7 as makerel writes it: ObjTest_Draw (text +0x40) calls the DOL's TEnemy::update through `_unresolved`,
+    reads enemyTable and loads a float from its own .rodata, all through relocations; ObjTest_Execute (+0x58) calls
+    ObjTest_Draw with the branch applied in the bytes."""
+    words = [0x4E800020] * 16 + [
+        0x9421FFF0,                      # 0x40 stwu r1,-0x10(r1)
+        0x4BFFFFBD,                      # 0x44 bl _unresolved (REL24 -> TEnemy::update)
+        0x3C600000, 0x80630000,          # 0x48 lis r3,enemyTable@ha; lwz r3,enemyTable@l(r3)
+        0x3C800000, 0xC0240000,          # 0x50 lis r4,@123@ha; lfs f1,@123@l(r4)
+        0x4BFFFFE9, 0x4E800020]          # 0x58 bl ObjTest_Draw (applied); blr
+    text = b"".join(w.to_bytes(4, "big") for w in words)
+    sections = [rel.Section(0, 0, 0, False), rel.Section(1, 0, len(text), True, 4), rel.Section(2, 0, 4, False, 8)]
+    relocations = [rel.Reloc(1, 0x44, rel.REL24, 0, 1, TEXT), rel.Reloc(1, 0x4A, rel.ADDR16_HA, 0, 2, DATA + 4),
+                   rel.Reloc(1, 0x4E, rel.ADDR16_LO, 0, 2, DATA + 4), rel.Reloc(1, 0x52, rel.ADDR16_HA, 7, 2, 0),
+                   rel.Reloc(1, 0x56, rel.ADDR16_LO, 7, 2, 0)]
+    return rel.write(rel.Rel(7, 3, sections, {1: text, 2: bytes.fromhex("3FA00000")}, relocations, align=8,
+                             bss_align=1, unresolved=(1, 0)))
 
 
 class FreshProject(unittest.TestCase):
@@ -55,7 +50,8 @@ class FreshProject(unittest.TestCase):
         self.repo = repo = base / "mygame"
         (repo / "config/GAME01/rels/obj_test").mkdir(parents=True)
         (repo / "orig/GAME01/sys").mkdir(parents=True)
-        (repo / "build/GAME01/obj_test/asm").mkdir(parents=True)
+        (repo / "orig/GAME01/files/rel").mkdir(parents=True)
+        (repo / "build/GAME01").mkdir(parents=True)
         (repo / "docs").mkdir()
         (repo / "README.md").write_text("My game decomp.\n", encoding="utf-8")
         (repo / "configure.py").write_text('DEFAULT_VERSION = 0\nVERSIONS = [\n    "GAME01",  # 0\n]\n',
@@ -66,6 +62,7 @@ class FreshProject(unittest.TestCase):
             "- object: files/rel/obj_test.rel\n  symbols: config/GAME01/rels/obj_test/symbols.txt\n",
             encoding="utf-8")
         (repo / "orig/GAME01/sys/main.dol").write_bytes(build_dol())
+        (repo / "orig/GAME01/files/rel/obj_test.rel").write_bytes(build_rel())
         (repo / "config/GAME01/symbols.txt").write_text(
             "update__6TEnemyFv = .text:0x80003000; // type:function size:0xC\n"
             "fn_80003010 = .text:0x80003010; // type:function size:0x10\n"
@@ -75,12 +72,10 @@ class FreshProject(unittest.TestCase):
              "functions": [{"name": "update__6TEnemyFv", "size": "12", "metadata": {"virtual_address": str(TEXT)}},
                            {"name": "fn_80003010", "size": "16", "metadata": {"virtual_address": str(TEXT + 0x10)}}]},
             {"name": "obj_test/obj_test", "metadata": {"module_name": "obj_test", "module_id": 7},
-             "functions": [{"name": "ObjTest_Draw__FPv", "size": "20",
+             "functions": [{"name": "ObjTest_Draw__FPv", "size": "24",
                             "metadata": {"virtual_address": "64", "demangled_name": "ObjTest_Draw(void*)"}},
-                           {"name": "ObjTest_Execute__FPv", "size": "8", "metadata": {"virtual_address": "84"}}]}]}
+                           {"name": "ObjTest_Execute__FPv", "size": "8", "metadata": {"virtual_address": "88"}}]}]}
         (repo / "build/GAME01/report.json").write_text(json.dumps(report), encoding="utf-8")
-        (repo / "build/GAME01/config.json").write_text("{}", encoding="utf-8")
-        (repo / "build/GAME01/obj_test/asm/obj_test.s").write_text(ASM, encoding="utf-8")
         self.outside = base / "elsewhere"
         self.outside.mkdir()
 
@@ -114,7 +109,7 @@ class FreshProject(unittest.TestCase):
         self.assertEqual(target["module"], "framework")
         self.assertEqual(manifest["repositories"]["decomp"]["index_paths"], ["README.md", "docs"])
 
-        # A REL function: module+offset address, callee in the DOL resolved through dtk's relocations.
+        # A REL function: module+offset address, callee in the DOL resolved through the REL's relocations.
         code, text = self.cli("lookup", "ObjTest_Draw")
         self.assertIn("obj_test+0x40 ObjTest_Draw(void*)", text)
         self.assertIn("0x80003000 TEnemy::update", text)
@@ -122,8 +117,11 @@ class FreshProject(unittest.TestCase):
         # The DOL function is called from the REL.
         code, text = self.cli("lookup", "0x80003000")
         self.assertIn("obj_test+0x40", text)
+        # The call makerel applied inside the module is an edge too.
+        code, text = self.cli("lookup", "ObjTest_Execute")
+        self.assertIn("obj_test+0x40 ObjTest_Draw(void*)", text)
         # A module address works as a query, also mid-function, and in a batch with a DOL address.
-        code, text = self.cli("names", "obj_test+0x54", "0x80003010")
+        code, text = self.cli("names", "obj_test+0x5C", "0x80003010")
         self.assertIn("ObjTest_Execute__FPv", text)
         self.assertIn("fn_80003010", text)
         # A fresh process knows module names before any refresh.
@@ -132,9 +130,12 @@ class FreshProject(unittest.TestCase):
         index.close_connections()
         code, text = self.cli("asm", "obj_test+0x40")
         self.assertEqual(code, 0, text)
-        # Disassembly from dtk asm (no objdump here), with the float constant shown.
+        # Disassembly from the REL's bytes (raw words, or objdump's text when one is installed), each relocated
+        # field named.
         code, text = self.cli("asm", "ObjTest_Draw__FPv")
-        self.assertIn("obj_test+0x50  C0220000  lfs f1, \"@123\"@sda21(r2)  ; = 1.25", text)
+        self.assertRegex(text, r"(?i)obj_test\+0x44  4BFFFFBD .*; -> 0x80003000 TEnemy::update")
+        self.assertRegex(text, r"(?i)obj_test\+0x4C  80630000 .*; =0x80003104 enemyTable")
+        self.assertRegex(text, r"(?i)obj_test\+0x54  C0240000 .*; =obj_test\[2\]\+0x0 = 1\.25")
         # A DOL global read from a REL.
         code, text = self.cli("xrefs", "enemyTable")
         self.assertIn("REL modules: 1 refs in 1 module(s), most: obj_test x1", text)

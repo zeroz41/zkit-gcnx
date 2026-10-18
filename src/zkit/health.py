@@ -224,12 +224,8 @@ def doctor(project: Project) -> dict:
         else:
             from .inspect_dol import _objdump
             tool = _objdump(project)
-            asm_dir = project.file(repo, target["report"]).parent / "asm" if target.get("report") else None
-            has_dtk_asm = bool(asm_dir and asm_dir.is_dir())
-            rows.append(_row("ok" if tool or has_dtk_asm else "warn", "disassembly",
-                             tool or ("decomp-toolkit asm output" if has_dtk_asm else "none: asm shows raw words"),
-                             "build the decomp once (dtk writes build/<GAMEID>/asm), or set ZKIT_OBJDUMP to a "
-                             "powerpc-eabi-objdump"))
+            rows.append(_row("ok" if tool else "warn", "disassembly", tool or "none: asm shows raw words",
+                             "install GNU binutils for powerpc-eabi, or set ZKIT_OBJDUMP to a powerpc-eabi-objdump"))
         from .activity import state_dir
         if not any(r.get("role") == "native" for r in project.config["repositories"].values()):
             continue
