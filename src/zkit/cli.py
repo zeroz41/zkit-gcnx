@@ -200,6 +200,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--out", type=Path, required=True, help="folder for the objects (unit a/b.cpp: OUT/a/b.o)")
     c.add_argument("--objdiff", type=Path, help="also write objdiff's project file here")
     c.add_argument("--compiled", type=Path, help="where the build writes each unit's object (for --objdiff)")
+    c = add("apply", help="Names from the build back into the symbols file: compiled symbols whose name differs from "
+                          "the target object's at the same place (renames made in the source)")
+    c.add_argument("--write", action="store_true", help="rewrite the symbols file (default: list the renames)")
+    c.add_argument("--limit", type=int, default=40)
     c = add("asmfile", help="An assembly file of original functions for a decompiler (m2c): references as symbols, "
                             "labels, and the data they read (GameCube)")
     c.add_argument("addresses", nargs="+", help="addresses or names of functions")
@@ -634,6 +638,17 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             units.write_splits(data, args.splits.expanduser().resolve())
             data["written"] = str(args.splits)
         return data, render.units_proposal(data, args.limit) + (f"\nwrote {args.splits}" if args.splits else "")
+    if command == "apply":
+        from . import apply
+        data = apply.renames(project, target)
+        lines = [f"{len(data['renames'])} renames in {data['units']} units"
+                 + (f"; {len(data['layouts_differ'])} sections whose layouts differ were left alone"
+                    if data["layouts_differ"] else "")]
+        lines += [f"  0x{r['address']:08X} {r['old']} -> {r['new']} ({r['unit']})" for r in data["renames"][:args.limit]]
+        if args.write and data["renames"]:
+            data["written"] = apply.write(project, target, data["renames"])
+            lines.append(f"rewrote {data['written']} symbols; rebuild so the target objects carry the new names")
+        return data, "\n".join(lines)
     if command in ("asmfile", "m2c"):
         from . import asmfile
         def resolve(query: str) -> int:
