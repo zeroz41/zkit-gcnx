@@ -184,6 +184,21 @@ class HygieneTests(unittest.TestCase):
         result = hygiene.audit(self.project, "game")
         self.assertTrue(result["ok"], result)
 
+    def test_upward_links_and_a_target_s_own_files_are_not_orphans(self):
+        (self.root / "docs/notes.md").write_text("Units: [notes](../NOTES.txt).\n", encoding="utf-8")
+        (self.root / "NOTES.txt").write_text("linked from docs/notes.md\n", encoding="utf-8")
+        (self.root / "README.md").write_text("# Game\n\n[arch](docs/arch.md), [notes](docs/notes.md)\n",
+                                             encoding="utf-8")
+        (self.root / "config").mkdir()
+        (self.root / "config/splits.txt").write_text("game/a.cpp:\n", encoding="utf-8")
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-q", "-m", "Add notes and splits")
+        manifest = json.loads((self.root / "p.json").read_text(encoding="utf-8"))
+        manifest["targets"] = {"t": {"repository": "game", "module": "main", "splits": "config/splits.txt"}}
+        (self.root / "p.json").write_text(json.dumps(manifest), encoding="utf-8")
+        found = hygiene.files(Project.load(self.root / "p.json"), "game")["findings"]
+        self.assertEqual([f["path"] for f in found if f["kind"] == "orphan-doc"], [])
+
     def test_finds_what_must_not_be_committed(self):
         (self.root / "AGENTS.md").write_text("agent rules\n", encoding="utf-8")
         (self.root / "docs/TU_RECOVERY_2026_10_09.md").write_text("Later on 2026-10-09 we did things.\n",
