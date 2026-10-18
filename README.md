@@ -11,7 +11,7 @@ It runs locally and only uses the network when you ask it to download compilers 
 
 On Phantasy Star Online Episode I & II Plus (GameCube, 27,572 functions):
 
-- 99.99% of function starts and 99.98% of function sizes found from the bare DOL.
+- 99.99% of function starts and 99.97% of function sizes found from the bare DOL.
 - 1,406 classes recovered from the code.
 - The executable relinked byte-identical in 23 seconds, with 89.11% of its code taken from compiled source.
 
