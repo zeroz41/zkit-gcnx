@@ -23,6 +23,7 @@ class Function:
     address: int
     size: int
     name: str
+    scope: str = "global"
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class DataObject:
     size: int
     name: str
     section: str
+    scope: str = "global"
 
 
 class Program:
@@ -47,6 +49,15 @@ class Program:
         self._calls: dict[int, list[int]] | None = None
         self._pointers: list[tuple[int, int]] | None = None
         self.cache: dict = {}  # results analyses share (register flows, tables), keyed by the analysis
+        self.labels: list[DataObject] = []  # names at addresses with no extent (dtk `type:label`)
+        self.sections: list[tuple[str, int, int]] = []  # (name, start, end) of every named section
+
+    def in_image(self, address: int) -> bool:
+        """Inside a section of the image (loaded or zero-initialized)."""
+        if self.sections:
+            index = bisect.bisect_right([s[1] for s in self.sections], address) - 1
+            return index >= 0 and address < self.sections[index][2]
+        return any(s.address <= address < s.address + s.size for s in self.platform.sections(self.image))
 
     @classmethod
     def from_symbols(cls, platform: Platform, image_path: Path, symbols_path: Path) -> "Program":
@@ -55,28 +66,38 @@ class Program:
 
     @classmethod
     def from_project(cls, project, target: str) -> "Program":
-        """A project target's original and its symbols file."""
+        """A project target's original, its symbols file when it has one (functions and data objects), else the
+        functions zkit's index knows for it (a report, a function list, or the original's own tables)."""
         from .inspect_dol import _dol
         from .platform import for_target
         config = project.target(target)
-        if not config.get("symbols"):
-            raise ValueError(f"Target {target} has no `symbols` file in the project")
-        return cls._build(for_target(config), _dol(project, target),
-                          project.file(config["repository"], config["symbols"]))
+        platform, image = for_target(config), _dol(project, target)
+        if config.get("symbols") and project.file(config["repository"], config["symbols"]).is_file():
+            return cls._build(platform, image, project.file(config["repository"], config["symbols"]))
+        from .index import connect, refresh
+        refresh(project)
+        rows = connect(project).execute("SELECT address, size, name FROM functions WHERE target=? AND size>0",
+                                        (target,)).fetchall()
+        return cls(platform, image, [Function(a, s, n) for a, s, n in rows], [])
 
     @classmethod
     def _build(cls, platform: Platform, image, symbols_path: Path) -> "Program":
         from .gc import read_symbols
         symbols = read_symbols(symbols_path)
-        functions = [Function(s.address, s.size, s.name) for s in symbols
+        functions = [Function(s.address, s.size, s.name, s.scope) for s in symbols
                      if s.type == "function" and s.section in CODE_SECTIONS and s.size]
-        objects = [DataObject(s.address, s.size, s.name, s.section) for s in symbols
+        objects = [DataObject(s.address, s.size, s.name, s.section, s.scope) for s in symbols
                    if s.type == "object" and s.section not in CODE_SECTIONS]
+        labels = [DataObject(s.address, 0, s.name, s.section, s.scope) for s in symbols
+                  if s.type == "label" or (s.type == "object" and not s.size)]
         sda = {}
         start = next((s.address for s in symbols if s.name == "__init_registers"), None)
         if start is not None and platform.name == "gamecube":
             sda = _gamecube_sda(image, start)
-        return cls(platform, image, functions, objects, sda)
+        program = cls(platform, image, functions, objects, sda)
+        program.labels = labels
+        program.sections = _named_sections(platform, image, symbols)
+        return program
 
     # lookups
 
@@ -128,6 +149,24 @@ class Program:
             self._pointers = list(self.platform.data_pointers(self.image))
         return self._pointers
 
+    def strings(self, minimum: int = 4) -> dict[int, str]:
+        """Printable NUL-terminated strings in the data sections, by address."""
+        import re
+        if "strings" not in self.cache:
+            pattern = re.compile(rb"[\x20-\x7e]{%d,}\x00" % minimum)
+            out = {}
+            for section in self.platform.sections(self.image):
+                if section.kind != "data":
+                    continue
+                try:
+                    raw = self.platform.read(self.image, section.address, section.size)
+                except ValueError:
+                    continue
+                for match in pattern.finditer(raw):
+                    out[section.address + match.start()] = match.group(0)[:-1].decode("ascii")
+            self.cache["strings"] = out
+        return self.cache["strings"]
+
     def users(self) -> dict[DataObject, set[int]]:
         """Each data object and the functions whose code forms an address inside it."""
         out: dict[DataObject, set[int]] = collections.defaultdict(set)
@@ -137,6 +176,37 @@ class Program:
                 if found is not None:
                     out[found].add(i)
         return out
+
+
+def _named_sections(platform: Platform, image, symbols) -> list[tuple[str, int, int]]:
+    """(name, start, end) per section: the image's sections (and a DOL's zero-initialized range) named by the
+    section most of their symbols are in, split where the symbols change section (.bss/.sbss/.sbss2 share one
+    zero-initialized range)."""
+    ranges = [(s.address, s.address + s.size) for s in platform.sections(image)]
+    bss = getattr(image, "bss", None)
+    if bss and bss[1]:                                 # the zero-initialized range, minus loaded sections inside it
+        cursor, end = bss[0], bss[0] + bss[1]
+        for start, stop in sorted(r for r in ranges if r[1] > bss[0] and r[0] < end):
+            if start > cursor:
+                ranges.append((cursor, start))
+            cursor = max(cursor, stop)
+        if cursor < end:
+            ranges.append((cursor, end))
+    placed = sorted((s.address, s.section) for s in symbols if s.section)
+    out = []
+    for start, end in sorted(ranges):
+        inside = [(a, n) for a, n in placed if start <= a < end]
+        if not inside:
+            continue
+        runs: list[list] = []
+        for address, name in inside:
+            if runs and runs[-1][0] == name:
+                continue
+            runs.append([name, address])
+        runs[0][1] = start
+        for i, (name, first) in enumerate(runs):
+            out.append((name, first, runs[i + 1][1] if i + 1 < len(runs) else end))
+    return out
 
 
 def _gamecube_sda(image, start: int) -> dict[int, int]:

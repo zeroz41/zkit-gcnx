@@ -162,9 +162,20 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--label", default="saved")
     c.add_argument("--rename", action="append", default=[], metavar="OLD=NEW", help="an intended symbol rename")
     c.add_argument("--rename-json", type=Path, help="a JSON {old: new} map of intended renames")
-    c = add("boundaries", help="Translation units and function names proposed from evidence in the original "
-                               "(source paths and function names its code references, layout, call structure)")
-    c.add_argument("--splits", type=Path, help="also write the proposal as a splits.txt")
+    c = add("score", help="Score a split (splits.txt + symbols.txt folder) against a reference: another split, or "
+                          "a CodeWarrior linker map; an objdiff report marks the reference's proven units")
+    c.add_argument("proposal", type=Path, help="folder with splits.txt and symbols.txt")
+    c.add_argument("reference", type=Path, help="reference folder, or a .MAP linker map")
+    c.add_argument("--report", type=Path, help="objdiff report.json of the reference (its complete units are proven)")
+    c.add_argument("--module", help="with --report: only this module's units")
+    c = add("analyze", help="A fresh analysis of the original into a folder: splits.txt (units with their data), "
+                            "symbols.txt (recovered tables and destructors named), a header per class, analysis.json")
+    c.add_argument("--out", type=Path, required=True)
+    c.add_argument("--types-include", default="types.h")
+    c = add("units", help="Translation units from evidence in the original (source paths its code cites, literal "
+                          "copies, data one run of code uses, classes): a fresh proposal, or --check the current splits")
+    c.add_argument("--check", action="store_true", help="folds, splits and data claims for the existing splits.txt")
+    c.add_argument("--splits", type=Path, help="write the fresh proposal as a splits.txt")
     c.add_argument("--limit", type=int, default=30)
     c = add("delink", help="Split the original into one relocatable object per unit of a splits.txt (Switch): "
                            "the target objects objdiff compares the compiled ones with")
@@ -388,6 +399,12 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         text = "\n".join(f"{'*' if r.get('here') else ' '} {r.get('id', '?'):<32} {r['manifest']}"
                          + (" (default)" if r.get("default") else "") for r in rows) or "no projects yet: zkit init <decomp repo>"
         return rows, text + ("\n* = the project for this folder" if any(r.get("here") for r in rows) else "")
+    if args.command == "score":
+        from . import mwmap, score
+        reference = mwmap.read(args.reference) if args.reference.is_file() else score.load(args.reference)
+        proven = score.complete_units(args.report, args.module) if args.report else set()
+        data = score.score(reference, score.load(args.proposal), proven)
+        return data, render.score(data)
     if args.command == "contract":
         from importlib import resources
         text = resources.files("zkit").joinpath(f"contracts/{args.kind}.md").read_text(encoding="utf-8")
@@ -556,13 +573,22 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         rename.update(dict(item.split("=", 1) for item in args.rename))
         data = objects.compare_saved(project, target, args.label, rename)
         return data, render.objects_compare(data)
-    if command == "boundaries":
-        from . import boundaries
-        data = boundaries.propose(project, target)
+    if command == "analyze":
+        from . import analyze
+        data = analyze.analyze_project(project, target, args.out.expanduser().resolve())
+        u = data["units"]
+        return data, (f"wrote {data['folder']}: {u['units']:,} units, {data['named_symbols']:,} named symbols, "
+                      f"{data['class_headers']:,} class headers")
+    if command == "units":
+        from . import units
+        if args.check:
+            data = units.check_project(project, target, args.limit)
+            return data, render.units_check(data)
+        data = units.propose_project(project, target)
         if args.splits:
-            boundaries.write_splits(data, args.splits.expanduser().resolve())
+            units.write_splits(data, args.splits.expanduser().resolve())
             data["written"] = str(args.splits)
-        return data, render.boundaries(data, args.limit) + (f"\nwrote {args.splits}" if args.splits else "")
+        return data, render.units_proposal(data, args.limit) + (f"\nwrote {args.splits}" if args.splits else "")
     if command == "delink":
         from . import delink
         data = delink.delink(project, target, args.splits.expanduser().resolve(), args.out.expanduser().resolve(),
