@@ -68,7 +68,7 @@ def _resolve_unit(project: Project, target: str, query: str) -> tuple[str | None
         return (owner["unit"], []) if owner else (None, [])
     wanted = _norm(q).replace("\\", "/")
     exact = [u for u in units if _norm(u) == wanted or u == q]
-    if not exact:  # report/unit names carry a module prefix (main/pso/X) that splits.txt does not
+    if not exact:  # report/unit names carry a module prefix (main/game/X) that splits.txt does not
         exact = [u for u in units if wanted.endswith("/" + _norm(u))]
     if not exact:
         exact = [u for u in units if _norm(u).endswith("/" + wanted)]

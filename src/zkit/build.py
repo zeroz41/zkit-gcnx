@@ -36,7 +36,7 @@ from .project import Project
 
 NINJA = "build/build.ninja"
 # The standard GameCube/Wii compiler bundle (tag 20251118), and
-# the SHA-256 measured on it: CodeWarrior for GameCube 1.0-3.0a5.2 and Wii, the same files pso-decomp builds with.
+# the SHA-256 measured on it: CodeWarrior for GameCube 1.0-3.0a5.2 and Wii.
 COMPILERS_URL = "https://files.decomp.dev/compilers_20251118.zip"
 COMPILERS_SHA256 = "69b0d4980a2eccea4ae6e70b486714b5190cb6c75e3bc7b8fb5878a8854d0d1c"
 
