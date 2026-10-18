@@ -33,6 +33,7 @@ class DataObject:
     name: str
     section: str
     scope: str = "global"
+    data: str = ""  # what the bytes are when known (string, float, 4byte, ...)
 
 
 class Program:
@@ -54,10 +55,21 @@ class Program:
 
     def in_image(self, address: int) -> bool:
         """Inside a section of the image (loaded or zero-initialized)."""
+        return self.section_of(address) is not None
+
+    def in_code(self, address: int) -> bool:
+        return any(s.kind == "text" and s.address <= address < s.address + s.size
+                   for s in self.platform.sections(self.image))
+
+    def section_of(self, address: int) -> str | None:
+        """The name of the section holding an address ("text"/"data" when the symbols name none)."""
         if self.sections:
-            index = bisect.bisect_right([s[1] for s in self.sections], address) - 1
-            return index >= 0 and address < self.sections[index][2]
-        return any(s.address <= address < s.address + s.size for s in self.platform.sections(self.image))
+            if "section_starts" not in self.cache:
+                self.cache["section_starts"] = [s[1] for s in self.sections]
+            index = bisect.bisect_right(self.cache["section_starts"], address) - 1
+            return self.sections[index][0] if index >= 0 and address < self.sections[index][2] else None
+        return next((s.kind for s in self.platform.sections(self.image) if s.address <= address < s.address + s.size),
+                    None)
 
     @classmethod
     def from_symbols(cls, platform: Platform, image_path: Path, symbols_path: Path) -> "Program":
@@ -86,7 +98,7 @@ class Program:
         symbols = read_symbols(symbols_path)
         functions = [Function(s.address, s.size, s.name, s.scope) for s in symbols
                      if s.type == "function" and s.section in CODE_SECTIONS and s.size]
-        objects = [DataObject(s.address, s.size, s.name, s.section, s.scope) for s in symbols
+        objects = [DataObject(s.address, s.size, s.name, s.section, s.scope, s.data) for s in symbols
                    if s.type == "object" and s.section not in CODE_SECTIONS]
         labels = [DataObject(s.address, 0, s.name, s.section, s.scope) for s in symbols
                   if s.type == "label" or (s.type == "object" and not s.size)]

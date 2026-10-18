@@ -208,7 +208,7 @@ def _symbol_lookup(project: Project, target: str, address: int) -> dict | None:
 
 
 _SYMBOLS: dict[str, tuple[str, tuple]] = {}
-SYMBOLS_CACHE_VERSION = 1
+SYMBOLS_CACHE_VERSION = 2
 
 
 def _parsed_symbols(project: Project, path: Path, stamp: str) -> list[Symbol]:
