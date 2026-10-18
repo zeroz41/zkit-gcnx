@@ -198,6 +198,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "the target object's at the same place (renames made in the source)")
     c.add_argument("--write", action="store_true", help="rewrite the symbols file (default: list the renames)")
     c.add_argument("--limit", type=int, default=40)
+    c = add("link", help="Link the original back together with the project's CodeWarrior linker (GameCube) from "
+                         "delinked and compiled objects, and check the DOL against the original")
+    c.add_argument("--out", type=Path, required=True, help="folder for the objects, script, ELF and DOL")
+    c.add_argument("--compiled", choices=("none", "units", "functions"), default="functions",
+                   help="none: every unit delinked; units: compiled objects of complete units; functions (default): "
+                        "also every exact function of the other units")
+    c.add_argument("--splits", type=Path, help="default: the target's splits file")
+    c.add_argument("--build", type=Path, help="the build.ninja holding the link command (default: the repository's)")
     c = add("asmfile", help="An assembly file of original functions for a decompiler (m2c): references as symbols, "
                             "labels, and the data they read (GameCube)")
     c.add_argument("addresses", nargs="+", help="addresses or names of functions")
@@ -636,6 +644,12 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             data["written"] = apply.write(project, target, data["renames"])
             lines.append(f"rewrote {data['written']} symbols; rebuild so the target objects carry the new names")
         return data, "\n".join(lines)
+    if command == "link":
+        from . import link
+        data = link.link(project, target, args.out.expanduser().resolve(), args.compiled,
+                         args.splits.expanduser().resolve() if args.splits else None,
+                         args.build.expanduser().resolve() if args.build else None)
+        return data, render.link(data)
     if command in ("asmfile", "m2c"):
         from . import asmfile
         def resolve(query: str) -> int:
