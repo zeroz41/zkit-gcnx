@@ -129,40 +129,53 @@ def _file_evidence(program: Program, ev: Evidence) -> None:
 
 def _roots(paths: list[str]) -> list[str]:
     """Checkout folders to drop from unit names, one per source tree: per group of paths sharing their first two
-    folders, the longest directory prefix 80% of the group shares, keeping at least two folders of each path."""
+    folders (in any case: Windows paths spell one folder several ways), the longest directory prefix 80% of the
+    group shares, and the one all of it shares for the paths outside that, keeping a folder of each path."""
     groups: dict[tuple, list[list[str]]] = collections.defaultdict(list)
     for path in paths:
-        parts = path.replace("\\", "/").split("/")[:-1]
+        parts = _normalized(path).split("/")[:-1]
         if len(parts) >= 2:
-            groups[tuple(parts[:2])].append(parts)
+            groups[tuple(p.casefold() for p in parts[:2])].append(parts)
     roots = []
     for members in groups.values():
-        prefix: list[str] = []
-        while True:
-            depth = len(prefix)
-            counts = collections.Counter(tuple(p[:depth + 1]) for p in members if len(p) > depth + 1
-                                         and p[:depth] == prefix)
-            if not counts:
-                break
-            best, count = counts.most_common(1)[0]
-            if count < 0.8 * len(members):
-                break
-            prefix = list(best)
-        if prefix:
-            roots.append("/".join(prefix) + "/")
+        for share in (0.8, 1.0):
+            prefix: list[str] = []
+            while True:
+                depth = len(prefix)
+                counts = collections.Counter(tuple(q.casefold() for q in p[:depth + 1]) for p in members
+                                             if len(p) > depth + 1 and [q.casefold() for q in p[:depth]] == prefix)
+                if not counts:
+                    break
+                best, count = counts.most_common(1)[0]
+                if count < share * len(members):
+                    break
+                prefix = list(best)
+            spelled = next((p[:len(prefix)] for p in members if [q.casefold() for q in p[:len(prefix)]] == prefix),
+                           [])
+            if prefix and "/".join(spelled) + "/" not in roots:
+                roots.append("/".join(spelled) + "/")
     return sorted(roots, key=len, reverse=True)
 
 
-def _unit_name(path: str, roots: list[str]) -> str:
-    path = path.replace("\\", "/")
-    root = next((r for r in roots if path.startswith(r)), "")
+DRIVE = re.compile(r"^[A-Za-z]:$")
+
+
+def _normalized(path: str) -> str:
+    """A cited path with forward slashes and its `.` and `..` folders resolved (leading `..` kept)."""
     parts: list[str] = []
-    for part in path[len(root):].split("/"):
-        if part == ".." and parts:
+    for part in path.replace("\\", "/").split("/"):
+        if part == ".." and parts and parts[-1] != ".." and not DRIVE.match(parts[-1]):
             parts.pop()
         elif part not in (".", ""):
             parts.append(part)
     return "/".join(parts)
+
+
+def _unit_name(path: str, roots: list[str]) -> str:
+    path = _normalized(path)
+    root = next((r for r in roots if path.casefold().startswith(r.casefold())), "")
+    parts = [part for part in path[len(root):].split("/") if part]
+    return "/".join(parts[1:] if parts and DRIVE.match(parts[0]) else parts)   # a drive letter is never a folder
 
 
 # Placing boundaries
