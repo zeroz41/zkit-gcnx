@@ -502,6 +502,7 @@ class Matcher:
         # per shape: the donor functions that refer to something nameable, the others by key, and the others
         # by the keys of their layout neighbours
         self.plain: dict[str, tuple] = {}
+        self.keys: dict[str, set[str]] = {}
         for shape in self.groups:
             referring, plain = [], collections.defaultdict(list)
             before, after = collections.defaultdict(list), collections.defaultdict(list)
@@ -515,6 +516,7 @@ class Matcher:
             before.pop(None, None)
             after.pop(None, None)
             self.plain[shape] = (referring, plain, before, after)
+            self.keys[shape] = {s.key for s in self.by_shape[shape]}
         # what a group's decision depends on: the addresses its references and neighbours name, and its keys
         self.dependents: dict[int, set[str]] = collections.defaultdict(set)
         self.key_groups: dict[str, set[str]] = collections.defaultdict(set)
@@ -704,6 +706,11 @@ class _State:
                 continue
             best, more = options.get(named, ((0, 0), []))
             options[named] = (max(best, (0, placed.get(named, 0)), key=sum), more + entries)
+        if len(self.m.keys[shape]) > 1:
+            # between names for one code, one neighbour proves nothing: the linker drops unused functions, so a
+            # neighbour of one twin in the donor is a neighbour of the other in the target
+            options = {k: ((agreed[0], agreed[1] if agreed[1] == 2 else 0), entries)
+                       for k, (agreed, entries) in options.items()}
         return options
 
     def shapes(self) -> None:
