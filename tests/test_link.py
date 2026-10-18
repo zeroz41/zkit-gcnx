@@ -1,4 +1,6 @@
 import support  # noqa: F401  (isolates config, cache and state)
+import json
+import os
 import struct
 import tempfile
 import unittest
@@ -7,6 +9,10 @@ from pathlib import Path
 from zkit import delink, link, ppc
 from zkit.elf import Elf
 from zkit.gc import Dol
+from zkit.project import Project
+
+MWLD = os.environ.get("ZKIT_TEST_MWLD")       # a CodeWarrior mwldeppc.exe
+RUNNER = os.environ.get("ZKIT_TEST_RUNNER")   # what runs it off Windows (wibo, wine), if anything
 
 BLR = 0x4E800020
 
@@ -101,8 +107,8 @@ class UnitTests(unittest.TestCase):
                  unit("c.c", data=(0x1080, 0x10A0), ctors=(0x1104, 0x110C))]
         out = link.link_units(units, sections, read, names(0x1000, 0x1018, 0x10E0))
         by_name = {u.name: dict(u.ranges) for u in out}
-        self.assertEqual(by_name["gap_data_00001040"], {".data": [(0x1040, 0x1064)]})   # data, then padding
-        self.assertEqual(by_name["gap_data_000010A0"], {".data": [(0x10A0, 0x10E4)]})   # a symbol, then padding
+        self.assertEqual(by_name["gap_data_00001040"], {".data": [(0x1040, 0x1080)]})   # data, to the next unit
+        self.assertEqual(by_name["gap_data_000010A0"], {".data": [(0x10A0, 0x10E4)]})   # a symbol, then DOL padding
         self.assertEqual(by_name["c.c"][".ctors"], [(0x1104, 0x1108)])     # the terminator is the linker's
         self.assertEqual(len(out), 5)
         pair = [unit("x.c", data=(0x1000, 0x1004)), unit("y.c", data=(0x1008, 0x1100), ctors=(0x1100, 0x1108))]
@@ -244,6 +250,101 @@ class CombineTests(unittest.TestCase):
                              [(2, ppc.ADDR16_HA, "lbl_80004000"), (6, ppc.ADDR16_LO, "lbl_80004000"),
                               (8, ppc.REL24, "callee"), (16, ppc.REL24, "callee")])
             self.assertIsNotNone(elf.section(".comment"))
+
+
+def lis(rd, value): return (15 << 26) | (rd << 21)
+def addi(rd, ra): return (14 << 26) | (rd << 21) | (ra << 16)
+def lwz(rd, ra): return (32 << 26) | (rd << 21) | (ra << 16)
+def li(rd, value): return (14 << 26) | (rd << 21) | value
+
+
+@unittest.skipUnless(MWLD and Path(MWLD).is_file(), "needs ZKIT_TEST_MWLD (a CodeWarrior mwldeppc.exe)")
+class MwldRoundTripTests(unittest.TestCase):
+    """Two units compiled by hand into an original DOL with mwld; zkit link must rebuild it byte for byte from the
+    delinked original, with a complete unit's compiled object, and with one exact function of a partly matched
+    unit taken from its compiled object."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = self.root = Path(self.temp.name)
+        a = [{"name": "__start", "section": ".text", "value": 0, "size": 16, "kind": "func", "bind": "global",
+              "address": 0},
+             {"name": "f", "section": ".text", "value": 16, "size": 8, "kind": "func", "bind": "global", "address": 0},
+             {"name": "table", "section": ".data", "value": 0, "size": 4, "kind": "object", "bind": "global",
+              "address": 0},
+             {"name": "g", "section": None, "value": 0, "size": 0, "kind": "notype", "bind": "global", "address": 0}]
+        delink.write_object(delink.PPC, [(".text", 1, words(lis(3, 0), addi(3, 3), 0x48000001, BLR, li(3, 1), BLR),
+                                          4), (".data", 1, bytes(4), 8)], a,
+                            {".text": [(2, ppc.ADDR16_HA, 2, 0), (6, ppc.ADDR16_LO, 2, 0), (8, ppc.REL24, 3, 0)],
+                             ".data": [(0, ppc.ADDR32, 1, 0)]}, root / "a.o", source="a.c", comment=10)
+        b = [{"name": "g", "section": ".text", "value": 0, "size": 16, "kind": "func", "bind": "global", "address": 0},
+             {"name": "counter", "section": ".bss", "value": 0, "size": 4, "kind": "object", "bind": "global",
+              "address": 0},
+             {"name": "f", "section": None, "value": 0, "size": 0, "kind": "notype", "bind": "global", "address": 0}]
+        delink.write_object(delink.PPC, [(".text", 1, words(lis(4, 0), lwz(3, 4), 0x48000001, BLR), 4),
+                                         (".bss", 8, 4, 8)], b,
+                            {".text": [(2, ppc.ADDR16_HA, 1, 0), (6, ppc.ADDR16_LO, 1, 0), (8, ppc.REL24, 2, 0)]},
+                            root / "b.o", source="b.c", comment=10)
+        runner = f"{RUNNER} " if RUNNER else ""
+        (root / "build.ninja").write_text(f"ldflags = -fp hardware -nodefaults\nrule link\n  command = {runner}{MWLD} "
+                                          "$ldflags -o $out @$out.rsp\n\nbuild build/main.elf: link a.o b.o\n")
+        (root / "orig").mkdir()
+        script = link.linker_script([(".text", 4), (".data", 32), (".bss", 32)], 0x80003100, 0x10000, [])
+        (root / "orig.lcf").write_text(script)
+        run = link.run_linker(link.linker_command(root, root / "build.ninja", "main"), root / "orig.lcf",
+                              [root / "a.o", root / "b.o"], root / "orig" / "main.elf")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        linked = Elf.load(root / "orig" / "main.elf")
+        (root / "orig" / "main.dol").write_bytes(link.dol_from_elf(linked))
+        at = {s.name: s for s in linked.symbols if s.name}
+        rows = [f"{n} = {linked.sections[at[n].section].name}:0x{at[n].value:08X}; // type:"
+                f"{'function' if at[n].kind == 'func' else 'object'} size:0x{at[n].size:X}"
+                for n in ("__start", "f", "table", "g", "counter")]
+        (root / "config").mkdir()
+        (root / "config" / "symbols.txt").write_text("\n".join(rows) + "\n")
+        span = lambda first, last: f"start:0x{at[first].value:08X} end:0x{at[last].value + at[last].size:08X}"
+        (root / "config" / "splits.txt").write_text(
+            f"a.c:\n\t.text {span('__start', 'f')}\n\t.data {span('table', 'table')}\n\n"
+            f"b.c:\n\t.text {span('g', 'g')}\n\t.bss {span('counter', 'counter')}\n")
+        (root / "config" / "config.yml").write_text("mw_comment_version: 10\n")
+        (root / "project.json").write_text(json.dumps({
+            "schema_version": 1, "id": "link-test", "repositories": {"decomp": {"root": ".", "role": "decomp"}},
+            "targets": {"main": {"repository": "decomp", "platform": "gamecube", "module": "main",
+                                 "original": "orig/main.dol", "symbols": "config/symbols.txt",
+                                 "splits": "config/splits.txt", "report": "report.json"}}}))
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def report(self, a_complete: bool, a_exact: list[str]):
+        units = [{"name": "main/a", "base_path": "a.o", "target_path": "x.o", "metadata": {}},
+                 {"name": "main/b", "base_path": "b.o", "target_path": "y.o", "metadata": {}}]
+        (self.root / "objdiff.json").write_text(json.dumps({"units": units}))
+        (self.root / "report.json").write_text(json.dumps({"measures": {"total_code": "40"}, "units": [
+            {"name": "main/a", "metadata": {"complete": a_complete}, "measures": {"total_code": "24"},
+             "functions": [{"name": n, "size": "16" if n == "__start" else "8", "fuzzy_match_percent": 100.0}
+                           for n in a_exact]},
+            {"name": "main/b", "metadata": {"complete": True}, "measures": {"total_code": "16"},
+             "functions": [{"name": "g", "size": "16", "fuzzy_match_percent": 100.0}]}]}))
+
+    def link(self, compiled):
+        project = Project.load(self.root / "project.json")
+        return link.link(project, "main", self.root / "out" / compiled, compiled)
+
+    def test_delinked(self):
+        result = self.link("none")
+        self.assertTrue(result["identical"], result)
+        self.assertEqual(result["units"]["delinked"], 2)
+
+    def test_compiled_unit_and_function(self):
+        self.report(False, ["__start"])
+        result = self.link("units")
+        self.assertTrue(result["identical"], result)
+        self.assertEqual((result["units"]["compiled"], result["code_from_compiled"]), (1, 16))
+        result = self.link("functions")
+        self.assertTrue(result["identical"], result)
+        self.assertEqual((result["units"]["combined"], result["functions_from_compiled"], result["code_from_compiled"]),
+                         (1, 1, 32))
 
 
 if __name__ == "__main__":

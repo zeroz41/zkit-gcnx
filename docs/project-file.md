@@ -40,7 +40,7 @@ Relative `root` paths are relative to the project file. All other paths are rela
 | `original` | GameCube: the DOL, or a `.iso`/`.gcm` disc image (the DOL is read in place). Switch: the NSO, or an ELF of it. Needed for asm, data, callers, xrefs, delinking and every structure tool. |
 | `base` | Switch: the module's load address (default `0x7100000000`). Addresses are written with it. |
 | `symbols` | The `symbols.txt` (names, sizes, scopes and data symbols; the format existing decomps keep). |
-| `splits` | The `splits.txt` (units and their section ranges). Needed for `unit`, `units --check`, `delink` and the owner unit of a data address. |
+| `splits` | The `splits.txt` (units and their section ranges). Needed for `unit`, `units --check`, `delink`, `link` and the owner unit of a data address. `link` also reads `mw_comment_version` and `force_active` from a `config.yml` next to it, and the link command from the repository's `build.ninja`. |
 | `report` | objdiff `report.json`. Match state, source files and REL functions. Without it, functions come from `symbols.txt` (or, on Switch, the module's own tables). |
 | `objdiff` | objdiff's project file (default `objdiff.json`): which compiled object belongs to which unit, for `compiled`, `objects` and `try`. |
 | `functions` | Switch: an optional CSV of known functions (address, size, name) when there is no symbols file. |
