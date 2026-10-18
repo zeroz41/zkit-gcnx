@@ -394,6 +394,12 @@ def _gamecube(project: Project, target: str) -> Image:
     functions = [Entry(f.address, f.size, f.name, f.scope) for f in program.functions]
     data = [Entry(o.address, o.size, o.name, o.scope, o.data) for o in program.objects]
     data += [Entry(o.address, 0, o.name, o.scope) for o in program.labels if o.address not in program.function_index]
+    config = project.target(target)
+    if config.get("symbols"):  # objects inside code (vector tables, the linker's tables): Program keeps code to functions
+        from .gc import read_symbols
+        from .program import CODE_SECTIONS
+        data += [Entry(s.address, s.size, s.name, s.scope, s.data) for s in read_symbols(
+            project.file(config["repository"], config["symbols"])) if s.type == "object" and s.section in CODE_SECTIONS]
     text = lambda address: f"{address:08X}"
     symbols = Symbols(functions, data, text)
     sda = dict(program.sda)
@@ -482,14 +488,16 @@ class Cut:
 @dataclass(frozen=True)
 class Plan:
     """What linking asks of one unit's object (delinking alone asks nothing): the global name of every address some
-    other object reaches (one table for the whole link), the unnamed addresses of this unit others reach (defined
-    here as labels), names the linker itself defines (never defined here), each section's alignment, and the
-    CodeWarrior .comment version."""
+    other object reaches (one table for the whole link), labels other objects reach in this unit (defined here,
+    global), names the linker itself defines (never defined here; a reference landing exactly on one's address
+    names it, as mwld wants `_ctors` named, not the entry that starts .ctors), each section's alignment, the
+    CodeWarrior .comment version, and the sections to cover with symbols."""
     names: dict[int, str]
-    labels: tuple[int, ...] = ()
-    linker: frozenset[str] = frozenset()
+    labels: dict[str, int] = field(default_factory=dict)
+    linker: dict[str, int | None] = field(default_factory=dict)   # name -> its address when the symbols place it
     alignment: dict[str, int] = field(default_factory=dict)
     comment: int | None = None
+    fill: frozenset[str] = frozenset()   # sections whose every byte must belong to a symbol (see _fill)
 
 
 def cut_unit(image: Image, unit: Unit) -> Cut:
@@ -548,6 +556,7 @@ def write_unit(image: Image, cut: Cut, path: Path, plan: Plan | None = None) -> 
     """The object of a cut unit; what it defines, what it references, and referenced addresses no range covers."""
     symbols = image.symbols
     names = plan.names if plan else {}
+    landing = {address: name for name, address in plan.linker.items() if address is not None} if plan else {}
     rows: list[dict] = []
     index_by_name: dict[str, int] = {}
     references: dict[str, int] = collections.Counter()
@@ -561,8 +570,11 @@ def write_unit(image: Image, cut: Cut, path: Path, plan: Plan | None = None) -> 
     relocations = collections.defaultdict(list)
     for section_name, found in cut.found.items():
         for offset, kind, target, got in found:
-            name, addend = symbols.resolve(target)
-            name = names.get(target - addend, name)
+            if target in landing:
+                name, addend = landing[target], 0
+            else:
+                name, addend = symbols.resolve(target)
+                name = names.get(target - addend, name)
             if got:
                 addend = 0
             references[name] += 1
@@ -579,7 +591,7 @@ def write_unit(image: Image, cut: Cut, path: Path, plan: Plan | None = None) -> 
         defined += 1
     key = lambda value: value - image.base if image.base and value >= image.base else value
     labels = {name: key(int(name[4:], 16)) for name in references if name.startswith("lbl_")}
-    labels.update((names[address], address) for address in (plan.labels if plan else ()))
+    labels.update(plan.labels if plan else {})
     unassigned = []
     for name, address in labels.items():  # labels inside this unit are defined here; others belong to a unit or none
         row = rows[symbol_index(name)]
@@ -587,10 +599,13 @@ def write_unit(image: Image, cut: Cut, path: Path, plan: Plan | None = None) -> 
             continue
         placed_at = cut.where(address)
         if placed_at is not None:
-            row.update(section=placed_at[0], value=placed_at[1], kind="object",
-                       bind="global" if address in names else "local", address=image.base + address)
+            shared = address in names or (plan is not None and name in plan.labels)
+            row.update(section=placed_at[0], value=placed_at[1], kind="object", bind="global" if shared else "local",
+                       address=image.base + address)
         else:
             unassigned.append(address)
+    for section_name in (plan.fill if plan else ()):
+        rows += _fill(image, cut, section_name, rows)
     alignment = plan.alignment if plan else {}
     sections = [(n, k, bytes(b) if isinstance(b, bytearray) else b, alignment.get(n, a)) for n, k, b, a in cut.sections]
     write_object(image.machine, sections, rows, relocations, path, source=cut.unit.name.rsplit("/", 1)[-1],
@@ -600,6 +615,25 @@ def write_unit(image: Image, cut: Cut, path: Path, plan: Plan | None = None) -> 
             "labels": sum(1 for s in rows if s["name"].startswith("lbl_")),
             "relocations": sum(len(v) for v in relocations.values()), "pointers": dict(cut.pointers),
             "pointers_inside_functions": [image.text(a) for a in cut.boundaries[:20]], "unassigned_addresses": unassigned}
+
+
+def _fill(image: Image, cut: Cut, section_name: str, rows: list[dict]) -> list[dict]:
+    """Local symbols `fill_<address>` over every run of a section no symbol covers: mwld copies a section symbol by
+    symbol, so bytes outside every symbol (padding after a unit's last function, unnamed data) would vanish."""
+    if section_name not in cut.placed:
+        return []
+    size = next(s[2] if s[1] == SHT_NOBITS else len(s[2]) for s in cut.sections if s[0] == section_name)
+    spans = sorted((r["value"], r["value"] + r["size"]) for r in rows if r["section"] == section_name and r["size"])
+    code = bool(section_traits(image.machine, section_name)[1] & SHF_EXECINSTR)
+    out, cursor = [], 0
+    for start, end in spans + [(size, size)]:
+        if start > cursor:
+            address = next(s + cursor - o for s, e, o in cut.placed[section_name] if o <= cursor < o + e - s)
+            out.append({"name": f"fill_{image.text(address)}", "section": section_name, "value": cursor,
+                        "size": start - cursor, "kind": "func" if code else "object", "bind": "local",
+                        "address": image.base + address})
+        cursor = max(cursor, end)
+    return out
 
 
 def delink_unit(image: Image, unit: Unit, path: Path) -> dict[str, Any]:
