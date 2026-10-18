@@ -256,6 +256,16 @@ def _relative(path: Path, root: Path) -> str:
         return str(path)
 
 
+def _zkit_stamp() -> str:
+    """zkit's version and a hash of its code: what the objects it cuts depend on besides the project's files."""
+    import hashlib
+    from . import __version__
+    digest = hashlib.sha1()
+    for path in sorted(Path(__file__).parent.glob("*.py")):
+        digest.update(path.read_bytes())
+    return f"{__version__} {digest.hexdigest()}\n"
+
+
 def _write(path: Path, text: str) -> bool:
     """Write when the content differs (so ninja sees no change otherwise); True when written."""
     if path.is_file() and path.read_text(encoding="utf-8") == text:
@@ -307,7 +317,7 @@ def configure(project: Project, repository: str | None = None, only: str | None 
     ninja.lines.append("")
     ninja.rule("configure", _command(zkit) + " configure", generator="1", description="CONFIGURE $out")
     ninja.rule("sha1", _command(python) + " sha1 $in $sha1 $out", description="SHA-1 $in")
-    # generator: rerun only when the splits, symbols or original change, never for a changed command line
+    # generator: rerun only when the splits, symbols, original or zkit change, never for a changed command line
     ninja.rule("delink", _command(zkit) + " --target $target delink --splits $splits --out $outdir",
                generator="1", description="DELINK $target")
     ninja.rule("mwcc", "$cc $cflags -MMD -c $in -o $basedir" + (
@@ -317,6 +327,8 @@ def configure(project: Project, repository: str | None = None, only: str | None 
                description="CC $out")
     ninja.rule("report", "$objdiff report generate -p $project $args -o $out", description="REPORT $out")
     inputs = [str(project.path)]
+    stamp = "build/zkit.stamp"                       # the target objects are cut again when zkit itself changes
+    _write(root / stamp, _zkit_stamp())
     groups: dict[str, list[str]] = {"objects": [], "compile": [], "report": [], "link": []}
     defaults: list[str] = []
     commands, summary, objdiff_files = [], {}, {}
@@ -342,7 +354,7 @@ def configure(project: Project, repository: str | None = None, only: str | None 
             notes.append("no `sha1` pinned for the original: the build cannot tell a wrong revision")
         if objects:
             symbols = [_relative(project.file(repository, target["symbols"]), root)] if target.get("symbols") else []
-            ninja.build(objects[:1], "delink", [_relative(splits, root), _relative(original, root), *symbols],
+            ninja.build(objects[:1], "delink", [_relative(splits, root), _relative(original, root), *symbols, stamp],
                         order=checked, implicit_outputs=objects[1:],
                         variables={"target": name, "splits": _command([_relative(splits, root)]),
                                    "outdir": _command([paths.obj])})
@@ -368,7 +380,8 @@ def configure(project: Project, repository: str | None = None, only: str | None 
             raise ValueError(f"Targets {name} and {next(n for n, p in objdiff_files.items() if p == objdiff)} share "
                              f"{objdiff.name}: give each target its own `objdiff` file")
         objdiff_files[name] = objdiff
-        wrote = _write(objdiff, write_objdiff(objdiff, root, units, sources, paths, target.get("module") or name))
+        wrote = _write(objdiff, write_objdiff(objdiff, root, units, sources, paths,
+                                              target.get("module") or name))
         report, tool = None, objdiff_cli(root, config)
         if tool and objdiff.name == "objdiff.json":
             report = paths.report

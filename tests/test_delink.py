@@ -121,3 +121,23 @@ class DelinkTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoteTests(unittest.TestCase):
+    def test_split_note_places_each_section_at_its_original_address(self):
+        import struct
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "unit.o"
+            delink.write_object(delink.PPC, [(".text", 1, b"\x4e\x80\x00\x20", 4), (".data", 1, b"\0" * 8, 4)],
+                                [{"name": "f", "section": ".text", "value": 0, "size": 4, "kind": "func",
+                                  "bind": "global", "address": 0x80004000}], {}, path,
+                                starts={".text": 0x80004000, ".data": 0x80100010})
+            elf = Elf.load(path)
+            note = elf.data(elf.section(".note.split"))
+        cursor, found = 0, {}
+        while cursor < len(note):
+            size, length, kind = struct.unpack_from(">III", note, cursor)
+            found[kind.to_bytes(4, "big")] = note[cursor + 20:cursor + 20 + length]
+            cursor += 20 + length + (-length % 4)
+        virt = struct.unpack(f">{len(found[b'VIRT']) // 4}I", found[b"VIRT"])
+        self.assertEqual(virt, (0, 0x80004000, 0x80100010, 0x80004000))   # null, the two sections, f
