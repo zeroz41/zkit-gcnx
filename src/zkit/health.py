@@ -199,6 +199,11 @@ def doctor(project: Project) -> dict:
             rows.append(_row("warn", f"{name}: original executable", str(original or "not configured"),
                              "put the disc image in orig/<GAMEID>/ and build once (dtk extracts sys/main.dol), "
                              "then rerun `zkit init`"))
+        elif target.get("sha1"):
+            same = digest(original, "sha1") == target["sha1"].lower()
+            rows.append(_row("ok" if same else "fail", f"{name}: original executable", f"{original.name} SHA-1 " +
+                             ("matches" if same else "DIFFERS from the pinned one: wrong revision?"),
+                             "" if same else f"put the right original at {target['original']}"))
         elif target.get("sha256") and original.suffix.lower() == ".dol":
             same = digest(original) == target["sha256"]
             rows.append(_row("ok" if same else "fail", f"{name}: original executable",
@@ -212,7 +217,11 @@ def doctor(project: Project) -> dict:
                              f"build the decomp (`ninja`) to refresh {target['report']}"))
         else:
             rows.append(_row("warn", f"{name}: objdiff report", "none yet; functions come from symbols.txt (no match "
-                             "state, source files or REL functions)", "build the decomp once: `python configure.py` then `ninja`"))
+                             "state, source files or REL functions)", "build the decomp once: " + (
+                                 "`zkit build`" if target.get("build") is not None else
+                                 "`python configure.py` then `ninja`")))
+        from .build import health as build_health
+        rows += [_row(*row) for row in build_health(project, name)]
         from .platform import for_target
         if for_target(target).name == "switch":
             tool = shutil.which("llvm-objdump") or shutil.which("aarch64-linux-gnu-objdump")
