@@ -5,7 +5,7 @@ game file alone: it finds the functions, splits the program into units, recovers
 everything back into a byte-identical executable. It also gives AI coding agents (Claude Code and Codex) the
 evidence they need to work without guessing.
 
-It runs locally and never uses the network.
+It runs locally and only uses the network when you ask it to download compilers (`zkit build --download`).
 
 ## Results
 
