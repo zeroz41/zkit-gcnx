@@ -55,9 +55,10 @@ Relative `root` paths are relative to the project file. All other paths are rela
 `mymodule+0x1D0`). zkit reads the REL files themselves: every reference a module makes is in its relocation tables,
 and the calls inside one of its sections are in its bytes. Its calls into the DOL, into other modules and within
 itself, and its references to DOL globals come from there, so DOL lookups list REL callers, `xrefs` lists REL
-readers, and `asm` shows a REL function with every relocated field named. The files are every `.rel` on the disc
-beside `original` (its folder, or the one above `sys/`), or what `modules` lists; data a game keeps in files of its
-own named `.rel` is told apart by the header. A REL can also be a target of its own (`original` the `.rel`, `host`
+readers, and `asm` shows a REL function with every relocated field named. The files are every `.rel` (Yaz0 or not)
+in the extracted disc beside `original` (its folder, or the one above `sys/`; a disc image itself is not searched,
+`zkit new` extracts one), or what `modules` lists; data a game keeps in files of its own named `.rel` is told apart
+by the header. A REL can also be a target of its own (`original` the `.rel`, `host`
 the DOL target, its own `symbols` and `splits`, whose `Sections:` block names its sections): `delink` then cuts it
 into one object per unit. `zkit rel info FILE` shows what a REL holds; `zkit rel make PLF... --dol ELF --out DIR`
 writes the RELs of partially linked modules, as makerel does (`--like` keeps the original header's name offset and
