@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .index import MODULE_SHIFT, address_text, connect, containing, refresh, unit_asm
+from .index import MODULE_SHIFT, address_text, connect, containing, refresh
 from .project import Project
 
 TYPES = {"u8": ">B", "s8": ">b", "u16": ">H", "s16": ">h", "u32": ">I", "s32": ">i",
@@ -133,39 +133,18 @@ def disasm(project: Project, target: str, address: int, size: int | None = None,
     truncated = size > max_lines * 4
     size = min(size, max_lines * 4)
     from .bridge import _status
-    module = start >= 1 << MODULE_SHIFT
-    tool = None if module else _objdump(project)
-    if module or not tool:
-        lines = _dtk_lines(project, target, row, start, size, address) if row else None
-        if lines is not None:
-            return {"target": target, "address": address_text(start), "size": size, "truncated": truncated,
-                    "function": _status(row), "disassembler": "decomp-toolkit asm (relocations resolved)",
-                    "text": "\n".join(lines), "source": "original bytes, as split by decomp-toolkit"}
-        if module:
-            raise ValueError(f"{address_text(start)} is in a REL: its disassembly comes from decomp-toolkit's asm "
-                             "output, which is missing. Build the decomp once (`python configure.py && ninja`).")
+    if start >= 1 << MODULE_SHIFT:
+        return _disasm_module(project, target, row, start, size, address, truncated)
+    tool = _objdump(project)
     dol = _dol(project, target)
     code = dol.read(start, size)
     lines = []
     if tool:
-        # delete=False: Windows cannot open a NamedTemporaryFile from a second process while it is open.
-        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as blob:
-            blob.write(code)
-        try:
-            result = subprocess.run([tool, "-D", "-b", "binary", "-m", "powerpc:common", "-M", "gekko", "-EB",
-                                     f"--adjust-vma=0x{start:X}", blob.name],
-                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
-        finally:
-            Path(blob.name).unlink(missing_ok=True)
         from .gc import track_addresses
         sda = sda_bases(project, target, dol)
         resolved_at = track_addresses(list(struct.unpack(f">{len(code) // 4}I", code[:len(code) - len(code) % 4])),
                                       start, sda)
-        for line in result.stdout.splitlines():
-            match = re.match(r"\s*([0-9a-f]+):\s+((?:[0-9a-f]{2} ){3}[0-9a-f]{2})\s*(.*)", line)
-            if not match:
-                continue
-            pc, text = int(match[1], 16), re.sub(r"\s+", " ", match[3].strip())
+        for pc, word, text in _objdump_lines(tool, code, start):
             hit = resolved_at.get(pc)
             resolved = hit[0] if hit else None
             if resolved is not None and 0x80000000 <= resolved < 0x81800000:
@@ -177,7 +156,7 @@ def disasm(project: Project, target: str, address: int, size: int | None = None,
                         text += f" = {_value(db, target, dol, resolved, kind)}"
                     except ValueError:
                         pass
-                lines.append(f"{pc:08X}  {match[2].replace(' ', '')}  {text}" + ("   <=" if pc == address != start else ""))
+                lines.append(f"{pc:08X}  {word}  {text}" + ("   <=" if pc == address != start else ""))
                 continue
             target_match = re.search(r"\b(?:bl|b|b[a-z]+)\s+(?:[^,]*,)?0x([0-9a-f]+)", text)
             note = ""
@@ -186,7 +165,7 @@ def disasm(project: Project, target: str, address: int, size: int | None = None,
                 label = _name(db, target, destination)
                 if label and not (start <= destination < start + size and not text.startswith("bl ")):
                     note = f"  ; {label}"
-            lines.append(f"{pc:08X}  {match[2].replace(' ', '')}  {text}{note}" + ("   <=" if pc == address != start else ""))
+            lines.append(f"{pc:08X}  {word}  {text}{note}" + ("   <=" if pc == address != start else ""))
     else:
         for i, word in enumerate(struct.unpack(f">{len(code) // 4}I", code[:len(code) - len(code) % 4])):
             lines.append(f"{start + i * 4:08X}  {word:08X}")
@@ -270,48 +249,117 @@ def _disasm_elf(project: Project, target: str, address: int, size: int | None, m
             "source": "original module bytes"}
 
 
-def _dtk_lines(project: Project, target: str, row, start: int, size: int, address: int) -> list[str] | None:
-    """The function's lines from decomp-toolkit's asm output, or None when that file is missing."""
-    from .gc import asm_functions, asm_objects, asm_references, directive_value
-    module = row["address"] >= 1 << MODULE_SHIFT
-    path = unit_asm(project, project.target(target), row["unit"], module)
-    if path is None:
-        return None
-    body = asm_functions(path).get(row["name"])
-    if not body:
-        return None
-    objects = None
-    base = (row["address"] >> MODULE_SHIFT) << MODULE_SHIFT if module else 0
-    lines = []
-    for instruction in body:
-        pc = base | instruction.address
-        if not start <= pc < start + size:
-            continue
-        text = f"{instruction.mnemonic} {instruction.operands}".strip()
-        _, refs = asm_references(instruction)
-        for symbol, kind in refs:
-            if kind in ("f32", "f64"):
-                objects = asm_objects(path) if objects is None else objects
-                value = directive_value(objects.get(symbol, ""), kind)
-                if value is None:  # a DOL constant defined in another unit: read the original bytes
-                    value = _dol_constant(project, target, symbol, kind)
-                if value is not None:
-                    text += f"  ; = {value}"
-        where = address_text(pc) if module else f"{pc:08X}"
-        lines.append(f"{where}  {instruction.word}  {text}" + ("   <=" if pc == address != start else ""))
-    return lines
-
-
-def _dol_constant(project: Project, target: str, symbol: str, kind: str) -> str | None:
-    from .bridge import symbol_named
-    found = symbol_named(project, target, symbol)
-    if found is None:
-        return None
+def _objdump_lines(tool: str, code: bytes, vma: int) -> list[tuple[int, str, str]]:
+    """(address, word, text) per instruction of PowerPC bytes, through GNU objdump."""
+    # delete=False: Windows cannot open a NamedTemporaryFile from a second process while it is open.
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as blob:
+        blob.write(code)
     try:
-        raw = _dol(project, target).read(found.address, 4 if kind == "f32" else 8)
-    except ValueError:
-        return None
-    return repr(struct.unpack(_format(project, target, kind), raw)[0])
+        result = subprocess.run([tool, "-D", "-b", "binary", "-m", "powerpc:common", "-M", "gekko", "-EB",
+                                 f"--adjust-vma=0x{vma:X}", blob.name],
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+    finally:
+        Path(blob.name).unlink(missing_ok=True)
+    out = []
+    for line in result.stdout.splitlines():
+        match = re.match(r"\s*([0-9a-f]+):\s+((?:[0-9a-f]{2} ){3}[0-9a-f]{2})\s*(.*)", line)
+        if match:
+            out.append((int(match[1], 16), match[2].replace(" ", ""), re.sub(r"\s+", " ", match[3].strip())))
+    return out
+
+
+def _rel_modules(project: Project, target: str, wanted: set[int]) -> dict:
+    """{module id: rel.Module} for the wanted modules' REL files: the ones the index decoded, else found as it
+    finds them."""
+    import json
+    from . import rel
+    from .index import _MODULE_NAMES, _meta
+    known = [Path(p) for p in json.loads(_meta(connect(project), f"modfiles:{target}") or "[]")]
+    files: dict[int, list[Path]] = {}
+    for path in known:
+        number = rel.cached_id(path)
+        if number in wanted:
+            files.setdefault(number, []).append(path)
+    if not wanted <= set(files):
+        files = rel.module_files(project, target)
+    out = {}
+    for number in wanted:
+        path = rel.pick(files.get(number, []), _MODULE_NAMES.get(number))
+        if path is not None:
+            out[number] = rel.cached(path)
+    return out
+
+
+def _disasm_module(project: Project, target: str, row, start: int, size: int, address: int,
+                   truncated: bool) -> dict:
+    """A REL function from the module's own bytes, through the same objdump as the DOL: each relocated field named
+    from the module's relocation table (DOL symbols, functions of this or another module, a section offset for
+    module data, the value a float load reads) and each call makerel applied named by its target."""
+    from . import rel
+    from .bridge import _status
+    db = connect(project)
+    number = start >> MODULE_SHIFT
+    found = _rel_modules(project, target, {number})
+    module = found.get(number)
+    if module is None or module.code is None:
+        raise ValueError(f"{address_text(start)} is in a REL zkit did not find: list its file (or folder) under the "
+                         "target's `modules` in the project file")
+    base = module.base[module.code]
+    offset = start & 0xFFFFFFFF
+    code = module.read(base + offset, size)
+    fields = module.relocations(base + offset, base + offset + size)
+    others = _rel_modules(project, target, {r.module for _, r in fields} - {0, number})
+    others[number] = module
+    notes: dict[int, list[str]] = {}
+    for field, reloc in fields:
+        word = struct.unpack_from(">I", code, field - field % 4 - base - offset)[0]
+        notes.setdefault(field - field % 4, []).append(
+            _relocated(project, target, db, module, others, reloc, module.target(reloc, others), word))
+    tool = _objdump(project)
+    rows = _objdump_lines(tool, code, offset) if tool else [
+        (offset + i * 4, f"{w:08X}", "") for i, w in enumerate(struct.unpack(f">{len(code) // 4}I", code))]
+    lines = []
+    for pc, word, text in rows:
+        note = "".join(notes.get(base + pc, []))
+        if not note:
+            branch = re.search(r"\b(?:bl|b|b[a-z]+)\s+(?:[^,]*,)?0x([0-9a-f]+)", text)
+            destination = (number << MODULE_SHIFT) | int(branch[1], 16) if branch else None
+            if destination is not None and not (start <= destination < start + size and not text.startswith("bl ")):
+                label = _name(db, target, destination)
+                note = f"  ; {label}" if label else ""
+        lines.append(f"{address_text((number << MODULE_SHIFT) | pc)}  {word}  {text}{note}"
+                     + ("   <=" if (number << MODULE_SHIFT) | pc == address != start else ""))
+    return {"target": target, "address": address_text(start), "size": size, "truncated": truncated,
+            "function": _status(row) if row else None, "disassembler": tool or "none (raw words)",
+            "text": "\n".join(lines), "source": "original REL bytes and relocation table"}
+
+
+def _relocated(project: Project, target: str, db, module, others: dict, reloc, destination: int, word: int) -> str:
+    """What one relocated field of REL code names: `; -> name` for a branch, `; =address name` for an address
+    (with the value a float load reads). Module data has no address of its own: module[section]+offset."""
+    from . import rel
+    key = module.key(destination, others)
+    owner = others.get(reloc.module) if reloc.module else None
+    if key is not None:
+        label = _name(db, target, key) or ("" if reloc.module else _symbol_name(project, target, key))
+        where = address_text(key) if reloc.module else f"0x{key:08X}"
+    else:
+        label = ""
+        where = f"{address_text(reloc.module << MODULE_SHIFT).split('+')[0]}[{reloc.target_section}]+0x{reloc.addend:X}"
+    if reloc.kind in (rel.REL24, rel.REL14):
+        return f"  ; -> {where}" + (f" {label}" if label else "")
+    text = f"  ; ={where}" + (f" {label}" if label else "")
+    kind = rel.access(word)
+    if reloc.kind != rel.ADDR16_HA and kind in ("f32", "f64") and (owner is not None or not reloc.module):
+        width = 4 if kind == "f32" else 8
+        try:
+            raw = owner.read(owner.base.get(reloc.target_section, 0) + reloc.addend, width) if owner else \
+                _dol(project, target).read(destination, width)
+            value = struct.unpack(">f" if kind == "f32" else ">d", raw)[0]
+            text += f" = {float(f'{value:.9g}') if kind == 'f32' else value}"
+        except (ValueError, struct.error):
+            pass
+    return text
 
 
 def _readable(project: Project, target: str, dol, address: int, width: int) -> None:
