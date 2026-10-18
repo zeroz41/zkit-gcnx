@@ -17,10 +17,6 @@ decomp without guessing.
 - **Keeps the work honest.** Progress is counted by original address, so renames and file moves never look like
   losses, and a finish gate checks what a session leaves behind.
 
-For example, on Phantasy Star Online Episode I & II Plus (27,572 functions) it finds 99.99% of the function starts
-from the bare executable and relinks it byte-identical in 23 seconds. On Mario Kart: Double Dash!! `zkit new` sets up the
-project from the disc image in under 20 seconds, with 318 units named from the debug map on the disc, and the
-first build relinks it byte-identical.
 
 It runs locally. It only uses the network when you ask it to download tools (`zkit build --download`), and each
 download is pinned and checked against its hash.
