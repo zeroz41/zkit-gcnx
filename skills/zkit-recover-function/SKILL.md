@@ -23,7 +23,7 @@ The rules are `zkit contract decomp`; this is the loop. objdiff's report decides
    - relocation only: data ownership (`zkit compiled <addr>` names the symbols; `zkit unit --gaps`);
    - control flow: try the other decompiler's structure once, then record the blocker.
 5. **Bank only what is identical and debt-free**, through the repo's banking tool, one tree build at a time.
-6. **Name on evidence** (contract rule 13). One inherited slot keeps one name across all overrides; a
+6. **Name on evidence** (the contract's "Names" rules). One inherited slot keeps one name across all overrides; a
    rename changes every spelling, callers included.
 7. **Link.** A unit is done when it links: `zkit unit --blocked` lists exact units that don't, with the
    cross-unit data holding them.

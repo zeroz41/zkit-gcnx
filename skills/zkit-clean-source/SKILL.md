@@ -5,7 +5,7 @@ description: Clean up a matching decomp's source without changing a single byte 
 
 # Clean decomp source
 
-Cleanup repairs what the matching workflow should have prevented (`zkit contract decomp`, rules 8-9). Do it
+Cleanup repairs what the matching workflow should have prevented (`zkit contract decomp`: "Classes before members", "Write source, not decompiler output"). Do it
 in lanes that cover a whole category, prove every step, and measure on the tree.
 
 1. **Measure first.** `zkit quality` shows the debt by kind and the worst files. Pick the category with the
