@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zkit"
-version = "0.8.1"
-description = "Fast local evidence for AI agents decompiling GameCube games and porting them with matching behavior"
+version = "0.9.0"
+description = "Matching decomps of GameCube and Switch games and native ports built from them: delinking, unit and class recovery, progress, and evidence for AI agents"
 requires-python = ">=3.11"
 readme = "README.md"
 license = "GPL-3.0-only"
-keywords = ["gamecube", "decompilation", "decomp-toolkit", "mcp", "claude-code", "codex"]
+keywords = ["gamecube", "switch", "decompilation", "delinker", "mcp", "claude-code", "codex"]
 dependencies = [
   "mcp>=1.30,<2",
   "psutil>=5.9; sys_platform != 'linux'",
@@ -19,7 +19,7 @@ dependencies = [
 ghidra = ["pyghidra>=2.1"]  # `decompile`; also needs Ghidra and its Gekko/Broadway language (see `zkit doctor`)
 
 [project.urls]
-Homepage = "https://github.com/zeroz41/gcn-zkit"
+Homepage = "https://github.com/zeroz41/gc-switch-tool-zkit"
 
 [project.scripts]
 zkit = "zkit.cli:main"

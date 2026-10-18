@@ -386,6 +386,7 @@ class Image:
     code: Callable[[int, int, Callable[[int], bool]], tuple[list, dict[int, int]]]
     pointers: Callable[[int, int], list[tuple[int, int, str]]]
     text: Callable[[int], str]
+    section_of: Callable[[int], str | None] = lambda address: None   # the section holding an address
 
 
 def _gamecube(project: Project, target: str) -> Image:
@@ -411,7 +412,7 @@ def _gamecube(project: Project, target: str) -> Image:
     return Image(PPC, 0, program.read, symbols, program.in_image, code,
                  lambda start, end: data_pointers(program.read, start, end, symbols, program.in_image,
                                                   program.in_code, ">"),
-                 text)
+                 text, program.section_of)
 
 
 def _switch(project: Project, target: str, platform) -> Image:
