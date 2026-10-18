@@ -118,6 +118,61 @@ class ClassRecoveryTests(unittest.TestCase):
         self.assertEqual([s["inherited"] for s in slots], [False, True, False])
 
 
+def beq(words): return (16 << 26) | (12 << 21) | (2 << 16) | ((4 * words) & 0xFFFC)
+def extsh_dot(ra, rs): return (31 << 26) | (rs << 21) | (ra << 16) | (922 << 1) | 1
+
+
+class NonVirtualDestructorTests(unittest.TestCase):
+    """A class whose destructor is in no slot: CodeWarrior stores the derived table then the base's (the reverse of
+    the constructor), behind a `this` test and the delete flag. Read as a constructor, it made the base derive from
+    the derived class and the walk up the bases never ended."""
+
+    def program(self) -> tuple[Program, dict]:
+        image = Image()
+        image.functions = {
+            "Derived_ct": [*install("vt_base", 8), *install("vt_derived", 8), BLR],     # base inlined first
+            "Derived_dt": [mr(31, 3) | 1, beq(9), *install("vt_derived", 8, 31), *install("vt_base", 8, 31),
+                           extsh_dot(0, 4), mr(3, 31), ("bl", "delete"), BLR],
+            "Base_run": [BLR],
+            "Derived_run": [BLR],
+            "delete": [BLR],
+        }
+        image.tables = {"vt_base": [0, 0, "Base_run"], "vt_derived": [0, 0, "Derived_run"]}
+        dol, functions, objects = image.build()
+        program = Program(GameCube(), dol, functions, objects)
+        return program, {f.name: f.address for f in functions} | {"vt_base": DATA, "vt_derived": DATA + 12}
+
+    def test_a_destructor_in_no_slot_is_not_read_as_a_constructor(self):
+        program, at = self.program()
+        tables = vtables.find(program)
+        found = classes.recover(program, tables)
+        base, derived = found[at["vt_base"]], found[at["vt_derived"]]
+        self.assertEqual(derived.base, at["vt_base"])
+        self.assertIsNone(base.base)
+        self.assertEqual(derived.constructors, [at["Derived_ct"]])
+        self.assertEqual(base.constructors, [])
+        self.assertEqual(len(classes.declarations(program, tables, found)), 2)
+
+    def test_the_destructor_shape(self):
+        program, at = self.program()
+        words = program.image.words(at["Derived_dt"], 4 * 12)
+        self.assertTrue(classes.destructor_shape(words, at["Derived_dt"], at["Derived_dt"] + 8))
+        words = program.image.words(at["Derived_ct"], 4 * 7)
+        self.assertFalse(classes.destructor_shape(words, at["Derived_ct"], at["Derived_ct"] + 8))
+
+    def test_a_base_cycle_is_broken_and_every_walk_ends(self):
+        program, at = self.program()
+        tables = vtables.find(program)
+        found = classes.recover(program, tables)
+        a, b = at["vt_base"], at["vt_derived"]
+        found[a].base, found[b].base = b, a                  # contradictory evidence, however it arose
+        classes._break_cycles(found)
+        self.assertTrue(found[a].base is None or found[b].base is None)
+        found[a].base, found[b].base = b, a
+        self.assertIn(classes._root(found, a), (a, b))
+        self.assertEqual(len(classes.declarations(program, tables, found)), 2)
+
+
 class DeclarationTests(unittest.TestCase):
     def test_declarations_place_the_pointer_and_skip_inherited_slots(self):
         program, at = ClassRecoveryTests().program()
