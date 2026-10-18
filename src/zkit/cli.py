@@ -184,6 +184,14 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--out", type=Path, required=True, help="folder for the objects (unit a/b.cpp: OUT/a/b.o)")
     c.add_argument("--objdiff", type=Path, help="also write objdiff's project file here")
     c.add_argument("--compiled", type=Path, help="where the build writes each unit's object (for --objdiff)")
+    c = add("link", help="Link the original back together with the project's CodeWarrior linker (GameCube) from "
+                         "delinked and compiled objects, and check the DOL against the original")
+    c.add_argument("--out", type=Path, required=True, help="folder for the objects, script, ELF and DOL")
+    c.add_argument("--compiled", choices=("none", "units", "functions"), default="functions",
+                   help="none: every unit delinked; units: compiled objects of complete units; functions (default): "
+                        "also every exact function of the other units")
+    c.add_argument("--splits", type=Path, help="default: the target's splits file")
+    c.add_argument("--build", type=Path, help="the build.ninja holding the link command (default: the repository's)")
     c = add("refs", help="Where a function or global is defined, declared and used in the source (any spelling)")
     c.add_argument("query", nargs="+")
     c.add_argument("--repo")
@@ -589,6 +597,12 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             units.write_splits(data, args.splits.expanduser().resolve())
             data["written"] = str(args.splits)
         return data, render.units_proposal(data, args.limit) + (f"\nwrote {args.splits}" if args.splits else "")
+    if command == "link":
+        from . import link
+        data = link.link(project, target, args.out.expanduser().resolve(), args.compiled,
+                         args.splits.expanduser().resolve() if args.splits else None,
+                         args.build.expanduser().resolve() if args.build else None)
+        return data, render.link(data)
     if command == "delink":
         from . import delink
         config = project.target(target)

@@ -1101,3 +1101,27 @@ def hygiene(data: dict) -> str:
         for d in tree["dirty"][:8]:
             out.append(f"  {d['state']:<2} {d['path']}")
     return "\n".join(out)
+
+
+def link(data: dict) -> str:
+    units = data["units"]
+    lines = [f"{data['objects']} objects ({units['delinked']} delinked, {units['compiled']} compiled, "
+             f"{units['combined']} combined; {units['gaps']} of them gaps), {data['functions_from_compiled']} functions "
+             f"of partly matched units from compiled code; {data['code_from_compiled']:,} code bytes linked from "
+             "compiled objects"]
+    for problem in data["problems"][:8]:
+        lines.append(f"  problem: {problem}")
+    if data["kept_original"]:
+        lines.append(f"{len(data['kept_original'])} exact functions stay delinked, e.g. " + "; ".join(
+            f"{k['function']} ({k['why']})" for k in data["kept_original"][:4]))
+    if not data["linked"]:
+        lines.append("the linker failed:\n" + data["linker_output"])
+        return "\n".join(lines)
+    lines.append(f"{data['dol']}: sha1 {data['sha1']} " + ("== the original" if data["identical"] else
+                                                          f"!= the original ({data['original_sha1']})"))
+    if data.get("first_difference"):
+        d = data["first_difference"]
+        lines.append(f"first difference at file offset {d['offset']:#x} (address {d['address']:#010x}, unit "
+                     f"{d['unit']}, {d['symbol']}): ours {d['ours']}, original {d['original']}")
+    return "\n".join(lines)
+

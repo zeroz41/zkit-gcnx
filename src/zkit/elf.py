@@ -28,6 +28,7 @@ class Section:
     link: int
     info: int
     entsize: int
+    align: int = 0
 
 
 @dataclass(frozen=True)
@@ -68,12 +69,12 @@ class Elf:
         for i in range(shnum):
             base = shoff + i * shentsize
             if self.bits == 64:
-                name, kind, flags, addr, off, size, link, info, _, entsize = struct.unpack(
+                name, kind, flags, addr, off, size, link, info, align, entsize = struct.unpack(
                     e + "IIQQQQIIQQ", raw[base:base + 64])
             else:
-                name, kind, flags, addr, off, size, link, info, _, entsize = struct.unpack(
+                name, kind, flags, addr, off, size, link, info, align, entsize = struct.unpack(
                     e + "IIIIIIIIII", raw[base:base + 40])
-            headers.append((name, kind, flags, addr, off, size, link, info, entsize))
+            headers.append((name, kind, flags, addr, off, size, link, info, entsize, align))
         names = headers[shstrndx] if shstrndx < len(headers) else None
         self.sections = [Section(i, self._string(names[4], h[0]) if names else "", *h[1:])
                          for i, h in enumerate(headers)]
