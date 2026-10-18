@@ -489,6 +489,26 @@ class Proposal:
     agreed: int = 0               # references and neighbours the target agreed with when its shape matched
 
 
+def _canonical(donors: list[Donor]) -> dict[str, str]:
+    """{plain key: file-local key} where donors disagree on a symbol's linkage (one build's static is another's
+    global, a decomp's sources drop `static`) and only one file-local symbol has that name: one function."""
+    keys = {k for d in donors for s in d.signatures for k in (s.key, s.before, s.after) if k}
+    keys |= {r.token[1] for d in donors for s in d.signatures for r in s.references if r.token and r.token[0] == "n"}
+    local: dict[str, list[str]] = collections.defaultdict(list)
+    for k in keys:
+        if "\0" in k:
+            local[display(k)].append(k)
+    return {name: found[0] for name, found in local.items() if len(found) == 1 and name in keys}
+
+
+def _renamed_signature(signature: Signature, same: dict[str, str]) -> Signature:
+    from dataclasses import replace
+    get = lambda k: same.get(k, k) if k else k
+    return replace(signature, key=get(signature.key), before=get(signature.before), after=get(signature.after),
+                   references=tuple(Reference(r.offset, r.kind, ("n", get(r.token[1]), r.token[2]))
+                                    if r.token and r.token[0] == "n" else r for r in signature.references))
+
+
 class Matcher:
     """The target's shapes against every donor signature."""
 
@@ -498,14 +518,17 @@ class Matcher:
         self.by_key: dict[str, list[Signature]] = collections.defaultdict(list)
         self.tables: dict[str, list[list[str | None]]] = collections.defaultdict(list)
         self.sizes: dict[str, set[int]] = collections.defaultdict(set)
+        same = _canonical(donors)
         for donor in donors:
             for signature in donor.signatures:
+                if same:
+                    signature = _renamed_signature(signature, same)
                 self.by_shape[signature.shape].append(signature)
                 self.by_key[signature.key].append(signature)
             for name, slots in donor.tables.items():
-                self.tables[name].append(slots)
+                self.tables[same.get(name, name)].append([same.get(k, k) for k in slots])
             for name, size in donor.sizes.items():
-                self.sizes[name].add(size)
+                self.sizes[same.get(name, name)].add(size)
         functions = program.functions
         self.extent = {f.address: f.size for f in functions}
         self.neighbours = {f.address: (functions[i - 1].address if i else None,
