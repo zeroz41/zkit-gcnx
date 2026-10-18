@@ -81,6 +81,7 @@ disassembly (`build/<GAMEID>/<module>/asm/`). DOL lookups therefore list REL cal
 
 | Field | Meaning |
 | --- | --- |
+| `m2c` | How to run m2c for `zkit m2c`: a command, or a path to `m2c.py` (default: `m2c` on PATH, then an m2c checkout beside a repository). |
 | `knowledge` | Folder of lesson notes (`*.md` with `title/applies/kind` front matter) for `zkit lessons`. |
 | `variants` | Named groups of sibling names for `reuse --variants`. |
 | `processes` | Extra program names (regexes) that `activity` reports, such as your emulator or test runner. |

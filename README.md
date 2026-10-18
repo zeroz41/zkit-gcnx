@@ -108,7 +108,9 @@ Run them in your repo. They only read, except `handoff`, `report`, `delink`, `an
 | Everything about a function | `zkit lookup 0x80012345` or `zkit lookup MyClass::update` |
 | Where the source defines and uses it | `zkit refs 0x80012345` |
 | Original instructions or data | `zkit asm 0x80012345`, `zkit data 0x80345678 --type f32 --count 8` |
+| m2c's C for an original function (GameCube) | `zkit m2c 0x80012345` |
 | Ghidra's C for an original function | `zkit decompile 0x80012345` |
+| An assembly file for a decompiler (GameCube) | `zkit asmfile 0x80012345 --out fn.s` |
 | A compiled function against the original | `zkit compiled 0x80012345` |
 | Check a candidate outside the tree | `zkit try 0x80012345 candidate.cpp` |
 | A unit, exact units that don't link, unclaimed data | `zkit unit game/MyClass`, `zkit unit --blocked`, `zkit unit --gaps` |
