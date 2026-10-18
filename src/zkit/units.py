@@ -452,13 +452,13 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     out: list[tuple[int, int, str, str]] = []
     if program.platform.name == "gamecube":
         claims += _initializer_tables(program, owner)
-    by_section: dict[str, list] = collections.defaultdict(list)
+    by_section: dict[tuple[str, int], list] = collections.defaultdict(list)
     for claim in claims:
-        by_section[claim[3]].append(claim)
+        by_section[(claim[3], _instance(program, claim[0]))].append(claim)
     pinned = {row: FIRM if row[2] in firm else FIXED for row in fixed}
     for row in pinned:
-        by_section[row[3]].append(row)
-    for section, rows in by_section.items():
+        by_section[(row[3], _instance(program, row[0]))].append(row)
+    for (section, _), rows in by_section.items():
         rows = sorted(r if r in pinned else _whole_symbols(program, [r])[0] for r in rows)
         if section in TABLES and len(rows) > 1 and rows[0] not in pinned and rows[0][2] in order and \
                 order[rows[0][2]] > min(order.get(r[2], 0) for r in rows[1:]):
@@ -485,6 +485,12 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
             last = row
     out.sort()
     return out
+
+
+def _instance(program: Program, address: int) -> int:
+    """Where the loaded range of the section holding an address starts. One name can be several ranges (an ELF's
+    relro and data segments are both `.data`); a unit's range in one never reaches into another."""
+    return next((start for _, start, end in program.sections if start <= address < end), 0)
 
 
 def _through_data(program: Program, ev: Evidence, claims: list[tuple[int, int, str, str]]
