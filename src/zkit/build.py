@@ -368,7 +368,7 @@ def configure(project: Project, repository: str | None = None, only: str | None 
             raise ValueError(f"Targets {name} and {next(n for n, p in objdiff_files.items() if p == objdiff)} share "
                              f"{objdiff.name}: give each target its own `objdiff` file")
         objdiff_files[name] = objdiff
-        wrote = _write(objdiff, write_objdiff(objdiff, root, units, sources, paths))
+        wrote = _write(objdiff, write_objdiff(objdiff, root, units, sources, paths, target.get("module") or name))
         report, tool = None, objdiff_cli(root, config)
         if tool and objdiff.name == "objdiff.json":
             report = paths.report
@@ -448,9 +448,11 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
             "implicit": [_relative(exe, root)] if exe else []}
 
 
-def write_objdiff(path: Path, root: Path, units: list[str], compiled: set[str], paths: Layout) -> str:
+def write_objdiff(path: Path, root: Path, units: list[str], compiled: set[str], paths: Layout,
+                  module: str = "main") -> str:
     """objdiff's project file: each unit's target object, and its compiled one when it has a source (objdiff
-    refuses a base object that does not exist). Paths are relative to the file's folder; objdiff rebuilds a
+    refuses a base object that does not exist), and the module it links into, so a unit that moves to another
+    folder keeps its functions' place in the report. Paths are relative to the file's folder; objdiff rebuilds a
     compiled object with `ninja -f build/build.ninja <object>`."""
     folder = path.parent
     relative = lambda p: os.path.relpath(root / p, folder).replace(os.sep, "/")
@@ -459,7 +461,7 @@ def write_objdiff(path: Path, root: Path, units: list[str], compiled: set[str], 
         row: dict[str, Any] = {"name": stem(unit), "target_path": relative(f"{paths.obj}/{stem(unit)}.o")}
         if unit in compiled:
             row["base_path"] = relative(f"{paths.src}/{stem(unit)}.o")
-        row["metadata"] = {"source_path": f"src/{unit}"}
+        row["metadata"] = {"source_path": f"src/{unit}", "module_name": module}
         rows.append(row)
     return json.dumps({"min_version": "2.0.0", "custom_make": "ninja",
                        "custom_args": ["-f", os.path.relpath(root / NINJA, folder).replace(os.sep, "/")],
