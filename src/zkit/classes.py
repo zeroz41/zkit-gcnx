@@ -4,7 +4,13 @@ tables (`vtables.find`) and where `this` goes (`ppcflow`).
 The evidence, all of it in the original's code:
 - A constructor stores its class's table pointer into the object after constructing the base and the members, so
   the last table it stores is its own; tables it stored before at the same offset are inlined bases.
-- A destructor is one of its class's slots and stores its own table first, then (inlined) its bases' tables.
+- A destructor is one of its class's slots and stores its own table first, then (inlined) its bases' tables. A
+  destructor that is in no slot (non-virtual) still has CodeWarrior's destructor shape: `this` tested against zero
+  before the first table store, and the second argument (the delete flag) sign-extended or tested. It is never read
+  as a constructor (its store order is the reverse, so it would invert a base), and without a slot it proves no
+  class of its own. Measured on Twilight Princess: 630 of 630 destructors and none of 332 constructors.
+- A base chain never loops: an edge that would close a cycle is dropped (contradictory evidence), so every walk
+  up the bases ends.
 - A constructor calling another class's constructor with `this` is calling its base's; with `this + k`, a member's
   at offset k. Destructors call base and member destructors the same way.
 - `new` is a call with a constant size whose result reaches a constructor: that size is the class's size.
@@ -62,13 +68,16 @@ def recover(program: Program, tables: dict[int, VTable] | None = None) -> dict[i
             if slot:
                 slot_of[slot].add(address)
     for index, flow in flows.items():
-        installs = [(s.base.amount + s.offset, s.value.amount) for s in flow.stores
-                    if s.base.kind == ppcflow.THIS and s.value is not None and s.value.kind == ppcflow.ADDR
-                    and s.value.amount in classes and s.width == 4]
-        if not installs:
+        stores = [s for s in flow.stores if s.base.kind == ppcflow.THIS and s.value is not None
+                  and s.value.kind == ppcflow.ADDR and s.value.amount in classes and s.width == 4]
+        if not stores:
             continue
+        installs = [(s.base.amount + s.offset, s.value.amount) for s in stores]
         address = program.functions[index].address
         destroyed = [(o, t) for o, t in installs if t in slot_of.get(address, ())]
+        if not destroyed and destructor_shape(program.image.words(address, program.functions[index].size),
+                                              address, stores[0].pc):
+            continue                                  # a non-virtual destructor: no slot says whose
         if destroyed:                                 # a destructor: its own table first, then its bases'
             offset, mine = destroyed[0]
             info = classes[mine]
@@ -110,6 +119,7 @@ def recover(program: Program, tables: dict[int, VTable] | None = None) -> dict[i
         info = classes[own[index]]
         if info.base is None and nearest:
             info.base, info.base_evidence = nearest[0], "stores its table before its own (inlined)"
+    _break_cycles(classes)
     for info in classes.values():
         base = classes.get(info.base)
         if base is None:
@@ -132,6 +142,52 @@ def recover(program: Program, tables: dict[int, VTable] | None = None) -> dict[i
                     if access.offset != info.pointer:
                         info.fields[access.offset][(access.width, access.float)] += 1
     return classes
+
+
+VOLATILE = frozenset(range(0, 13))
+
+
+def destructor_shape(words: list[int], start: int, first_store: int) -> bool:
+    """CodeWarrior's destructor prologue: `this` (r3, or the register it is copied to) tested against zero before
+    the first table store (`cmplwi`/`cmpwi rX,0` or `mr.`), and the delete flag (r4) sign-extended (`extsh`) or
+    tested. Constructors take no such flag and do not test `this`."""
+    this, flag = {3}, {4}
+    tested_this = tested_flag = False
+    for i, word in enumerate(words):
+        pc = start + 4 * i
+        op, rs, ra, rb = word >> 26, (word >> 21) & 31, (word >> 16) & 31, (word >> 11) & 31
+        xo = (word >> 1) & 0x3FF
+        if op == 31 and xo == 444 and rs == rb:       # mr ra,rs (mr. also tests it against zero)
+            tested_this |= bool(word & 1) and rs in this and pc < first_store
+            for held in (this, flag):
+                if rs in held:
+                    held.add(ra)
+                else:
+                    held.discard(ra)
+        elif op in (10, 11) and not word & 0xFFFF and not (word >> 21) & 1:   # cmplwi/cmpwi rA,0
+            tested_this |= ra in this and pc < first_store
+            tested_flag |= ra in flag
+        elif op == 31 and xo == 922:                  # extsh ra,rs
+            tested_flag |= rs in flag
+        elif op == 18 and word & 1:                   # bl: the volatile registers are the callee's now
+            this -= VOLATILE
+            flag -= VOLATILE
+        if tested_this and tested_flag:
+            return True
+    return False
+
+
+def _break_cycles(classes: dict[int, ClassInfo]) -> None:
+    """Drop the base edge that closes each cycle: a class cannot derive from itself, so the evidence contradicts."""
+    for address in classes:
+        path: list[int] = []
+        current = address
+        while current in classes and current not in path:
+            path.append(current)
+            current = classes[current].base
+        if current in path:
+            info = classes[path[-1]]
+            info.base, info.base_evidence = None, None
 
 
 def _extend(program: Program, table: VTable, slots: int) -> None:
@@ -504,8 +560,10 @@ def _base_first(found: dict[int, ClassInfo]) -> list[int]:
 
 
 def _root(found: dict[int, ClassInfo], address: int) -> int:
-    while found[address].base in found:
+    seen = {address}
+    while found[address].base in found and found[address].base not in seen:
         address = found[address].base
+        seen.add(address)
     return address
 
 
@@ -524,15 +582,16 @@ def _slot_names(tables: dict[int, VTable], found: dict[int, ClassInfo], names: d
             if c.most_common(1)[0][1] >= DOMINANT * sum(c.values())}
 
 
-def _size(info: ClassInfo, tables: dict[int, VTable], found: dict[int, ClassInfo]) -> int:
+def _size(info: ClassInfo, tables: dict[int, VTable], found: dict[int, ClassInfo],
+          seen: frozenset[int] = frozenset()) -> int:
     """A class's size: from `new`, else the end of its last known field (or of the table pointer)."""
     if info.size:
         return info.size
     ends = [o + max(w for (w, _), _ in c.items()) for o, c in info.fields.items()]
     if info.pointer is not None:
         ends.append(info.pointer + 4)
-    if info.base in found:
-        ends.append(_size(found[info.base], tables, found))
+    if info.base in found and info.base not in seen:
+        ends.append(_size(found[info.base], tables, found, seen | {info.vtable}))
     end = max(ends, default=0)
     return (end + 3) & ~3
 
