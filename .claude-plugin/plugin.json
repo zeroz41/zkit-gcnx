@@ -1,7 +1,7 @@
 {
   "name": "zkit",
-  "version": "0.8.1",
-  "description": "For agents decompiling GameCube games with decomp-toolkit and porting them to PC with matching behavior: session brief, lookup with callers across DOL and RELs, original asm/data, port planning, behavior-drift checks, test impact, handoffs.",
+  "version": "0.9.0",
+  "description": "Matching decomps of GameCube and Switch games, and native ports built from them: zkit's own delinker, unit and class recovery and progress reports, plus agent evidence (lookup, callers, original asm and data, compiled-vs-original diffs, port planning, drift and test impact, handoffs).",
   "author": {
     "name": "zeroz",
     "url": "https://github.com/zeroz41"
@@ -14,7 +14,7 @@
       ]
     }
   },
-  "homepage": "https://github.com/zeroz41/gcn-zkit",
-  "repository": "https://github.com/zeroz41/gcn-zkit",
+  "homepage": "https://github.com/zeroz41/gc-switch-tool-zkit",
+  "repository": "https://github.com/zeroz41/gc-switch-tool-zkit",
   "license": "GPL-3.0"
 }

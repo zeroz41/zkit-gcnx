@@ -36,11 +36,15 @@ Relative `root` paths are relative to the project file. All other paths are rela
 
 | Field | Meaning |
 | --- | --- |
-| `symbols` | dtk `symbols.txt` of the main DOL. Names and data symbols. |
-| `splits` | dtk `splits.txt` (`setup` fills it in). Needed for `unit` (ranges, cross-unit data, `--blocked`, `--gaps`) and the owner unit of a data address. |
-| `report` | objdiff `report.json`. Match state, source files and REL functions. Without it, functions come from `symbols.txt`. |
-| `original` | The DOL, or a `.iso`/`.gcm` disc image (the DOL is read in place). Needed for asm, data, callers and xrefs in the DOL. |
-| `module` | Name of the main module in the report (dtk `config.yml` `name`, default `main`). |
+| `platform` | `gamecube` (default) or `switch`. |
+| `original` | GameCube: the DOL, or a `.iso`/`.gcm` disc image (the DOL is read in place). Switch: the NSO, or an ELF of it. Needed for asm, data, callers, xrefs, delinking and every structure tool. |
+| `base` | Switch: the module's load address (default `0x7100000000`). Addresses are written with it. |
+| `symbols` | The `symbols.txt` (names, sizes, scopes and data symbols; the format existing decomps keep). |
+| `splits` | The `splits.txt` (units and their section ranges). Needed for `unit`, `units --check`, `delink` and the owner unit of a data address. |
+| `report` | objdiff `report.json`. Match state, source files and REL functions. Without it, functions come from `symbols.txt` (or, on Switch, the module's own tables). |
+| `objdiff` | objdiff's project file (default `objdiff.json`): which compiled object belongs to which unit, for `compiled`, `objects` and `try`. |
+| `functions` | Switch: an optional CSV of known functions (address, size, name) when there is no symbols file. |
+| `module` | Name of the main module in the report (default `main`). |
 | `rels` | `false` to leave REL modules out. By default every REL in the report is indexed. |
 | `provisional_name_pattern` | Regex for auto names (default: `fn_`, `lbl_`, `FUN_`, `sub_` + address, ...). |
 | `sda_bases` | `{"r2": "0x...", "r13": "0x..."}` when `__init_registers` can't be decoded. |
@@ -63,7 +67,9 @@ disassembly (`build/<GAMEID>/<module>/asm/`). DOL lookups therefore list REL cal
 | `rules` | Short rules shown in every brief. Keep them short; the repo's `AGENTS.md` stays the contract. |
 | `start`, `finish` | Commands shown in the brief. `finish` is the gate `zkit-finish` runs. |
 | `finish_sources` | `[{path, after, until}]` sections of docs that must list the same finish commands (`gate` reports drift). |
-| `checks` | Lint for `zkit check`: `source_globs`, `require_citation`, `citation_exempt`, `forbidden: [{pattern, paths, message}]`. |
+| `checks` | Lint for `zkit check`: `source_globs`, `require_citation`, `citation_exempt`, `forbidden: [{pattern, paths, message}]`, and `hold_rule` (`error`, `warning` or `off`): native code citing decomp functions that are not ready (exact, named and clean). |
+| `quality` | Decomp source debt (`zkit quality`): `paths` and `exclude` (regexes) to measure, `disable` to drop catalog patterns, `patterns: {key: {regex, label, group}}` to add your own, `gate` (`error` makes added debt fail `check`). |
+| `hygiene` | What must not be committed (`zkit hygiene`, the commit hooks): `identity` (`Name <email>`), `subject_max` (72), `body` (commit bodies allowed, default no), `agent_docs` and `dated_docs` (`forbid` or `allow`), `max_docs`, `script_roots`, `script_users`, `ignore`, `forbidden_files`, `allowed_files`, `max_file_kb`. |
 | `locks`, `builders` | Build lock files and extra build-tool regexes that `wait` and `activity` watch. |
 | `gate_commands` | Extra regexes for your own tools, so `gate` can compare the finish steps your docs list. |
 | `router` | `{brief, lane_stats}`: JSON files your own work router writes (`{"next": {"lane", "commands"}}`); the brief shows its lane. |
@@ -75,6 +81,7 @@ disassembly (`build/<GAMEID>/<module>/asm/`). DOL lookups therefore list REL cal
 
 | Field | Meaning |
 | --- | --- |
+| `m2c` | How to run m2c for `zkit m2c`: a command, or a path to `m2c.py` (default: `m2c` on PATH, then an m2c checkout beside a repository). |
 | `knowledge` | Folder of lesson notes (`*.md` with `title/applies/kind` front matter) for `zkit lessons`. |
 | `variants` | Named groups of sibling names for `reuse --variants`. |
 | `processes` | Extra program names (regexes) that `activity` reports, such as your emulator or test runner. |

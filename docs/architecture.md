@@ -1,134 +1,135 @@
-# Design
+# Architecture
 
-## Shape
+zkit has three jobs: read an original executable and recover its structure (the work a decomp's splitter and
+delinker do), measure a decomp against it, and give agents the evidence and rules to finish the decomp and port
+it. Everything game-specific lives in the project file ([project-file.md](project-file.md)); the code is the same
+for every game.
+
+## Layers
 
 ```
-skills (zkit-resume / -recover-function / -port-system / -finish)
-        │ tell the agent when to call what
-MCP server (server.py) ── CLI (cli.py) ── SessionStart hook (`hook session-start`)
-        │ thin; text by default, --json / response_format=json for data
-bridge.py  structure.py  session.py  activity.py  inspect_dol.py      ← answers
-        │
-index.py (SQLite + FTS5, ~/.cache/zkit/<id>-<hash>.sqlite)
-        │ functions · calls · cites · lines · files
-gc.py (DOL or .iso/.gcm, bl decode, dtk symbols/splits/asm)   native.py (include graph, CTest)   project.py (manifest, safe paths)
-onboard.py (init: dtk config.yml -> project file, project selection by folder)
-        │
-repos named in the manifest + the original executable
+interfaces   cli.py · server.py (MCP) · render.py (text) · hooks · skills
+                │ one function per answer, called the same way from the CLI and MCP
+answers      bridge.py (lookup, refs, port-plan, check) · inspect_dol.py (asm, data) · decompile.py (Ghidra)
+             structure.py (unit, gaps, blocked) · objects.py (compiled vs original) · candidate.py (try)
+             progress.py (reports, baselines, page) · quality.py · hygiene.py · session.py · activity.py
+             native.py · fidelity.py · tiers.py · architecture.py · coverage.py (ports)
+                │
+structure    delink.py (objects per unit) · units.py (unit boundaries) · vtables.py · classes.py (classes)
+             analyze.py (all of it into a folder) · score.py · mwmap.py (CodeWarrior maps) · cwnames.py (names)
+                │
+program      program.py: functions, data objects, sections, small-data bases, references between them
+                │
+machine      ppc.py (PowerPC control flow and relocations) · ppcflow.py (register flows: this, allocations)
+             aarch64.py (AArch64 references and relocations) · rtti.py (Itanium RTTI)
+                │
+images       platform.py (GameCube, Switch) · gc.py (DOL, disc images, splits/symbols files) · nx.py (NSO and
+             ELF modules) · elf.py (ELF objects)
+                │
+index        index.py: SQLite + FTS5 in zkit's cache: functions, calls, cites, text lines of every repo
 ```
 
-All game knowledge lives in the project file (`zkit init` writes it; see [manifest.md](manifest.md)) and an
-optional lessons folder. The code works for any dtk/objdiff GameCube project, with or without REL modules, with or
-without a native port, and for a non-GameCube project without `targets` (then only docs, search, activity,
-handoffs and gates apply). [manifest.md](manifest.md) has a full example with a native port.
+### Images and platforms
 
-## The index
+`platform.py` hides what differs between consoles: how the original is opened, its address space (GameCube
+0x80000000 images; Switch modules at 0x7100000000), how its code is decoded, how data pointers are recognised and
+which Ghidra language reads it. A GameCube target is a DOL, read directly or from inside a disc image. A Switch
+target is an NSO (LZ4 or zstd segments) or an ELF of one, loaded and relocated: MOD0, the dynamic section, symbols,
+RELA/RELR/JMPREL, init arrays, exception-frame function bounds and PLT stubs.
 
-| Table | Source | Refresh |
+### Machine code
+
+`ppc.py` splits a function into basic blocks and follows register values along every path: a block starts with
+what all of its predecessors agree on, and code no known path reaches starts knowing only the small-data bases.
+That is what makes the relocations it recovers exact: `lis`/low-half pairs (including `addic`), small-data
+accesses through r2/r13, calls and branches that leave the function, and recursive calls. The general registers
+each instruction writes come from one exact table, so a float register field is never taken for a general one.
+`aarch64.py` does the same for ADRP pairs, GOT loads, literal loads and branches.
+
+### Delinking
+
+`delink.py` cuts the original into one relocatable ELF object per unit of a split, laid out as the compiler
+emitted it: code and data ranges in order, every reference a relocation against a symbol, relocated fields cleared,
+objdiff's `.note.split` carrying each symbol's original address. The machine decides the object format
+(big-endian ELF32 with CodeWarrior's section flags for GameCube, little-endian ELF64 for Switch), how code is read,
+and which data words are pointers: on Switch the module's own dynamic relocations say so; on GameCube every
+aligned word that lands in the image is one, except inside string data and unaligned code addresses. Each data
+pointer carries its evidence (a function start, a jump-table case, an object, a place inside a function); a
+pointer into the middle of a function is reported, since it means a start the symbols lack or a wrong boundary.
+
+The gate it is held to: on a large GameCube decomp, every function of every fully matched unit equals the compiled
+object (bytes and relocations; relocations to the same constant under another name count as equal), and every data
+pointer of those units is found.
+
+### Units, classes and names
+
+`units.py` proposes unit boundaries from evidence in the original: CodeWarrior gives every unit its own copy of
+each literal, so two copies of one value separate their users and one copy shared by neighbours joins them; data
+only one run of code uses belongs to it; source paths cited by the code name a unit. `--check` compares an existing
+split against the same evidence: folds (two units holding one unit's data), splits (one unit holding two copies of
+one literal) and data claims (data in no unit that one unit's code alone uses).
+
+`vtables.py` finds class tables as data whose words have CodeWarrior's table shape (RTTI and offset words, then
+one function pointer per slot) and that the code stores into an object, or that holds a destructor; a dispatch
+table has the shape but is only read. `classes.py` recovers constructors (the last table a function stores into
+`this` is its class's), destructors (a slot that stores its own table first), bases and members (constructor calls
+on `this` and `this + k`), sizes (`new` with a constant size reaching a constructor) and fields (accesses through
+`this`), and writes declarations a compiler turns back into the original tables. `--prove` compiles them
+with the project's own compiler and compares tables, pointer offsets and sizes. Names are only what evidence
+proves: a table is `__vt__<class>`, a CodeWarrior destructor `__dt__<class>Fv`; a constructor or virtual method
+keeps its placeholder until its parameters are known, because a mangled name claims a signature.
+
+`score.py` measures a proposed split against a reference (another split or a CodeWarrior linker map): function
+starts and sizes, names, unit boundaries, vtables and data ownership, with the reference's fully matched units
+counted separately as proven.
+
+### Measuring a decomp
+
+`objects.py` compares compiled objects with the original's, function by function (the differing words, both
+disassemblies), and proves a change kept every object identical apart from intended renames. `candidate.py`
+compiles a candidate outside the tree with its unit's exact build command. `progress.py` reads objdiff reports:
+matched and linked code and data bytes, exact functions and units, and changes keyed by address so a rename or a
+fold is not a regression; `report.html` is a self-contained page of the same.
+
+### The index and the evidence tools
+
+`index.py` keeps one incremental SQLite database per project in zkit's cache: functions (from the objdiff report,
+the symbols, or the original's own tables), every direct call decoded from the original, every original address the
+configured repos cite, and full-text windows of their docs and source. Every query refreshes it first (a no-op
+refresh is a fraction of a second), so answers include edits other sessions just made. Addresses are the join key:
+they survive renames, unit folds and file moves.
+
+| Tool | Says | Does not say |
 | --- | --- | --- |
-| `functions` | objdiff `report.json` (name, demangled, match %, unit, source, linked), DOL and RELs. REL functions are keyed `(module_id << 32) \| offset` and shown as `module+0xOFFSET`; DOL addresses keep their plain values. Falls back to dtk `symbols.txt` (DOL only), with a CodeWarrior `Class::method` demangle. | When the report's size or mtime changes |
-| `calls` | Every `bl` inside every DOL function, decoded from the **original** DOL; for REL functions, every `bl` in dtk's relocated asm (`build/<ver>/<module>/asm`), resolved to DOL or same-module functions | When the DOL, the function table or dtk's split output (`config.json`) changes |
-| `cites` | Every `8xxxxxxx` address in configured `cite_paths`. Matched on hex boundaries, so `Original801977D4` and `Foo_80011824` count. | Per file, by mtime and size |
-| `lines` | FTS5 over 6-line windows overlapping by 3, for configured `index_paths` | Per file; deletes by rowid range |
+| `lookup` | The report's state of the function holding an address; direct callers and callees from the original; data pointing at it; where it is mentioned | That the build is fresh, or virtual-call edges |
+| `asm` / `data` | Original bytes, with small-data and address pairs resolved | Anything about the rebuilt binary |
+| `compiled` / `try` | Whether a compiled function equals the original, and where it differs | Why it differs |
+| `unit` | A unit's ranges, functions, data and the references crossing its boundary; `--blocked` and `--gaps` | Why a link fails (order and alignment need a link attempt) |
+| `delink` / `units` / `classes` / `analyze` | What the original proves about its structure, with the evidence | Anything the evidence does not reach; those stay placeholders |
+| `progress` | objdiff's numbers and what changed since a baseline | That the build is current |
+| `quality` / `hygiene` | Decompiler debt in the source; what must not be committed | Whether a name is right |
+| `check` / `gate` | Rule hits on added lines; the repo's finish gate | Semantics; whether the gate passes until it is run |
+| port tools | Which original functions native code cites and whether the decomp is ready (exact, named, clean) for them; where native behavior probably differs; which tests cover a change | That ported code is correct: a citation is a mention, not a verification |
 
-The first build of a large decomp plus port (10.4k files) takes about 11 s; a fresh dtk project with 48k
-functions and 757 RELs about 6 s, 5 s of it reading dtk's REL asm. A no-op refresh is about 0.1-0.3 s, and every
-query runs one first, so it sees edits made by other sessions.
+### Discipline
 
-**Addresses are the join key.** They survive renames, TU merges and file moves, which file
-paths and symbol names do not: native docs still cite removed `MyClass_80141D1C.cpp`-style
-paths.
-
-## What each answer means
-
-| Command | Says | Does not say |
-| --- | --- | --- |
-| `lookup` | The report's current state for the function containing an address; the DOL's direct callers and callees; where it is mentioned | That the build is fresh (check `brief`'s report age), or anything about virtual-call edges |
-| `port-plan` | For each original callee: does native **code** (`code_paths`, not docs) cite it, and is the decomp exact? | That the native code is correct. A cite is a mention, not a verification |
-| `demand` | Cited functions that need a match, a name or a link, ranked by how many native files cite them | Which of them is easiest to match |
-| `asm` / `data` | Original bytes. With a PowerPC objdump, DOL code is disassembled from the DOL with r2/r13 from `__init_registers` (or `sda_bases`) and `lis`+low pairs resolved; otherwise, and always for RELs, dtk's relocated asm is shown, with float constants decoded. `data` reads the DOL only | Anything about the rebuilt binary; REL data |
-| `check` | Rule hits on **added lines only** (git diff plus untracked files) | Semantics. It is a fast pre-commit lint, not review |
-| `reuse` | Identical normalized bodies of free functions (≤40 lines) across files, plus files that name several sibling variants | Whether sharing is correct. These are candidates |
-| `activity` | Processes whose cwd is inside a repo (Linux: /proc; macOS/Windows: psutil); lock holders from `/proc/locks` on Linux only (the lock is never taken); dirty files with ages; unmerged branches; worktrees | Who owns a dirty file (age is the hint) |
-| `gate` | The manifest's canonical finish list, and which repo copies lack or add commands | Whether the gate passes. Run it |
-| `architecture` | Project-configured C/C++ include boundary checks, exact source lines, resolved headers and explicit exceptions | Semantic coupling, ownership, preprocessor evaluation or a complete architecture proof |
-| `coverage` | Dynamic reference/stage inventory joins, duplicates, missing identities, prerequisite gaps and source hashes | Import validity, runtime admission, successful tests or system completion |
-| `unit` | A unit's splits.txt ranges, the report's state of its functions, its data symbols with the units whose code or data points at them, the data its code uses that another unit (or no split) holds, and section neighbours. `--blocked`: units whose functions are all exact but not all linked, with those references. `--gaps`: per section, the bytes no split claims (extents from symbols.txt) and the units whose code uses each range | Why a link actually fails (order, alignment, padding and missing runtime symbols need a link attempt), or which fold is right. References are straight-line decoded forms, so register-passed and indexed accesses are missed |
-| `classes` | For each function held by named `__vt__` tables: whether its class name is among them; strong when the named class has its own named vtable without it; the holding class when there is one | The base class of several holders (no RTTI), or anything about non-virtual methods. Unnamed `lbl_` tables are only counted |
-| `stale` (native) | Programs from `build.ninja` link statements older than a source compiled into them (`compile_commands.json`), or a header such a source includes | Generated sources, content packages or data read at run time. It reads file times; it never builds |
-| `test-plan` | Exact CTest names, recursive setup/cleanup fixture closure, historical costs and optional consolidated CMake prebuild commands | Test execution, coverage, rebuild cost or speedup. Complex/environment-dependent fixtures remain under CTest; required fixtures are never disabled |
-| `impact` (native) | Files that directly `#include` the change (the consumers to re-test); CTest names whose test sources include it at distance 1 (direct) or 2 (near), or whose commands name an edited script/file; exact `ctest -R` commands, build targets and fixture names. `--budget`: every direct test, then the cheapest near test of each test program not yet exercised, then cheapest first, within the recorded-time budget; the rest listed as deferred with a command. `gate` prints the direct tests of the current diff as the owning checks | Behavior reached only through linked libraries or hub headers (counted as "broad"); script imports and dynamically formed paths; build-fixture time |
-| `lookup` data refs | Every pointer to the function's start inside the original's data sections, named by holder symbol and offset. The same slot in many `__vt__*` tables means an inherited base-class virtual | Virtual calls made through registers (`bctrl`) at runtime |
-| `consts` (native) | For each float literal in a native function that cites originals: whether that value is among the constants those originals, their direct callees, or a cited data object (whole table) load. Powers of two and trivial values are skipped | Whether a *verified* constant is used in the right place, or integer immediates |
-| `suspects` (native) | Files ranked by 3×unmatched cited originals + 4×near-miss constants + 1×unsourced + 2×untested + 1×no recipe, ×1.5 on gameplay paths, with actions | Proof that a file is wrong; it ranks where to look |
-| `drift` (native) | Cited functions whose decomp match/name/body changed since the accepted baseline (or an old report via `--since`), grouped by native file | When the native code was written; a re-verify list is a prompt, not a verdict |
-| `grounding` (native) | Per folder and file: share of cited original functions that are byte-exact, linked or semantically named in the decomp; the files resting on the most unmatched ones | That a matched function was ported correctly |
-
-## Project file
-
-See [manifest.md](manifest.md) for every field. How `impact` maps tests:
-- `compile_commands.json` gives source → target.
-- The CTest catalog gives target → test names, skipping build fixtures.
-- For a multi-suite executable selected by `--flag`, the dispatcher line containing `"--flag"` names the
-  function it calls, and the test source defining that function owns the case.
-- `X.cpp` and `X.hpp` are treated as one unit, so code that a `.cpp` consumes is still reached through the
-  tests that include its header.
-- Include candidates are resolved once per query and shared across source files. Each query still reads
-  current files; no persistent graph can hide edits or file moves.
-- Literal file arguments in CTest commands resolve from `WORKING_DIRECTORY` (the build directory by default).
-  Script imports and indirect runtime coverage remain outside this graph.
-- Large selections are split into anchored commands, never widened to a label. GPU-labelled cases remain
-  visible as GPU even when also labelled local. JSON supplies `command_argvs`, `build_targets` and `fixtures`.
-  Build targets are discovered from compiler output paths; wrappers/renamed executable targets may be absent.
-- Recorded durations exclude build fixtures; missing costs are counted, not represented as measured zero.
-  Optional parallel prebuilds use the selected targets. Repository finish requirements remain authoritative.
-
-## Native-port design and completion
-
-MCP initialization and session guidance explicitly scope native architecture to porting. Shared owners,
-interfaces at real service boundaries, composition, original-format/protocol adapters and automated import
-dependency handling are expected; behavior must come from authored commands/data and original evidence,
-not content identity or shape. Matching decomp preserves original layout, translation units and compiler
-constraints. The generic toolkit supplies checks; each project supplies its policy and format selectors.
-
-The architecture audit reads selected current source files and resolves literal include paths. Comments and
-raw strings cannot create fake directives. It considers all conditional branches and reports macro/external
-limits. The inventory audit compares current extracted identities across declared stages, with provenance,
-missing inputs, duplicates and dependency gaps visible. Both are read-only and available through CLI and MCP.
-Neither substitutes for native live-path verification or the project's own importer.
-
-## Architecture and test planning
-
-The project manifest's `required_docs` supplies its architecture, layout and quality contracts. Both brief formats
-show those references and missing files. The resume and port skills require reading them and identifying the
-owner, dependency direction and extension boundary before editing. This exposes the project's contract; it does
-not prove an implementation follows it or replace the repository's own architecture checks.
-
-`test-plan <repo> <exact names...> --jobs N` resolves CTest fixtures recursively, reports missing/disabled tests,
-and keeps setup/cleanup fixtures in the emitted CTest selection. It suggests a union of build targets only for
-plain, independent CMake build fixtures with the same working directory/configuration. Commands with custom
-options, environment overrides or dependencies are left to CTest. Nothing is built or executed. Costs include
-known fixture durations separately; they are historical observations, not a forecast of fresh compilation.
-
-## Installation provenance
-
-`doctor` parses enabled state and reports the running package path, plugin cache versions and changed skill/hook
-files relative to an editable checkout. This is an on-disk inventory, not proof an existing client reloaded the
-plugin. User configuration can be overridden per project. The legacy `home` setting is unused.
-`setup --refresh-agents --plugin-source <checkout>` explicitly refreshes both clients through their plugin CLIs;
-it does not remove duplicate checkouts. A setup dry run with an existing manifest writes no configuration.
+`quality.py` measures decompiler debt in the source (hand-mangled names, raw pointer offsets, fake vtables,
+address-named types, decompiler temporaries) at any revision and between revisions. `hygiene.py` enforces what
+must not be committed or left behind: AI-only documents, dated session notes, one-off scripts, original game
+files, AI identities and co-author trailers, long commit messages, stray branches and worktrees. `session.py`
+records each session's start (heads, progress baseline) so the finish gate can judge what this session changed.
+The contracts (`zkit contract decomp|port`) are the rules agents follow; the skills tell them when to call what.
 
 ## Decisions
 
-- **No second router.** A repo's own work router (the `router` setting in the project file) stays the
-  authority; the brief only shows its result, its age, and recent lane yield.
-- **No execution through MCP** (builds, banking, emulators). Those need the user's
-  sandbox and permission model, and each repo already has a transactional tool for them.
-  The only write is the handoff note, and it goes to the toolkit's own state directory.
-- **Compact text first.** The prototype's JSON brief was 7.8 KB. The text brief is about 4 KB with
-  more content, and the JSON form stays available for scripts.
-- **Lessons live in the toolkit repo, not in agent memory.** Claude's memory directory depends
-  on the launch directory, and Codex has its own. A checked-in folder is visible to every
-  client and can be reviewed.
-- **Installed as a normal command.** `uv tool install` puts `zkit` on PATH on every OS; the plugins call it by
-  name (no shell scripts), and the hooks never fail a session start.
+- **Evidence or nothing.** A tool reports what the original or the build proves and labels the rest; no answer
+  guesses a name, a boundary or a behavior.
+- **Measured against truth.** Structure recovery is scored against fully matched units and real symbol maps, and
+  against what the tools zkit replaces produce; a change that scores worse does not ship.
+- **Read-only by default.** Only `handoff`, `report`, `delink`, `analyze`, `objects --save` and `cache --prune`
+  write, and only to zkit's own folders or the folder named. Builds, banking and emulators stay with each repo's
+  own tools and the user's permission model.
+- **Compact text first**, JSON on request (`--json`, `response_format=json`), with output budgets so an answer
+  never floods an agent's context.
+- **Installed as a normal command.** `uv tool install` puts `zkit` on PATH; the plugins call it by name and the
+  hooks never fail a session start.

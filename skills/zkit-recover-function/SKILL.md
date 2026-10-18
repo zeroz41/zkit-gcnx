@@ -1,6 +1,6 @@
 ---
 name: zkit-recover-function
-description: Recover functions or classes into a matching decomp (GameCube decomp-toolkit, or a Switch clang project) - byte match, in the owning translation unit, as a real member of its class, named on evidence, linked. Use for any matching, naming, folding, data or linking work on a project set up with zkit.
+description: Recover functions or classes into a matching decomp (GameCube CodeWarrior or Switch clang) - byte match, in the owning translation unit, as a real member of its class, named on evidence, linked. Use for any matching, naming, folding, data or linking work on a project set up with zkit.
 ---
 
 # Recover a function
