@@ -11,6 +11,7 @@ Read-only: it reports, it never deletes or rewrites anything.
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -209,8 +210,13 @@ def files(project: Project, repo: str) -> dict[str, Any]:
         if not any(fnmatch.fnmatch(path, a) for a in allowed):
             findings.append({"kind": kind, "path": path, "message": message, "severity": severity})
 
+    # A target's own files (splits, symbols, function lists) are the project's data, not documents.
+    data = {project.file(repo, config[key]).resolve() for config in project.config.get("targets", {}).values()
+            if config.get("repository") == repo for key in ("splits", "symbols", "functions", "data_symbols")
+            if config.get(key)}
     docs = [p for p in tracked if p.lower().endswith(DOC_SUFFIXES) and not _ignored(p, ignore)
-            and not Path(p).name.upper().startswith(("LICENSE", "COPYING", "NOTICE"))]
+            and not Path(p).name.upper().startswith(("LICENSE", "COPYING", "NOTICE"))
+            and (root / p).resolve() not in data]
     texts = {p: _read(root, p) for p in tracked if p.lower().endswith(TEXT_SUFFIXES) and not _ignored(p, ignore)
              and Path(p).suffix.lower() not in (".c", ".cpp", ".h", ".hpp")}
     for path in tracked:
@@ -250,8 +256,7 @@ def files(project: Project, repo: str) -> dict[str, Any]:
         for target in re.findall(r"\]\(([^)#\s]+)", text):
             if "://" in target:
                 continue
-            resolved = (base / target).as_posix()
-            linked.add(str(Path(resolved)).replace("\\", "/"))
+            linked.add(os.path.normpath(base / target).replace("\\", "/"))   # ../ links resolve too
         for ref in set(re.findall(r"(?<![\w./-])((?:tools|scripts|docs)/[\w./-]+\.(?:py|sh|md))", text)):
             if not (root / ref).exists():
                 add("stale-reference", path, f"names {ref}, which no longer exists", "warning")
