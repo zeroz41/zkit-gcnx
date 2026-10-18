@@ -109,6 +109,17 @@ def recover(program: Program, tables: dict[int, VTable] | None = None) -> dict[i
         info = classes[own[index]]
         if info.base is None and nearest:
             info.base, info.base_evidence = nearest[0], "stores its table before its own (inlined)"
+    for info in classes.values():
+        base = classes.get(info.base)
+        if base is None:
+            continue
+        if base.pointer is not None and info.pointer is not None and base.pointer != info.pointer:
+            # single inheritance shares the table pointer: a table stored elsewhere is a member's, not a base's
+            info.base, info.base_evidence = None, None
+            continue
+        own, inherited = tables[info.vtable], tables[info.base]
+        if len(own.slots) < len(inherited.slots):    # a derived table is never shorter than its base's
+            _extend(program, own, len(inherited.slots))
     for address, info in classes.items():             # fields from the class's own code
         functions = set(info.constructors) | {info.destructor} | {s for s in _own_slots(tables, classes, address)}
         for function in functions:
@@ -120,6 +131,21 @@ def recover(program: Program, tables: dict[int, VTable] | None = None) -> dict[i
                     if access.offset != info.pointer:
                         info.fields[access.offset][(access.width, access.float)] += 1
     return classes
+
+
+def _extend(program: Program, table: VTable, slots: int) -> None:
+    """Read a table on to its base's length when the words there are functions (or pure-virtual zeros)."""
+    starts = {f.address for f in program.functions}
+    cursor = table.address + 8 + 4 * len(table.slots)
+    while len(table.slots) < slots:
+        try:
+            word = int.from_bytes(program.read(cursor, 4), "big")
+        except ValueError:
+            return
+        if word and word not in starts:
+            return
+        table.slots.append(word)
+        cursor += 4
 
 
 def _own_slots(tables: dict[int, VTable], classes: dict[int, ClassInfo], address: int) -> list[int]:
@@ -396,3 +422,141 @@ def _peek(program: Program, address: int, size: int) -> bytes:
 def _rehome(name: str | None, cls: str) -> str:
     parsed = _method(name)
     return cwnames.member(parsed.method, cls, parsed) if parsed else f"{cls}::{name}"
+
+
+# Declarations: a header the compiler emits the same tables from
+
+FIELD_TYPES = {(1, False): "u8", (2, False): "u16", (4, False): "u32", (8, False): "u64", (4, True): "f32",
+               (8, True): "f64"}
+
+
+@dataclass
+class Declared:
+    """One class as a header declares it."""
+    name: str
+    text: str
+    methods: list[str | None]                           # symbols the virtuals mangle to, slot order (None: pure)
+
+
+def declarations(program: Program, tables: dict[int, VTable], found: dict[int, ClassInfo],
+                 class_names: dict[int, str] | None = None) -> dict[int, Declared]:
+    """A declaration for every class, bases before derived classes: virtuals in slot order (an inherited slot is
+    not redeclared, an override reuses its base's name), the table pointer where the compiler places it (at the
+    first virtual a class declares, after the fields before it), fields from the class's own loads and stores,
+    padding to its size. Names come from `class_names` and the current symbols; the rest are placeholders."""
+    names = {f.address: f.name for f in program.functions}
+    class_names = class_names or {}
+
+    def label(address: int) -> str:
+        return class_names.get(address) or tables[address].name or f"TUnk_{program.platform.text(address)[2:]}"
+    slot_names = _slot_names(tables, found, names)
+    out: dict[int, Declared] = {}
+    for address in _base_first(found):
+        info, table = found[address], tables[address]
+        base = found.get(info.base) if info.base in found else None
+        base_slots = tables[info.base].slots if base else []
+        cls = label(address)
+        lines = [f"// vtable {program.platform.text(address)}"
+                 + (f", constructors {', '.join(program.platform.text(c) for c in info.constructors)}"
+                    if info.constructors else "")
+                 + ("" if info.pointer is not None or base else "; table pointer offset not seen (assumed 0)")]
+        lines.append(f"class {cls}" + (f" : public {label(info.base)}" if base else "") + " {")
+        lines.append("public:")
+        start = _size(base, tables, found) if base else 0
+        members = _members(info, start, info.size, None if base else info.pointer)
+        before = [m for m in members if m[0] < (info.pointer or 0)] if not base else []
+        after = [m for m in members if m not in before]
+        lines += [f"    {m[1]}" for m in before]
+        lines.append(f"    {cls}();")
+        methods = []
+        for index, slot in enumerate(table.slots):
+            inherited = index < len(base_slots) and base_slots[index] == slot
+            method = slot_names.get((_root(found, address), index)) or f"vf{index}"
+            if slot and slot == info.destructor:
+                symbol = cwnames.mangle(cwnames.Name("__dt", [cls], False, [cwnames.Type("v", "void")]))
+                if not inherited:
+                    lines.append(f"    virtual ~{cls}();" + f"  // slot {index}")
+            else:
+                symbol = cwnames.mangle(cwnames.Name(method, [cls], False, [cwnames.Type("v", "void")]))
+                if not inherited:
+                    lines.append(f"    virtual void {method}(){'' if slot else ' = 0'};  // slot {index}")
+            methods.append(None if not slot else symbol if not inherited else out[info.base].methods[index])
+        lines += [f"    {m[1]}" for m in after]
+        lines.append("};")
+        out[address] = Declared(cls, "\n".join(lines), methods)
+    return out
+
+
+def _base_first(found: dict[int, ClassInfo]) -> list[int]:
+    order, seen = [], set()
+
+    def visit(address: int) -> None:
+        if address in seen or address not in found:
+            return
+        seen.add(address)
+        if found[address].base:
+            visit(found[address].base)
+        order.append(address)
+    for address in sorted(found):
+        visit(address)
+    return order
+
+
+def _root(found: dict[int, ClassInfo], address: int) -> int:
+    while found[address].base in found:
+        address = found[address].base
+    return address
+
+
+def _slot_names(tables: dict[int, VTable], found: dict[int, ClassInfo], names: dict[int, str]) -> dict:
+    """(root, slot) -> the method name the slot family's real names agree on."""
+    votes: dict[tuple[int, int], collections.Counter] = collections.defaultdict(collections.Counter)
+    for address, table in tables.items():
+        if address not in found:
+            continue
+        root = _root(found, address)
+        for index, slot in enumerate(table.slots):
+            parsed = _method(names.get(slot))
+            if parsed and parsed.method not in ("__ct", "__dt") and not _placeholder(names.get(slot)):
+                votes[(root, index)][parsed.method] += 1
+    return {key: c.most_common(1)[0][0] for key, c in votes.items()
+            if c.most_common(1)[0][1] >= DOMINANT * sum(c.values())}
+
+
+def _size(info: ClassInfo, tables: dict[int, VTable], found: dict[int, ClassInfo]) -> int:
+    """A class's size: from `new`, else the end of its last known field (or of the table pointer)."""
+    if info.size:
+        return info.size
+    ends = [o + max(w for (w, _), _ in c.items()) for o, c in info.fields.items()]
+    if info.pointer is not None:
+        ends.append(info.pointer + 4)
+    if info.base in found:
+        ends.append(_size(found[info.base], tables, found))
+    end = max(ends, default=0)
+    return (end + 3) & ~3
+
+
+def _members(info: ClassInfo, start: int, size: int | None, pointer: int | None) -> list[tuple[int, str]]:
+    """(offset, declaration) for a class's own fields from `start`, padding the gaps; the table pointer's word is
+    skipped (the compiler places it)."""
+    out, cursor = [], start
+    fields = sorted((o, max(c.items(), key=lambda kv: (kv[1], kv[0][0]))[0]) for o, c in info.fields.items()
+                    if o >= start)
+    for offset, (width, is_float) in fields:
+        if offset < cursor or offset % width or (pointer is not None and pointer <= offset < pointer + 4):
+            continue
+        if pointer is not None and cursor <= pointer < offset:
+            if pointer > cursor:
+                out.append((cursor, f"u8 pad_{cursor:X}[0x{pointer - cursor:X}];"))
+            cursor = pointer + 4
+        if offset > cursor:
+            out.append((cursor, f"u8 pad_{cursor:X}[0x{offset - cursor:X}];"))
+        out.append((offset, f"{FIELD_TYPES[(width, is_float)]} m_{offset:X};"))
+        cursor = offset + width
+    if pointer is not None and cursor <= pointer:
+        if pointer > cursor:
+            out.append((cursor, f"u8 pad_{cursor:X}[0x{pointer - cursor:X}];"))
+        cursor = pointer + 4
+    if size and size > cursor:
+        out.append((cursor, f"u8 pad_{cursor:X}[0x{size - cursor:X}];"))
+    return out

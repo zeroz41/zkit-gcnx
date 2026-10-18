@@ -38,7 +38,7 @@ def find(program: Program, data_sections: tuple[str, ...] = (".data",)) -> dict[
         for _, address, kind in rows:
             if kind == "addr":
                 formed[address].append(index)
-    referenced = set(formed) | {pointee for _, pointee in program.pointers}
+    referenced = set(formed) | {pointee for _, pointee in program.pointers}  # object starts; loads are not
     tables: dict[int, VTable] = {}
     for address, users in sorted(formed.items()):
         found = program.object_at(address)
