@@ -101,6 +101,15 @@ class RuntimeMemberTests(unittest.TestCase):
             self.assertEqual(blob[offset + 60:offset + 64], b"\x7fELF")
 
 
+class ProvenUnitTests(unittest.TestCase):
+    def test_a_unit_whose_code_and_data_all_match_links_whole(self):
+        self.assertTrue(link._proven({"total_code": "244", "matched_code": "244", "total_data": "129",
+                                      "matched_data": "129"}))
+        self.assertFalse(link._proven({"total_code": "244", "matched_code": "244", "total_data": "129",
+                                       "matched_data": "28"}))     # data still differs: only its functions
+        self.assertFalse(link._proven({}))
+
+
 class BareProgramTests(unittest.TestCase):
     """A project straight from the disc names nothing: the register setup the entry point calls still gives the
     small-data bases (so small-data accesses get relocations) and the stack's top."""
