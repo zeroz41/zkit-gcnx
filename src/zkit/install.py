@@ -36,7 +36,7 @@ def _hook(project: Project, event: str, timeout: int) -> dict:
 def _copy_skills(target: Path, changed: list[str]) -> None:
     source = skills_source()
     if source is None:
-        changed.append(f"(skills not copied: install the plugin for them, or clone the repo and rerun)")
+        changed.append("(skills not copied: install the plugin for them, or clone the repo and rerun)")
         return
     target.mkdir(parents=True, exist_ok=True)
     for name in SKILLS:

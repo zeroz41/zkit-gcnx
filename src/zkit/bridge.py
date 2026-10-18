@@ -1834,7 +1834,6 @@ def refs(project: Project, query: str, target: str | None = None, repo: str | No
             spellings.add(address_text(found[0])[2:] if found[0] < 1 << 32 else f"{found[0] & 0xFFFFFFFF:X}")
     if not spellings:
         spellings.add(query.strip())
-    bare = {s for s in spellings if "::" not in s}
     method = next((s.rsplit("::", 1)[-1] for s in spellings if "::" in s), None)
     owner = next((s.rsplit("::", 1)[0].rsplit("::", 1)[-1] for s in spellings if "::" in s), None)
     rows, total = [], 0
