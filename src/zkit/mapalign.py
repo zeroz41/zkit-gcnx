@@ -18,8 +18,9 @@ says nothing about the original, so everything here is decided per object, from 
 - **bounds**: an edge between two consecutive objects of the map is known in the original where the earlier
   one's last function or the later one's first lines up (a function in a run with `SURE` bits to spare, or
   in an object that lines up). An object with both edges known holds the original's code between them even
-  where its code differs (assertions compiled in): it takes its name and that range, and its functions only
-  the names their own runs prove.
+  where its code differs (assertions compiled in), or where it has no functions at all (an assembly object of
+  entry labels and tables): it takes its name and that range, and its functions only the names their own runs
+  prove.
 - **data**: an object that lines up in code places each of its data pieces where the original's references put
   them: every address its code forms in that section, and every word its already placed data holds that points
   there, must fall inside the piece, and the piece goes at the one offset that lands the most of them on the
@@ -76,6 +77,7 @@ class Aligned:
 def source_name(unit: str, symbols: list[mwmap.Symbol]) -> str:
     """A map object as a source path: an archive member keeps its file name; a bare `x.o` is C++ when a symbol
     it defines has a C++ name, else C."""
+    unit = unit.split("#", 1)[0]                     # mwmap names a second object of one name `name#2`
     if not unit.endswith(".o"):
         return unit
     cxx = any(MANGLED.search(s.name) for s in symbols)
@@ -199,6 +201,8 @@ class _Code:
     symbols: list[mwmap.Symbol]                      # map function index -> its symbol
     partner: dict[int, tuple[int, float]]            # map function index -> (our function index, its run's margin)
     owner: dict[int, int] = field(default_factory=dict)   # map function index -> its piece index
+    alone: dict[int, list[mwmap.Piece]] = field(default_factory=dict)   # piece index -> objects with no functions
+                                                                        # right after it (-1: before the first)
 
     def whole(self, index: int) -> tuple[int, int, bool] | None:
         """(our first, our end, every run sure) when every function of a piece lines up, consecutively."""
@@ -207,6 +211,20 @@ class _Code:
                 any(self.partner[ms[k + 1]][0] != self.partner[ms[k]][0] + 1 for k in range(len(ms) - 1)):
             return None
         return self.partner[ms[0]][0], self.partner[ms[-1]][0] + 1, min(self.partner[m][1] for m in ms) >= SURE
+
+    def without_functions(self, trusted: dict[int, int]) -> list[tuple[mwmap.Piece, int, int]]:
+        """(piece, start, end) of an object with no functions (an assembly object of entry labels and tables) that
+        is alone between two objects whose facing functions line up: it holds the code between them."""
+        out = []
+        for index, rows in self.alone.items():
+            if len(rows) != 1 or index < 0 or index + 1 >= len(self.pieces):
+                continue
+            before, after = self.members[index][-1], self.members[index + 1][0]
+            if before in trusted and after in trusted:
+                left, right = self.ours[trusted[before]], self.ours[trusted[after]]
+                if left.address + left.size < right.address:
+                    out.append((rows[0], left.address + left.size, right.address))
+        return out
 
     def bounds(self, trusted: dict[int, int]) -> dict[int, tuple[int, int]]:
         """piece index -> our (start, end) address where both its edges are known: an edge between two pieces is
@@ -226,7 +244,7 @@ class _Code:
                     edge[at] = value
                 elif edge[at] != value and 0 < at < count:
                     edge[at] = -1                    # the two sides disagree: something lies between them
-        out = {}
+        out: dict[int, tuple[int, int]] = {}
         for index in range(count):
             start, end = edge[index], edge[index + 1]
             if start is None or end is None or start < 0 or end < 0 or start >= end:
@@ -238,7 +256,8 @@ class _Code:
 
 
 def _code(program: Program, layout: mwmap.Layout, section: str) -> _Code | None:
-    pieces = [p for p in layout.pieces.get(section, []) if any(s.size and s.kind in ("func", "") for s in p.symbols)]
+    every = [p for p in layout.pieces.get(section, []) if p.size]
+    pieces = [p for p in every if any(s.size and s.kind in ("func", "") for s in p.symbols)]
     ours = [f for f in program.functions if program.section_of(f.address) == section]
     if not pieces or not ours:
         return None
@@ -256,7 +275,14 @@ def _code(program: Program, layout: mwmap.Layout, section: str) -> _Code | None:
         for k in range(run.length):
             partner[run.first + k] = (run.ours + k, run.margin)
     owner = {m: index for index, ms in members.items() for m in ms}
-    return _Code(section, pieces, ours, dict(members), symbols, partner, owner)
+    alone: dict[int, list[mwmap.Piece]] = collections.defaultdict(list)   # function pieces before -> pieces with none
+    seen = -1
+    for piece in every:
+        if piece in pieces:
+            seen += 1
+        else:
+            alone[seen].append(piece)
+    return _Code(section, pieces, ours, dict(members), symbols, partner, owner, dict(alone))
 
 
 def _place_data(program: Program, pieces_by_unit: dict[str, dict[str, mwmap.Piece]],
@@ -343,6 +369,9 @@ def align(program: Program, layout: mwmap.Layout) -> Aligned:
             unit = c.pieces[index].unit
             if unit not in lined:
                 bounded[unit].append((c.section, start, end))
+        for piece, start, end in c.without_functions(trusted):
+            if piece.unit not in lined:
+                bounded[piece.unit].append((c.section, start, end))
     placed, hits, objects, unplaced = _place_data(program, pieces_by_unit, lined)
     units: list[Unit] = []
     for how, found in (("map", lined), ("bounds", bounded)):
@@ -352,6 +381,12 @@ def align(program: Program, layout: mwmap.Layout) -> Aligned:
                               sorted(ranges + placed.get(map_unit, []), key=lambda r: r[1])))
     for map_unit, section in unplaced:
         next(u for u in units if u.map_unit == map_unit).unplaced.append(section)
+    named: collections.Counter = collections.Counter()
+    for unit in sorted(units, key=lambda u: min(r[1] for r in u.ranges)):
+        named[unit.unit] += 1
+        if named[unit.unit] > 1:                     # two objects of one name: the later one by its address
+            stem, _, ext = unit.unit.rpartition(".")
+            unit.unit = f"{stem}_{min(r[1] for r in unit.ranges):08X}.{ext}"
     stats: dict[str, Any] = {"map_units": len(pieces_by_unit)}
     for c in sections:
         stats[f"{c.section} functions"] = {"map": len(c.symbols), "original": len(c.ours), "aligned": len(c.partner)}
@@ -527,7 +562,8 @@ def adopt_project(project, target: str, map_path: Path | None = None, write: boo
     if write:
         symbols = project.file(config["repository"], config["symbols"])
         if symbols.is_file():
-            update_symbols(symbols, adopted)
+            replaced = {o.address for o in program.objects} - {o.address for o in adopted.objects}
+            update_symbols(symbols, adopted, replaced)
         else:
             write_symbols(adopted, symbols)
         units.write_splits(proposal, splits)
@@ -535,10 +571,10 @@ def adopt_project(project, target: str, map_path: Path | None = None, write: boo
     return out
 
 
-def update_symbols(path: Path, program: Program) -> Path:
+def update_symbols(path: Path, program: Program, replaced: set[int] = frozenset()) -> Path:
     """A symbols.txt brought to a program's names, sizes and scopes line by line, so attributes zkit does not
-    model (alignment, `hidden`, `noreloc`, ...) stay: an object the program no longer has (the map's symbols
-    replaced it) goes, one it adds is appended, and every other line is kept as it is."""
+    model (alignment, `hidden`, `noreloc`, ...) stay: an object at a `replaced` address (the map's symbols took
+    its place) goes, one the program adds is appended, and every other line is kept as it is."""
     from .gc import SYMBOL_LINE
     functions = {f.address: f for f in program.functions}
     objects = {o.address: o for o in program.objects}
@@ -553,9 +589,8 @@ def update_symbols(path: Path, program: Program) -> Path:
         address = int(match["address"], 16)
         found = functions.get(address) if kind == "function" else objects.get(address)
         if found is None:
-            if kind == "object" and attrs.get("size"):
-                continue                                # replaced by what the program places here
-            lines.append(line)
+            if kind != "object" or address not in replaced:
+                lines.append(line)
             continue
         seen.add((kind, address))
         rest = match["attrs"]

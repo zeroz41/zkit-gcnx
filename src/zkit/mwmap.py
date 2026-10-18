@@ -86,12 +86,16 @@ def layout(path: Path) -> Layout:
         unit = unit_name(match["where"])
         rows = out.pieces.setdefault(section, [])
         if name == section and match["align"] == "1":
-            rows.append(Piece(unit, section, address, size))
+            if rows and rows[-1].unit == unit:        # one object's second section of the kind: the same piece
+                rows[-1].size = max(rows[-1].address + rows[-1].size, address + size) - rows[-1].address
+            else:
+                rows.append(Piece(unit, section, address, size))
             continue
         if not rows or rows[-1].unit != unit:
             rows.append(Piece(unit, section, address, 0))         # a piece whose section line the map leaves out
         kind, scope = tree.get((name, unit), ("", ""))
         rows[-1].symbols.append(Symbol(name, address, size, int(match["align"] or 1), kind, scope))
+    _distinct(out)
     for rows in out.pieces.values():
         rows.sort(key=lambda p: p.address)
         for piece, after in zip(rows, rows[1:] + [None]):
@@ -102,6 +106,29 @@ def layout(path: Path) -> Layout:
                 end = max(end, max(s.address + s.size for s in piece.symbols))
             piece.size = end - piece.address
     return out
+
+
+def _distinct(layout: Layout) -> None:
+    """Two objects of one name (two archive members called `main.c`) are two units: an object whose name comes back
+    in a code section after another object's is a new one, `name#2`, ... Which of them a data piece of that name
+    belongs to the map does not say, so those pieces are named `name#?` and belong to none."""
+    twice: set[str] = set()
+    for section, rows in layout.pieces.items():
+        if section not in CODE_SECTIONS:
+            continue
+        seen: dict[str, int] = {}
+        for piece in sorted(rows, key=lambda p: p.address):
+            if piece.unit in seen:
+                twice.add(piece.unit)
+                seen[piece.unit] += 1
+                piece.unit = f"{piece.unit}#{seen[piece.unit]}"
+            else:
+                seen[piece.unit] = 1
+    for section, rows in layout.pieces.items():
+        if section not in CODE_SECTIONS:
+            for piece in rows:
+                if piece.unit in twice:
+                    piece.unit += "#?"
 
 
 def read(path: Path) -> Split:
