@@ -95,6 +95,8 @@ Clean up the decomp source in large proven steps. Use zkit-clean-source. Finish 
 | `zkit brief` | where things stand |
 | `zkit lookup 0x80012345` | everything about a function |
 | `zkit compiled 0x80012345` | your compiled function against the original |
+| `zkit m2c 0x80012345` | m2c's C for a GameCube function, the seed to match from |
+| `zkit permute 0x80012345 --seed f.cpp --run` | run decomp-permuter on a GameCube near-miss and check what it finds |
 | `zkit progress` | how much is matched and linked |
 | `zkit build` | build, check and relink the project |
 | `zkit gate` | what to run before you stop |

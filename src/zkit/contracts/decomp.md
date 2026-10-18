@@ -46,10 +46,11 @@ repair on a 27,000-function decomp. A project may tighten them; it should not lo
    difference and any such debt; only a candidate that is identical and debt-free goes into the tree.
    Every function and global is declared once, in the header of the class or module that owns it: no `extern`
    declarations inside `.cpp` files, no catch-all "external" or "misc" headers.
-11. **Read two decompilers.** Start from the decompiler seed and Ghidra's reading side by side; where one
-    emits `goto` or fails, the other is usually closer.
+11. **Start from the proven decompiler.** On GameCube, m2c's seed (`zkit m2c`); where m2c fails or emits
+    `goto`, take loop and branch shape from Ghidra's reading, which it adds. On Switch, Ghidra's reading
+    (`zkit decompile`).
 12. **Stop rules.** Hand work starts at 96% or closer. Four attempts per function (enforced), and two edits that
-    do not improve the difference mean stop. Register-allocation-only gaps go to the permuter or a flag sweep;
+    do not improve the difference mean stop. Register-allocation-only gaps go to the permuter (`zkit permute`, GameCube) or a flag sweep;
     relocation-only gaps are data ownership, not code; control-flow gaps are not ground by hand.
 13. Bodies stay in address order inside their unit. Banking is a transaction: one build per batch, rolled back on
     any address-keyed loss.

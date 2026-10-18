@@ -13,6 +13,7 @@ keywords = ["gamecube", "switch", "decompilation", "delinker", "mcp"]
 dependencies = [
   "mcp>=1.30,<2",
   "psutil>=5.9; sys_platform != 'linux'",
+  "toml>=0.10",  # read by decomp-permuter, which `zkit permute` runs with zkit's Python
 ]
 
 [project.optional-dependencies]

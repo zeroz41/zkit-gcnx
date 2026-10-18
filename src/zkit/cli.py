@@ -237,9 +237,22 @@ def build_parser() -> argparse.ArgumentParser:
                             "labels, and the data they read (GameCube)")
     c.add_argument("addresses", nargs="+", help="addresses or names of functions")
     c.add_argument("--out", type=Path, help="write here instead of printing")
-    c = add("m2c", help="m2c's C for an original function, from zkit's own assembly file (GameCube)")
-    c.add_argument("address", help="address or name of the function")
+    c = add("m2c", help="m2c's C for original functions: the seed to match from (GameCube). Where m2c fails or "
+                        "emits goto, Ghidra's reading of the same bytes follows when Ghidra is set up")
+    c.add_argument("addresses", nargs="+", help="addresses or names of functions")
     c.add_argument("--language", choices=("c", "c++"), help="default: c++ for a mangled name, else c")
+    c.add_argument("--context", type=Path, help="C context file with the types and declarations m2c should use")
+    c.add_argument("--no-ghidra", action="store_true", help="m2c only, never Ghidra's reading")
+    c = add("permute", help="Set up a decomp-permuter scratch for a near-miss whose gap is register allocation or "
+                            "scheduling: the unit's exact compile command, its target object, the function's "
+                            "disassembly for scoring (GameCube)")
+    c.add_argument("query", help="the function's address or name")
+    c.add_argument("--seed", type=Path, help="the best candidate so far (default: the unit's source)")
+    c.add_argument("--out", type=Path, help="scratch folder (default: build/permuter/<function> in the decomp)")
+    c.add_argument("--run", action="store_true", help="run the permuter (stops at the first zero score) and verify "
+                                                      "every zero-score output against the target object")
+    c.add_argument("--time", type=int, default=180, help="seconds the permuter may run with --run (default 180)")
+    c.add_argument("--jobs", "-j", type=int, help="permuter processes with --run (default: min(16, CPUs-2))")
     c = add("configure", help="Write build/build.ninja, objdiff.json and build/compile_commands.json from the project "
                               "file's build settings (zkit build runs it)")
     c.add_argument("--download", action="store_true", help="fetch the CodeWarrior bundle (checked against its "
@@ -720,9 +733,16 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
                 args.out.write_text(text, encoding="utf-8")
                 return {"written": str(args.out)}, f"wrote {args.out}"
             return {"text": text}, text.rstrip()
-        data = asmfile.m2c(project, target, resolve(args.address), args.language)
-        return data, f"// {data['function']} ({data['address']}), m2c {data['language']}, asm {data['asm']}\n" + \
-            data["text"].rstrip()
+        data = asmfile.m2c(project, target, [resolve(a) for a in args.addresses], args.language,
+                           args.context.expanduser() if args.context else None, not args.no_ghidra)
+        return data, render.m2c(data)
+    if command == "permute":
+        from . import permute
+        data = permute.scratch(project, target, args.query, args.seed.expanduser() if args.seed else None,
+                               args.out.expanduser() if args.out else None)
+        if args.run:
+            data = permute.run(project, target, data, args.jobs, args.time)
+        return data, render.permute(data)
     if command == "delink":
         from . import delink
         config = project.target(target)
