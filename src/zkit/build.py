@@ -46,10 +46,12 @@ DEFAULTS: dict[str, dict[str, Any]] = {
                    "-fp_contract on", "-multibyte"],
         "includes": ["include", "src"],
         "ldflags": ["-fp hardware", "-nodefaults"]},
+    # Switch modules carry unwind information for every function, and the prologue's CFI fixes where the frame
+    # pointer is set up, so a module's code is only reproduced with unwind tables on.
     "switch": {
         "compiler": "clang++",
         "cflags": ["--target=aarch64-none-elf", "-march=armv8-a+crc+crypto", "-mtune=cortex-a57", "-fPIC", "-O3",
-                   "-fno-exceptions", "-fno-rtti", "-fno-asynchronous-unwind-tables", "-std=gnu++17"],
+                   "-fno-exceptions", "-fno-rtti", "-fasynchronous-unwind-tables", "-std=gnu++17"],
         "includes": ["include", "src"]},
 }
 UNIT_KEYS = {"compiler", "cflags", "extra_cflags", "includes", "compiler_version"}
