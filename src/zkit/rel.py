@@ -154,14 +154,20 @@ def _relocations(raw: bytes, start: int, module: int) -> list[Reloc]:
 
 
 def load(path: Path) -> Rel:
-    return read(Path(path).read_bytes())
+    """A REL file, Yaz0-compressed or not (discs ship both)."""
+    from .archive import is_yaz0, yaz0
+    raw = Path(path).read_bytes()
+    return read(yaz0(raw) if is_yaz0(raw) else raw)
 
 
 def module_id(path: Path) -> int:
     """The module id a REL file declares, from its header alone; ValueError when the header is not a REL's (games
     also use the .rel suffix for data of their own)."""
+    from .archive import is_yaz0, yaz0
     with Path(path).open("rb") as stream:
         head = stream.read(0x34)
+        if is_yaz0(head):
+            head = yaz0(head + stream.read())[:0x34]
     if len(head) < 0x34:
         raise ValueError(f"{path} is too small to be a REL")
     number, following, previous = struct.unpack_from(">3I", head)

@@ -116,6 +116,15 @@ class RelFormat(unittest.TestCase):
         with self.assertRaises(ValueError):
             rel.read(bytes(broken))
 
+    def test_yaz0_compressed_rel_reads_the_same(self):
+        _, raw = self.made(3)
+        packed = bytearray(b"Yaz0" + struct.pack(">I", len(raw)) + bytes(8))
+        for start in range(0, len(raw), 8):                              # every item a literal byte
+            packed += b"\xff" + raw[start:start + 8]
+        (self.root / "packed.rel").write_bytes(bytes(packed))
+        self.assertEqual(rel.module_id(self.root / "packed.rel"), 4)
+        self.assertEqual(rel.write(rel.load(self.root / "packed.rel")), raw)
+
     def test_cli_info_and_make(self):
         from zkit.cli import main
         import contextlib
