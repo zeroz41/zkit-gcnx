@@ -111,6 +111,7 @@ class Symbol(NamedTuple):  # a tuple: tens of thousands are built per process, a
     type: str
     size: int
     scope: str
+    data: str = ""  # the data kind dtk records (string, float, 4byte, ...): what the bytes are, not where they point
 
 
 def read_symbols(path: Path) -> list[Symbol]:
@@ -123,7 +124,7 @@ def read_symbols(path: Path) -> list[Symbol]:
         attrs = dict(part.split(":", 1) for part in match["attrs"].split() if ":" in part)
         symbols.append(Symbol(match["name"], match["section"], int(match["address"], 16),
                               attrs.get("type", "unknown"), int(attrs.get("size", "0"), 16),
-                              attrs.get("scope", "global")))
+                              attrs.get("scope", "global"), attrs.get("data", "")))
     return symbols
 
 

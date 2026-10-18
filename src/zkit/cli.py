@@ -177,9 +177,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--check", action="store_true", help="folds, splits and data claims for the existing splits.txt")
     c.add_argument("--splits", type=Path, help="write the fresh proposal as a splits.txt")
     c.add_argument("--limit", type=int, default=30)
-    c = add("delink", help="Split the original into one relocatable object per unit of a splits.txt (Switch): "
-                           "the target objects objdiff compares the compiled ones with")
-    c.add_argument("--splits", type=Path, required=True)
+    c = add("delink", help="Split the original into one relocatable object per unit of a splits.txt (GameCube and "
+                           "Switch): the target objects objdiff compares the compiled ones with")
+    c.add_argument("--splits", type=Path, help="default: the target's splits file")
+    c.add_argument("--unit", action="append", default=[], help="only this unit (repeatable)")
     c.add_argument("--out", type=Path, required=True, help="folder for the objects (unit a/b.cpp: OUT/a/b.o)")
     c.add_argument("--objdiff", type=Path, help="also write objdiff's project file here")
     c.add_argument("--compiled", type=Path, help="where the build writes each unit's object (for --objdiff)")
@@ -543,7 +544,6 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         return data, render.decompiled(data)
     if command == "data":
         fields = args.fields.split(",") if args.fields else None
-        from .index import refresh
         refresh(project, [])
         count = args.count or (inspect_dol.count_for_size(args.size, args.type, fields, args.stride)
                                if args.size and args.type != "str" else 16)
@@ -591,10 +591,22 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         return data, render.units_proposal(data, args.limit) + (f"\nwrote {args.splits}" if args.splits else "")
     if command == "delink":
         from . import delink
-        data = delink.delink(project, target, args.splits.expanduser().resolve(), args.out.expanduser().resolve(),
+        config = project.target(target)
+        if args.splits:
+            splits = args.splits.expanduser().resolve()
+        elif config.get("splits"):
+            splits = project.file(config["repository"], config["splits"])
+        else:
+            raise ValueError("Pass --splits FILE: the target has no `splits` file in the project")
+        data = delink.delink(project, target, splits, args.out.expanduser().resolve(),
                              args.objdiff.expanduser().resolve() if args.objdiff else None,
-                             args.compiled.expanduser().resolve() if args.compiled else None)
+                             args.compiled.expanduser().resolve() if args.compiled else None,
+                             set(args.unit) or None)
         lines = [f"wrote {len(data['units'])} objects to {data['out']}"]
+        inside = [(u["unit"], a) for u in data["units"] for a in u.get("pointers_inside_functions", [])]
+        if inside:
+            lines.append(f"{len(inside)} data words point into the middle of a function (a start the symbols lack, "
+                         "or a wrong boundary): " + ", ".join(f"{a} in {u}" for u, a in inside[:6]))
         if data["unassigned"]:
             lines.append(f"{data['unassigned']} referenced addresses are in no unit's ranges (extend the splits): "
                          + ", ".join(data.get("unassigned_examples", [])[:8]))
