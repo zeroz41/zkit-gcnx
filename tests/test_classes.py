@@ -221,3 +221,38 @@ class AuditTests(unittest.TestCase):
         wrong = data["wrong_class"][0]
         self.assertEqual((wrong["current"], wrong["class"], wrong["suggested"]),
                          ("Other__sub_8000312C", "Derived", "__dt__7DerivedFv"))
+
+
+class UnitTests(unittest.TestCase):
+    """Unit evidence on a hand-assembled image: two copies of one float separate their users, one copy shared by
+    two neighbours joins them, and an existing split that cuts a shared literal is reported as a fold."""
+
+    def program(self):
+        image = Image()
+        def lfs(rd, address): return (48 << 26) | (rd << 21) | (0 << 16) | (address & 0xFFFF)  # lfs fD, addr(r0)
+        # a: uses literal A; b: uses A too; c: uses B (a second copy of the same value)
+        image.functions = {"a": [lis(3, DATA), addi(3, 3, DATA), BLR], "b": [lis(3, DATA), addi(3, 3, DATA), BLR],
+                           "gap": [BLR], "c": [lis(3, DATA + 4), addi(3, 3, DATA + 4), BLR]}
+        image.tables = {"one": [0x3F800000], "copy": [0x3F800000]}
+        dol, functions, objects = image.build()
+        objects = [DataObject(o.address, 4, o.name, ".sdata2") for o in objects]
+        return Program(GameCube(), dol, functions, objects)
+
+    def test_separation_and_join(self):
+        from zkit import units
+        program = self.program()
+        ev = units.evidence(program)
+        self.assertEqual([(lo, hi) for lo, hi, _ in ev.separations], [(2, 3)])
+        self.assertEqual([(lo, hi) for lo, hi, _ in ev.joins], [(0, 1)])
+        found = units.boundaries(program, ev)
+        self.assertEqual([b.position for b in found], [2])           # after b; the gap function joins neither
+        self.assertEqual(len(units.propose(program)["units"]), 2)
+
+    def test_check_reports_a_fold(self):
+        from zkit import units
+        program = self.program()
+        f = {fn.name: fn for fn in program.functions}
+        splits = [("one.cpp", ".text", f["a"].address, f["b"].address),
+                  ("two.cpp", ".text", f["b"].address, f["c"].address + 12)]
+        result = units.check(program, splits)
+        self.assertEqual(result["folds"][0]["units"], ["one.cpp", "two.cpp"])

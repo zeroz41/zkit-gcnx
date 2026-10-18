@@ -936,24 +936,53 @@ def objects_compare(data: dict) -> str:
     return "\n".join(out)
 
 
-def boundaries(data: dict, limit: int = 30) -> str:
-    out = [f"boundaries for {data['target']}: {data['assigned']:,} of {data['functions']:,} functions placed "
-           f"({data['assigned_bytes_percent']}% of code bytes) in {len({u['unit'] for u in data['units']})} units "
-           f"from {data['files']} source paths; {len(data['gaps'])} gaps between different units; "
-           f"{len(data['names'])} name proposals",
-           "evidence: " + ", ".join(f"{k} {v:,}" for k, v in data["evidence"].items())
-           + f"; {data['header_inlines']:,} functions are inlines from headers"]
-    if data.get("roots"):
-        out.append("source trees: " + "; ".join(data["roots"]))
+def score(data: dict) -> str:
+    f, n, u, c, v, d = (data[k] for k in ("functions", "names", "units", "unit_cuts", "vtables", "data_ownership"))
+    out = [f"functions: {f['starts_found']}% of the reference's starts found, {f['starts_correct']}% of the proposed "
+           f"correct, {f['sizes_exact']}% sizes exact",
+           f"names: {n['correct']:,} right, {n['wrong']:,} wrong of {n['proposed_named']:,} offered "
+           f"({n['recall']}% of the reference's {n['reference_named']:,} real names)",
+           f"units: {c['found']}% of the reference's boundaries found, {c['correct']}% of the proposed correct, "
+           f"{c['inside_complete_units']:,} inside proven units; {u['exact']}% of units exact "
+           f"({u['complete_exact']}% of proven ones)",
+           f"vtables: {v['found']}% found, {v['named_correctly']}% named; data owned by the right unit: "
+           f"{d['owned_by_the_right_unit']}%",
+           "data objects: " + "; ".join(f"{s} {r['found']}%/{r['correct']}%" for s, r in data["data_objects"].items()
+                                        if r["reference"]) + " (found/correct)"]
+    return "\n".join(out)
+
+
+def units_proposal(data: dict, limit: int = 30) -> str:
+    c = data["counts"]
+    named = ", ".join(f"{k} {v:,}" for k, v in c["named_by"].items())
+    out = [f"{c['units']:,} units for {c['functions']:,} functions from {c['boundaries']:,} boundaries (named by {named}); "
+           f"{c['data_ranges']:,} data ranges owned ({c['data_bytes']:,} bytes); {len(data['names'])} name proposals"]
     for unit in sorted(data["units"], key=lambda u: -u["functions"])[:limit]:
-        out.append(f"  {unit['start']}-{unit['end']}  {unit['functions']:>4} fn  {unit['unit']}"
-                   + (f"  (piece of {unit['pieces']})" if unit["pieces"] > 1 else ""))
+        out.append(f"  {unit['start']}-{unit['stop']}  {unit['functions']:>4} fn  {len(unit['data']):>3} data  "
+                   f"{unit['unit']}  ({unit['named_by']})")
     if len(data["units"]) > limit:
         out.append(f"  ... {len(data['units']) - limit} more units (--json, or --splits FILE writes them all)")
     for name in data["names"][:12]:
-        out.append(f"  name {name['address']} {name['current']} -> {name['proposed']} ({name['confidence']})")
-    if len(data["names"]) > 12:
-        out.append(f"  ... {len(data['names']) - 12} more names (--json)")
+        out.append(f"  name {name['address']} {name['current']} -> {name['proposed']}")
+    out.append("limits: " + data["limits"])
+    return "\n".join(out)
+
+
+def units_check(data: dict) -> str:
+    out = [f"{data['folds_total']} folds, {data['splits_total']} splits, {data['claims_total']:,} data claims "
+           f"({data['claimed_bytes']:,} bytes)"]
+    if data["folds"]:
+        out.append("folds (two units holding one unit's data):")
+        out += [f"  {' + '.join(r['units'])}: {r['shared']} shared, e.g. {r['examples'][0]}" for r in data["folds"]]
+    if data["splits"]:
+        out.append("splits (one unit holding two copies of one literal):")
+        out += [f"  {r['unit']}: {r['evidence']} pieces of evidence, boundary in {r['window'][0]}-{r['window'][1]} "
+                f"({r['example']})" for r in data["splits"]]
+    if data["claims"]:
+        out.append("claims (data in no unit that one unit's code alone uses):")
+        out += [f"  {r['address']} {r['object']} ({r['section']}, {r['size']} bytes) -> {r['unit']}"
+                + (" [class table]" if r.get("vtable") else "") for r in data["claims"]]
+    out.append("limits: " + data["limits"])
     return "\n".join(out)
 
 

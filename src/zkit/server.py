@@ -398,15 +398,20 @@ def create_server(project: Project) -> FastMCP:
         return out(data, render.compiled(data), response_format)
 
     @tool(enabled=bool(project.config.get("targets")))
-    def zkit_boundaries(limit: int = 30, repo: str | None = None, response_format: Format = "text") -> str:
-        """Translation-unit boundaries and function names proposed from evidence in the original: source paths and
-        Class::method strings its code references, functions between two of the same file, static helpers beside
-        their only caller's unit. Third-party source trees show which code is libraries. Proposals with evidence,
-        for the project's split and rename tools to apply; `zkit boundaries --splits FILE` writes a splits.txt."""
-        from . import boundaries
+    def zkit_units(check: bool = False, limit: int = 30, repo: str | None = None,
+                   response_format: Format = "text") -> str:
+        """Translation units from evidence in the original: source paths the code cites, two copies of one literal
+        (CodeWarrior keeps one pool per unit), data only one run of code uses, classes. check=True compares the
+        decomp's current splits: units sharing one unit's data (folds), units holding two copies of one literal
+        (splits), and data in no unit that one unit's code alone uses (claims, class tables included). Without
+        check, a fresh proposal; `zkit units --splits FILE` writes it as a splits.txt."""
+        from . import units
         p = decomp(repo)
-        data = boundaries.propose(p, target(p))
-        return out(data, render.boundaries(data, max(1, min(limit, 200))), response_format)
+        if check:
+            data = units.check_project(p, target(p), max(1, min(limit, 500)))
+            return out(data, render.units_check(data), response_format)
+        data = units.propose_project(p, target(p))
+        return out(data, render.units_proposal(data, max(1, min(limit, 200))), response_format)
 
     @tool()
     def zkit_refs(query: str, repo: str | None = None, limit: int = 60, response_format: Format = "text") -> str:
