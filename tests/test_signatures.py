@@ -37,10 +37,12 @@ TEXTS = {"msg": b"LibPanic: failed!!\0\0"}
 
 
 class Image:
-    """A DOL assembled from (name, body, scope, unit) functions, a 4-byte global `gLib` and strings."""
+    """A DOL assembled from (name, body, scope, unit) functions, a 4-byte global `gLib`, strings and tables of
+    words or function addresses."""
 
-    def __init__(self, functions):
+    def __init__(self, functions, tables=None):
         self.functions = functions
+        self.tables = tables or {}
 
     def build(self, root: Path, stem: str, hide: bool = False) -> tuple[Path, Path]:
         addresses, cursor = {}, TEXT
@@ -51,6 +53,9 @@ class Image:
         for name, raw in TEXTS.items():
             addresses[name] = DATA + len(data)
             data += raw
+        for name, words in self.tables.items():
+            addresses[name] = DATA + len(data)
+            data += b"".join(struct.pack(">I", addresses[w] if isinstance(w, str) else w) for w in words)
         text = bytearray()
         for name, body, _, _ in self.functions:
             for word in body:
@@ -84,6 +89,9 @@ class Image:
         for name, raw in TEXTS.items():
             lines.append(f"lbl_{addresses[name]:08X} = .data:0x{addresses[name]:08X}; // type:object "
                          f"size:0x{len(raw):X} data:string")
+        for name, words in self.tables.items():
+            shown = f"lbl_{addresses[name]:08X}" if hide else name
+            lines.append(f"{shown} = .data:0x{addresses[name]:08X}; // type:object size:0x{4 * len(words):X}")
         symbols = root / f"{stem}.symbols.txt"
         symbols.write_text("\n".join(lines) + "\n", encoding="utf-8")
         (root / f"{stem}.splits.txt").write_text("".join(
@@ -117,8 +125,8 @@ class SignatureTests(unittest.TestCase):
         dol, symbols = Image(DONOR).build(self.root, "donor")
         return signatures.build("lib", dol, symbols, splits=self.root / "donor.splits.txt")
 
-    def target(self, functions=TARGET) -> tuple[Program, dict[str, list[int]]]:
-        dol, symbols = Image(functions).build(self.root, "target", hide=True)
+    def target(self, functions=TARGET, tables=None) -> tuple[Program, dict[str, list[int]]]:
+        dol, symbols = Image(functions, tables).build(self.root, "target", hide=True)
         program = Program.from_symbols(GameCube(), dol, symbols)
         where: dict[str, list[int]] = {}
         cursor = TEXT
@@ -146,6 +154,27 @@ class SignatureTests(unittest.TestCase):
         self.assertNotIn(at["GameCopy"][0], named)                        # same code as LibSet, elsewhere
         self.assertNotIn(at["GameBig"][0], named)
 
+    def test_a_named_table_names_its_slots(self):
+        """A constructor matched by shape names the table it installs; the table names a short virtual method
+        nothing else places (its neighbours differ in the target)."""
+        ctor = [("lis", 4, "__vt__3Foo"), ("addi", 4, 4, "__vt__3Foo"), stw(4, 0, 3)] + [add(5, 5, 5)] * 14 + [BLR]
+        method_a = PROLOGUE + [li(3, 3)] + [mullw(3, 3, 3)] * 11 + EPILOGUE + [BLR]
+        method_b = [li(3, 5), BLR]
+        donor_functions = [("__ct__3FooFv", ctor, "global", "foo.cpp"), ("a__3FooFv", method_a, "global", "foo.cpp"),
+                           ("b__3FooFv", method_b, "global", "foo.cpp")]
+        table = {"__vt__3Foo": [0, 0, "a__3FooFv", "b__3FooFv"]}
+        dol, symbols = Image(donor_functions, table).build(self.root, "donor")
+        donor = signatures.build("classes", dol, symbols)
+        self.assertEqual(donor.tables["__vt__3Foo"], ["a__3FooFv", "b__3FooFv"])
+        program, at = self.target([("b__3FooFv", method_b, "global", "foo.cpp"), ("Game", GAME, "global", "x.c"),
+                                   ("__ct__3FooFv", ctor, "global", "foo.cpp"),
+                                   ("a__3FooFv", method_a, "global", "foo.cpp")], table)
+        found = {p.address: p for p in signatures.propose(program, [donor])}
+        self.assertEqual(found[at["__ct__3FooFv"][0]].name, "__ct__3FooFv")
+        table_address = next(a for a, p in found.items() if p.name == "__vt__3Foo")
+        self.assertEqual(found[table_address].source, at["__ct__3FooFv"][0])
+        self.assertEqual((found[at["b__3FooFv"][0]].name, found[at["b__3FooFv"][0]].evidence), ("b__3FooFv", "slot"))
+
     def test_two_copies_of_one_shape_stay_unnamed(self):
         program, at = self.target([("LibHelper", HELPER, "global", "a.c"), ("LibWork", WORK, "global", "a.c"),
                                    ("Other", GAME, "global", "a.c"), ("LibWork", WORK, "global", "b.c")])
@@ -166,6 +195,57 @@ class SignatureTests(unittest.TestCase):
         named = {p.address: p.name for p in signatures.propose(program, [donor])}
         self.assertNotIn(at["LibHelper"][0], named)
         self.assertEqual((named[at["LibWork"][0]], named[at["LibOther"][0]]), ("LibWork", "LibOther"))
+
+    def test_a_linker_map_names_a_donor(self):
+        """A CodeWarrior map of another build: functions, data and units; a name it lists twice is file-local."""
+        dol, _ = Image(DONOR).build(self.root, "donor")
+        lines, cursor, units = [".text section layout", "  Starting        Virtual", "  address  Size   address",
+                                "  -----------------------"], TEXT, {}
+        for name, body, _, unit in DONOR:
+            units.setdefault(unit, []).append((cursor, 4 * len(body), name))
+            cursor += 4 * len(body)
+        for unit, rows in units.items():
+            start = rows[0][0]
+            lines.append(f"  {start - TEXT:08x} {sum(r[1] for r in rows):06x} {start:08x}  1 .text \t{unit}")
+            lines += [f"  {a - TEXT:08x} {size:06x} {a:08x}  4 {name} \t{unit}" for a, size, name in rows]
+        lines += [".data section layout", "  Starting        Virtual", "  address  Size   address",
+                  "  -----------------------", f"  00000000 000004 {DATA:08x}  4 gLib \tlib/helper.c"]
+        path = self.root / "donor.MAP"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        donor = signatures.build("map", dol, map_path=path)
+        program, at = self.target()
+        named = {p.address: p.name for p in signatures.propose(program, [donor])}
+        self.assertEqual((named[at["LibWork"][0]], named[DATA]), ("LibWork", "gLib"))
+        self.assertEqual([named.get(a) for a in at["Static"]], ["Static", "Static"])
+
+    def test_small_data_bases_from_the_entry_point(self):
+        """A fresh analysis names nothing `__init_registers`: the first call of the entry point that sets r2 and
+        r13 gives them, and a small-data access then has the shape the donor's has."""
+        def ori(ra, rs, value): return (24 << 26) | (rs << 21) | (ra << 16) | (value & 0xFFFF)
+        registers = [(15 << 26) | (2 << 21) | 0x8010, ori(2, 2, 0x8000), (15 << 26) | (13 << 21) | 0x8010,
+                     ori(13, 13, 0x8000), BLR]
+        start = [("bl", "__init_registers")] + [BLR]
+        read = [(32 << 26) | (3 << 21) | (13 << 16) | (0x10000 - 0x8000), BLR] + [add(3, 3, 3)] * 14 + [BLR]
+        functions = [("__start", start, "global", "s.c"), ("__init_registers", registers, "global", "s.c"),
+                     ("ReadGlobal", read, "global", "r.c")]
+        dol, symbols = Image(functions).build(self.root, "donor")
+        donor = signatures.build("sda", dol, symbols)
+        self.assertEqual(next(s for s in donor.signatures if s.key == "ReadGlobal").references[0].token,
+                         ("n", "gLib", 0))
+        program, at = self.target(functions + [("Game", GAME, "global", "game.c")])
+        self.assertEqual(program.sda, {})
+        self.assertEqual(signatures.small_data(program), {2: 0x80108000, 13: 0x80108000})
+        named = {p.address: p.name for p in signatures.propose(program, [donor])}
+        self.assertEqual((named[at["ReadGlobal"][0]], named[DATA]), ("ReadGlobal", "gLib"))
+
+    def test_analyze_takes_the_cached_names(self):
+        from zkit import analyze
+        signatures.save(self.donor())
+        program, at = self.target()
+        result = analyze.analyze(program)
+        self.assertEqual(result["symbols"][at["LibWork"][0]], ("LibWork", "function", 0))
+        self.assertEqual(result["symbols"][DATA], ("gLib", "object", 0))
+        signatures.remove("lib")
 
     def test_cache_round_trip_and_own_image_left_out(self):
         donor = self.donor()
