@@ -289,7 +289,9 @@ def propose(program: Program) -> dict[str, Any]:
     cuts = boundaries(program, ev)
     text = program.platform.text
     functions = program.functions
-    edges = [0] + [c.position for c in cuts] + [len(functions)]
+    sections = [program.section_of(f.address) or "" for f in functions]
+    edges = sorted({0, len(functions), *(c.position for c in cuts),     # a unit never spans two code sections
+                    *(p for p in range(1, len(functions)) if sections[p] != sections[p - 1])})
     class_of = _function_classes(program)
     units = []
     taken: collections.Counter = collections.Counter()
@@ -311,6 +313,7 @@ def propose(program: Program) -> dict[str, Any]:
             name = f"{stem}_{text(functions[first].address)[2:]}.{ext}"
         last = functions[end - 1]
         units.append({"unit": name, "named_by": how, "first": first, "end": end,
+                      "section": sections[first] if sections[first].startswith(".") else ".text",
                       "start": text(functions[first].address), "stop": text(last.address + last.size),
                       "start_key": functions[first].address, "end_key": last.address + last.size,
                       "functions": end - first})
@@ -367,7 +370,7 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str]) -> li
     owned: list[tuple[int, int, str, str]] = []
     for o, fs in ev.local.items():
         homes = {owner.get(i) for i in fs} - {None}
-        if len(homes) == 1:
+        if len(homes) == 1 and not program.in_code(o.address):      # data in code is in its unit's code range
             owned.append((o.address, o.address + max(o.size, 1), next(iter(homes)), o.section))
     if program.platform.name == "gamecube":
         from .classes import recover
@@ -393,7 +396,8 @@ def write_splits(data: dict, path: Path) -> Path:
     lines = []
     for unit in data["units"]:
         lines.append(f"{unit['unit']}:")
-        lines.append(f"\t{'.text':<12} start:0x{unit['start_key']:08X} end:0x{unit['end_key']:08X}")
+        lines.append(f"\t{unit.get('section', '.text'):<12} start:0x{unit['start_key']:08X} "
+                     f"end:0x{unit['end_key']:08X}")
         for row in unit.get("data", []):
             lines.append(f"\t{row['section']:<12} start:0x{row['start_key']:08X} end:0x{row['end_key']:08X}")
         lines.append("")

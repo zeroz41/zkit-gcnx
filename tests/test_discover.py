@@ -196,6 +196,15 @@ class DiscoverTests(unittest.TestCase):
         self.assertIn(program.function_index[self.labels["leaf"]],
                       program.calls[program.function_index[self.labels["a"]]])
 
+    def test_units_from_a_bare_dol_keep_to_one_code_section(self):
+        from zkit import units
+        proposal = units.propose(Program.from_image(GameCube(), self.dol))
+        self.assertEqual({u["section"] for u in proposal["units"] if u["start_key"] < TEXT}, {".init"})
+        self.assertTrue(all(u["end_key"] <= TEXT or u["start_key"] >= TEXT for u in proposal["units"]))
+        with tempfile.TemporaryDirectory() as folder:
+            text = units.write_splits(proposal, Path(folder) / "splits.txt").read_text()
+        self.assertIn(f".init        start:0x{INIT:08X}", text)
+
 
 if __name__ == "__main__":
     unittest.main()
