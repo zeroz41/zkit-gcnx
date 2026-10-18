@@ -1,6 +1,6 @@
 {
   "name": "zkit",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Matching decomps of GameCube and Switch games, and native ports built from them: zkit's own delinker, unit and class recovery and progress reports, plus agent evidence (lookup, callers, original asm and data, compiled-vs-original diffs, port planning, drift and test impact, handoffs).",
   "author": {
     "name": "zeroz"
