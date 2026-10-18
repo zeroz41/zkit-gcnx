@@ -53,7 +53,7 @@ def ori(ra, rs, value): return d_form(24, rs, ra, value)
 def lis(rd, value): return d_form(15, rd, 0, value >> 16)
 def cmplwi(ra, value): return d_form(10, 0, ra, value)
 def mr(ra, rs): return (31 << 26) | (rs << 21) | (ra << 16) | (rs << 11) | (444 << 1)
-def b(name, link=False): return lambda pc, labels: (18 << 26) | ((labels[name] - pc) & 0x03FFFFFC) | int(link)
+def b(name): return lambda pc, labels: (18 << 26) | ((labels[name] - pc) & 0x03FFFFFC)
 def bl(name, offset=0): return lambda pc, labels: (18 << 26) | ((labels[name] + offset - pc) & 0x03FFFFFC) | 1
 def bgt(name): return lambda pc, labels: (16 << 26) | (12 << 21) | (1 << 16) | ((labels[name] - pc) & 0xFFFC)
 def ha(name, rd): return lambda pc, labels: d_form(15, rd, 0, (labels[name] + 0x8000) >> 16)
