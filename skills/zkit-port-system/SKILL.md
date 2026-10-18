@@ -11,9 +11,10 @@ required reading). This is the loop.
 1. **Is the reference ready?** `zkit port-plan <entry addr|name>` walks the original call tree:
    - `port`, `shared-port`, `reuse`: the decomp is matched, named and clean; port it (shared-port into one
      shared owner, reuse by extending the owner that already exists);
-   - `decompile-first`, `clean-first`, `reuse-unverified`: the decomp is not ready. Recover or clean it in the
-     decomp first (`zkit-recover-function`, `zkit-clean-source`), or leave that part an explicit unsupported
-     boundary. Never fill the gap with a plausible guess.
+   - `decompile-first`, `clean-first`, `reuse-unverified`: the decomp is not ready (the plan lists why).
+     Recover or clean it in the decomp first (`zkit-recover-function`, `zkit-clean-source`), or leave that part
+     an explicit unsupported boundary. Never fill the gap with a plausible guess;
+   - `platform`: SDK/runtime library code; the port uses its own platform code instead.
 2. **Find the original's sharing.** `zkit lookup` and `zkit xrefs` on the functions you port: who calls them,
    in what order, with what data. Port the shared owner once and map every original caller; the bug or feature
    for one object is almost always a shared mechanism.
@@ -31,7 +32,9 @@ required reading). This is the loop.
    hot-path changes, measured before and after on the same machine. `zkit stale native` before anyone runs a
    build.
 7. **Check.** `zkit check native` (no errors: unresolved or not-ready citations, missing citations, forbidden
-   patterns, near-miss constants), `zkit consts` for numbers, `zkit architecture` for boundaries if configured.
+   patterns, include boundaries, near-miss constants), `zkit consts <file>` for its numbers. `zkit grounding`
+   shows how proven the port is overall and where it most likely differs; `zkit drift` what changed in the
+   decomp under code already ported.
 8. **Feed back.** Evidence found while porting goes into the decomp as matched, named code; update the system's
    document in place.
 

@@ -82,7 +82,7 @@ With a port:
 | --- | --- |
 | Is the decomp ready for this feature, and what to reuse | `zkit port-plan 0x80012345` |
 | What the port is waiting on from the decomp | `zkit demand` |
-| Where the port probably differs from the original | `zkit suspects`, `zkit consts src/combat` |
+| How proven the port is, and where it probably differs from the original | `zkit grounding`, `zkit consts src/combat` |
 | What changed in the decomp that the port must re-check | `zkit drift` |
 | The tests that cover a change | `zkit impact` |
 | Is the build older than the code? | `zkit stale` |
