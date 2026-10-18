@@ -1,24 +1,43 @@
 # zkit
 
-zkit helps AI coding agents (Claude Code and Codex) work on matching decompilations of console games, and on
-native ports written from them, without guessing. It supports GameCube/Wii projects built with
-[decomp-toolkit](https://github.com/encounter/decomp-toolkit) and [objdiff](https://github.com/encounter/objdiff),
-and Switch projects built with clang.
+zkit is a toolkit for matching decompilations of GameCube and Switch games, and for native ports built from
+them. It works from the original executable itself: it cuts it into translation units, turns each unit back into
+the relocatable object its compiler wrote, recovers classes and names, and measures your compiled code against
+it. On top of that it gives AI coding agents (Claude Code and Codex) the evidence they need to match, name and
+port code without guessing, and the rules for what may be committed.
 
-It indexes your decomp, the original executable and your port, and answers what an agent would otherwise grep or
-script for: where a function is defined and who calls it, the original bytes and data, how a compiled function
-differs from the original, what a session changed, and whether a port is about to rest on decomp code that isn't
-clean yet. It also carries the rules: what "done" means, how candidates are written and proven, and what must
-never be committed.
+It runs locally and never uses the network.
 
-It runs locally, reads your files, and never uses the network.
+## What it does
+
+- **Reads originals**: GameCube DOLs (also straight from a disc image) and Switch NSO/ELF modules (LZ4 and zstd
+  segments, dynamic symbols and relocations, exception-frame function bounds, PLT stubs).
+- **Delinks**: one relocatable object per unit of a split, as the compiler emitted it, with every reference
+  turned back into a relocation. These are the targets objdiff compares your compiled objects with. PowerPC
+  code is read along its control flow, so an address is never paired across a path it does not take. On the 3,602
+  fully matched units of a 27,000-function GameCube decomp, every one of the 17,607 functions agrees with the
+  compiled object (983 differ only in a symbol's name), and all 7,054 data pointers checked are found (one
+  extra word is taken for a pointer).
+- **Finds units**: proposes translation-unit boundaries from evidence in the original (a CodeWarrior unit keeps
+  its own copy of each literal, data only one run of code uses, source paths the code cites), and checks an
+  existing split for units that should be folded or split and data no unit claims.
+- **Recovers classes**: class tables, constructors, destructors and base classes from the code; writes a header
+  per class and proves them with the project's compiler (tables, pointer offsets and sizes).
+- **Scores** a split against a reference (another split or a CodeWarrior linker map) and an objdiff report.
+- **Reports progress**: matched and linked code and data bytes, exact functions and units, per category, as text
+  or a browsable HTML page, with changes tracked by address so renames and folds don't hide regressions.
+- **Serves agents**: an MCP server and a CLI over the decomp, the original and the port (below).
+
+Being built: function discovery from a bare executable (today the structure tools start from an existing
+`symbols.txt`), relinking to a byte-identical executable with function-level linking, REL modules, library
+naming, and `zkit new` to start a project from a disc or an NSO.
 
 ## Install
 
 You need [uv](https://docs.astral.sh/uv/getting-started/installation/) and git.
 
 ```sh
-uv tool install git+https://github.com/zeroz41/gcn-zkit
+uv tool install git+https://github.com/zeroz41/gc-switch-tool-zkit
 cd path/to/your-decomp
 zkit setup                          # the decomp
 zkit setup --native ../your-port    # or the decomp and its port
@@ -30,21 +49,41 @@ checks everything and prints the fix for anything missing.
 
 Optional: [Ghidra](https://github.com/NationalSecurityAgency/ghidra/releases) 11.3+ for `zkit decompile`
 (GameCube also needs the [GameCube Loader](https://github.com/Cuyler36/Ghidra-GameCube-Loader/releases)
-extension for its Gekko language), installed with `uv tool install --force 'zkit[ghidra] @
-git+https://github.com/zeroz41/gcn-zkit'`.
+extension for its Gekko language), installed with
+`uv tool install --force 'zkit[ghidra] @ git+https://github.com/zeroz41/gc-switch-tool-zkit'`.
 
 ## Use
+
+### Structure
+
+| You want | Command |
+| --- | --- |
+| Target objects for every unit (and objdiff's project file) | `zkit delink --out build/target --objdiff objdiff.json` |
+| Units proposed from the original | `zkit units`, `zkit units --splits splits.txt` |
+| What is wrong with the current split | `zkit units --check` |
+| Classes against the current names | `zkit classes` |
+| A header per class, proven with the compiler | `zkit classes --headers include/classes --prove` |
+| A fresh split, symbols and headers in one folder | `zkit analyze --out fresh/` |
+| How close a split is to a reference | `zkit score fresh/ config/ --report build/report.json` |
+| Progress, and what changed since a baseline | `zkit progress`, `zkit progress --since session --check` |
+| A browsable progress page | `zkit report --out build/progress` |
+
+### Agents
 
 Agents get a short brief at session start and these skills: `zkit-resume`, `zkit-recover-function`,
 `zkit-clean-source`, `zkit-port-system`, `zkit-start-project` and `zkit-finish`. A short prompt is enough:
 
 ```
-Continue the decomp. Use zkit-resume, then zkit-recover-function. Finish with zkit-finish.
+Continue the decomp. Use zkit-resume, then zkit-recover-function. Go for big wins.
+Naming, folding and data matching are all wanted; move code to its real units.
+Try to discover new wins and better methods if stuck or slowed down. Finish with zkit-finish.
 ```
 
 ```
 Continue the port on the next milestone in its status doc. Use zkit-resume, then zkit-port-system.
-Finish with zkit-finish.
+Shared systems, clean architecture, no one-off hard-coded fixes (prefer full shapes and real fixes).
+If you match decomp functions or find behavior, give it back to the decomp repo.
+Don't run processes that use all the RAM, and don't rerun the same tests over and over. Finish with zkit-finish.
 ```
 
 ```
@@ -53,10 +92,10 @@ Clean up the decomp source in large proven steps. Use zkit-clean-source. Finish 
 
 The rules behind the skills: `zkit contract decomp` and `zkit contract port`.
 
-### Commands
+### Evidence
 
-Run them in your repo. They only read, except `handoff`, `report`, `objects --save` and `cache --prune`, which
-write to zkit's own folders or the folder you name.
+Run them in your repo. They only read, except `handoff`, `report`, `delink`, `analyze`, `objects --save` and
+`cache --prune`, which write to zkit's own folders or the folder you name.
 
 | You want | Command |
 | --- | --- |
@@ -68,8 +107,6 @@ write to zkit's own folders or the folder you name.
 | A compiled function against the original | `zkit compiled 0x80012345` |
 | Check a candidate outside the tree | `zkit try 0x80012345 candidate.cpp` |
 | A unit, exact units that don't link, unclaimed data | `zkit unit game/MyClass`, `zkit unit --blocked`, `zkit unit --gaps` |
-| Progress, and what changed since a baseline | `zkit progress`, `zkit progress --since session --check` |
-| A browsable progress page | `zkit report --out build/progress` |
 | Decompiler debt left in the source | `zkit quality`, `zkit quality --since HEAD~20` |
 | Prove a change kept every object identical | `zkit objects --save`, build, `zkit objects --compare` |
 | What must not be committed or left behind | `zkit hygiene` |
@@ -100,6 +137,7 @@ project's identity, no AI co-author).
 ## More
 
 - [docs/architecture.md](docs/architecture.md): how zkit is built and what each answer does and doesn't prove.
-- [docs/project-file.md](docs/project-file.md): the project file (rules, finish gate, checks, hygiene, ports).
+- [docs/project-file.md](docs/project-file.md): the project file (targets, rules, finish gate, checks, hygiene,
+  ports).
 
 GPL-3.0.
