@@ -565,10 +565,13 @@ def data_rows(data: dict) -> str:
     batched = _batched(data_rows, data)
     if batched is not None:
         return batched
-    out = [f"{data['address']} {data['kind']}" + (f" (inside {data['inside_function']})" if data.get("inside_function") else "")]
+    kind = ",".join(data["kind"]) if isinstance(data["kind"], list) else data["kind"]
+    out = [f"{data['address']}" + (f" {data['symbol']}" if data.get("symbol") else "") + f" as {kind}"
+           + (f" (inside {data['inside_function']})" if data.get("inside_function") else "")]
     for row in data["rows"]:
         prefix = f"[{row['index']}] " if "index" in row else ""
         out.append(f"  {prefix}{row['address']}: " + ", ".join(str(v) for v in row["values"]))
+    out.extend(f"note: {n}" for n in data.get("notes", []))
     return "\n".join(out)
 
 
