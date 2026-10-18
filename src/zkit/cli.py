@@ -240,6 +240,18 @@ def build_parser() -> argparse.ArgumentParser:
     c = add("m2c", help="m2c's C for an original function, from zkit's own assembly file (GameCube)")
     c.add_argument("address", help="address or name of the function")
     c.add_argument("--language", choices=("c", "c++"), help="default: c++ for a mangled name, else c")
+    c = add("configure", help="Write build/build.ninja, objdiff.json and build/compile_commands.json from the project "
+                              "file's build settings (zkit build runs it)")
+    c.add_argument("--download", action="store_true", help="fetch the CodeWarrior bundle (checked against its "
+                                                           "SHA-256) when the configured compiler is missing")
+    c = add("build", help="Build the project: target objects from the original, every unit with a source in src/, "
+                          "the objdiff report, and (GameCube) the relinked executable checked against the original")
+    c.add_argument("targets", nargs="*", help="ninja targets (default: everything; also objects, compile, report, "
+                                              "link, or one object)")
+    c.add_argument("-j", "--jobs", type=int)
+    c.add_argument("-k", "--keep-going", type=int, metavar="N", help="keep going until N jobs fail (0: never stop)")
+    c.add_argument("--download", action="store_true", help="fetch the CodeWarrior bundle (checked against its "
+                                                           "SHA-256) when the configured compiler is missing")
     c = add("refs", help="Where a function or global is defined, declared and used in the source (any spelling)")
     c.add_argument("query", nargs="+")
     c.add_argument("--repo")
@@ -420,7 +432,9 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
                         f"{result['functions']:,} functions, {result['units']:,} units, {result['objects']:,} target "
                         f"objects" + (f", {result['class_headers']:,} class headers" if "class_headers" in result else "")
                         + (f"; {result['unassigned_references']:,} referenced addresses are in no unit yet"
-                           if result["unassigned_references"] else "") + f"\nproject file: {result['manifest']}")
+                           if result["unassigned_references"] else "") + f"\nproject file: {result['manifest']}"
+                        + "".join(f"\nnote: {note}" for note in result["build"]["notes"])
+                        + f"\nnext: cd {result['folder']} && zkit build")
     if args.command == "init":
         from .onboard import init
         result = init(args.decomp, args.version, args.native, args.name, write=not args.dry_run)
@@ -733,6 +747,17 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         if args.objdiff:
             lines.append(f"wrote {args.objdiff}")
         return data, "\n".join(lines)
+    if command in ("configure", "build"):
+        from . import build
+        project = project.with_overlay(here, worktree) if here else project
+        if command == "configure":
+            fetched = build.ensure_compilers(project, build.build_targets(project, here, args.target)) \
+                if args.download else []
+            data = {**build.configure(project, here, args.target), "downloaded": fetched}
+        else:
+            data = build.build(project, here, args.target, args.targets, args.jobs, args.keep_going, args.download,
+                               quiet=args.json)
+        return data, build.render(data)
     if command == "refs":
         data = bridge.refs(project, " ".join(args.query), target, project.repo_key(args.repo) if args.repo else None,
                            args.limit)
