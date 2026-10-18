@@ -67,6 +67,21 @@ class ObjectTests(unittest.TestCase):
             unit = objects.unit_diff(original, changed)
             self.assertEqual((unit["exact"], unit["total"]), (1, 2))
 
+    def test_literals_compare_by_value(self):
+        # A writable .sdata2 (MWCC marks it so) still holds constants, compared by bytes when one side is unnamed;
+        # relocations spelled alike (a merge section + 0) to different constants are a difference.
+        literal = ('volatile float {0} __attribute__((section(".sdata2"))) = {1};\n'
+                   'float scale(float x) {{ return x * {0}; }}\n')
+        triple = TARGETS["ppc"]
+        named = lambda name, tag, value="1.5f": build(self.root, f"lit-{tag}", literal.format(name, value), triple)
+        original = named("lbl_80001000", "o")
+        self.assertTrue(objects.function_diff(original, named("k", "b"), "scale")["exact"])
+        self.assertFalse(objects.function_diff(original, named("k", "c", "2.5f"), "scale")["exact"])
+        folded = lambda tag, value: build(self.root, f"fold-{tag}", f"float scale(float x) {{ return x * {value}; }}\n",
+                                          triple)
+        self.assertTrue(objects.function_diff(folded("a", "1.5f"), folded("b", "1.5f"), "scale")["exact"])
+        self.assertFalse(objects.function_diff(folded("a", "1.5f"), folded("c", "2.5f"), "scale")["exact"])
+
 
 
 class CandidateCommandTests(unittest.TestCase):
