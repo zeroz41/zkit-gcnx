@@ -115,7 +115,11 @@ class Program:
     @classmethod
     def _build(cls, platform: Platform, image, symbols_path: Path) -> "Program":
         from .gc import read_symbols
-        symbols = read_symbols(symbols_path)
+        return cls.from_symbol_list(platform, image, read_symbols(symbols_path))
+
+    @classmethod
+    def from_symbol_list(cls, platform: Platform, image, symbols: list) -> "Program":
+        """An opened image and symbols already read (`gc.Symbol` rows: a symbols.txt's, or a linker map's)."""
         functions = [Function(s.address, s.size, s.name, s.scope) for s in symbols
                      if s.type == "function" and s.section in CODE_SECTIONS and s.size]
         objects = [DataObject(s.address, s.size, s.name, s.section, s.scope, s.data) for s in symbols

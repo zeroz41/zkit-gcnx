@@ -1,0 +1,930 @@
+"""Names from other builds: library fingerprints (the SDK, the C library, the runtime, middleware every game links)
+and name transfer between builds of one game, proposed only where the evidence admits one name.
+
+A function's shape is its instruction words with every relocated field cleared, as an assembler leaves them, and
+the kind and place of each relocation: linked code gives them through `ppc.code_relocations`, a relocatable object
+states them. Equal shapes are the same machine code wherever it was linked. Each relocation also says what it
+refers to: a symbol the donor names (with its addend), a string by its text, or nothing (an unnamed literal).
+A file-local symbol is known by its name and its file, so two files' `static OnReset` stay apart.
+
+Donors are builds whose names are known: an original with its symbols (a decomp's symbols.txt, a CodeWarrior
+linker map) or compiled objects and libraries. Their signatures are kept in zkit's cache, one file per donor,
+never in a repository.
+
+A target function takes a donor name when, among the donor functions of its shape that agree with what is known
+about the target so far, exactly one name remains and no other function of that shape in the target has as much
+evidence for it. Evidence is the references the target already resolves to the donor's symbols (or texts) and
+the layout: the linker keeps a file's functions in order, so a matched neighbour that is the donor's neighbour
+too places it. A shape shorter than `MINIMUM_WORDS` needs such evidence (copies, setters and thin wrappers repeat
+in every game). A matched function names what it refers to (its callees and its data, at the address each
+reference resolves to, where the donors agree), a named virtual table names its slots from the donors' table of
+its class, and a C function whose code changed is still found by the exact set of texts it uses. Every name is
+then checked: an address two pieces of evidence name differently, and a name two addresses claim, are
+withdrawn, and the matching runs again without them.
+"""
+
+from __future__ import annotations
+
+import bisect
+import collections
+import gzip
+import hashlib
+import json
+import re
+import struct
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable
+
+from . import ppc
+from .program import CODE_SECTIONS, Function, Program
+
+VERSION = 1
+MINIMUM_WORDS = 16       # a shorter shape proves nothing alone: copies and setters repeat in every game
+CONFIRMING = 2           # agreed references a shorter one needs (one is a thin wrapper of a call any game makes)
+MINIMUM_STRINGS = 12     # characters of referenced text a string-set match needs
+TEXT_LIMIT = 256
+
+# The masks an assembler leaves on a relocated instruction, by relocation type.
+MASKS = {ppc.REL24: 0xFC000003, ppc.REL14: 0xFFFF0003, ppc.EMB_SDA21: 0xFFE00000,
+         ppc.ADDR16_LO: 0xFFFF0000, ppc.ADDR16_HI: 0xFFFF0000, ppc.ADDR16_HA: 0xFFFF0000, ppc.ADDR32: 0}
+UNNAMED = re.compile(r"^(?:\.\.\.|@|\$\$|\.L)|\$\d+$|^(?:fn|lbl|func|FUN|sub|LAB|DAT|PTR|zz|unk|jumptable|switch|"
+                     r"gap|pad|auto)_[0-9A-Fa-f_]*$|^(?:fn|lbl|func|sub|zz)_[0-9A-Fa-f]{6,8}(?:_|$)|_[0-9A-Fa-f]{8}$")
+
+
+def unnamed(name: str | None) -> bool:
+    """No name worth transferring: a compiler local (`@123`, a function's static numbered `name$123` per build),
+    a generated label, an address-named placeholder."""
+    return not name or bool(UNNAMED.search(name))
+
+
+def key(name: str, scope: str, unit: str) -> str:
+    """How a donor symbol is known: a global by its name, a file-local one by its name and its file's stem."""
+    if scope != "local" or not unit:
+        return name
+    return f"{name}\0{Path(unit.split()[-1]).stem.lower()}"
+
+
+def display(name: str) -> str:
+    return name.split("\0", 1)[0]
+
+
+# Shapes
+
+@dataclass(frozen=True)
+class Reference:
+    offset: int                  # byte offset of the relocated instruction in the function
+    kind: int
+    token: tuple | None          # ("n", key, addend), ("s", text) or None
+
+
+@dataclass
+class Signature:
+    """One donor function: its key, size and shape, what each relocation names, the unit it was in and the keys
+    of the functions the donor placed before and after it."""
+    key: str
+    size: int
+    shape: str
+    references: tuple[Reference, ...]
+    unit: str = ""
+    donor: str = ""
+    before: str | None = None
+    after: str | None = None
+
+    @property
+    def name(self) -> str:
+        return display(self.key)
+
+
+@dataclass
+class Shape:
+    """One target function: its shape and the address each relocation resolves to."""
+    address: int
+    size: int
+    shape: str
+    references: list[tuple[int, int, int]]     # (instruction offset, kind, target address)
+
+
+def digest(words: list[int], relocations: Iterable[tuple[int, int]]) -> str:
+    """The shape: masked words plus the (instruction offset, kind) of every relocation."""
+    h = hashlib.blake2b(digest_size=10)
+    h.update(struct.pack(f">{len(words)}I", *words))
+    for offset, kind in sorted(relocations):
+        h.update(struct.pack(">IH", offset, kind))
+    return h.hexdigest()
+
+
+def image_shape(program: Program, function: Function) -> Shape | None:
+    """The shape of a linked function and where its relocations point."""
+    try:
+        words = program.platform.words(program.image, function.address, function.size)
+    except ValueError:
+        return None
+    if not words:
+        return None
+    found, cleared = ppc.code_relocations(words, function.address, program.sda, program.in_image)
+    masked = [cleared.get(function.address + 4 * i, word) for i, word in enumerate(words)]
+    references = [((r.offset - function.address) // 4 * 4, r.kind, r.target) for r in found]
+    return Shape(function.address, 4 * len(words), digest(masked, ((o, k) for o, k, _ in references)), references)
+
+
+def text_at(read, address: int) -> str | None:
+    """A printable NUL-terminated string starting at an address (`read(address, size)` raises ValueError past
+    the end of what it can read)."""
+    for size in (TEXT_LIMIT, 64, 16, 4, 1):
+        try:
+            raw = read(address, size)
+            break
+        except ValueError:
+            continue
+    else:
+        return None
+    end = raw.find(b"\0")
+    if end < 0:
+        return None if size == TEXT_LIMIT else _text_slow(read, address)
+    raw = raw[:end]
+    if any(not (0x20 <= b < 0x7F or b in (9, 10, 13)) for b in raw):
+        return None
+    return raw.decode("ascii")
+
+
+def _text_slow(read, address: int) -> str | None:
+    out = bytearray()
+    while len(out) < TEXT_LIMIT:
+        try:
+            byte = read(address + len(out), 1)[0]
+        except (ValueError, IndexError):
+            return None
+        if byte == 0:
+            return out.decode("ascii")
+        if not (0x20 <= byte < 0x7F or byte in (9, 10, 13)):
+            return None
+        out.append(byte)
+    return None
+
+
+# Donors
+
+@dataclass
+class Donor:
+    name: str
+    signatures: list[Signature] = field(default_factory=list)
+    tables: dict[str, list[str | None]] = field(default_factory=dict)   # vtable key -> slot keys
+    sizes: dict[str, int] = field(default_factory=dict)                 # data key -> size
+    images: list[str] = field(default_factory=list)                     # sha1 of the originals it was read from
+    sources: list[str] = field(default_factory=list)
+    built: str = ""
+
+
+def _units(rows: list[tuple[int, int, str]]):
+    ordered = sorted(rows)
+    starts = [row[0] for row in ordered]
+
+    def at(address: int) -> str:
+        i = bisect.bisect_right(starts, address) - 1
+        return ordered[i][2] if i >= 0 and address < ordered[i][1] else ""
+    return at
+
+
+def _neighbours(signatures: list[Signature], order: list[str | None]) -> None:
+    """Set each signature's layout neighbours from the keys in layout order (None where unnamed)."""
+    position = {k: i for i, k in enumerate(order) if k is not None}
+    for signature in signatures:
+        i = position.get(signature.key)
+        if i is not None:
+            signature.before = order[i - 1] if i else None
+            signature.after = order[i + 1] if i + 1 < len(order) else None
+
+
+def add_program(donor: Donor, program: Program, units: list[tuple[int, int, str]] = ()) -> None:
+    """Every named function of an original with symbols, its named virtual tables' slots and the sizes of the
+    data its functions name. `units` ((start, end, unit) of any section) places file-local symbols."""
+    from .delink import Entry, Symbols
+    unit_of = _units(list(units))
+    symbols = Symbols([Entry(f.address, f.size, f.name, f.scope) for f in program.functions],
+                      [Entry(o.address, o.size, o.name, o.scope) for o in program.objects]
+                      + [Entry(o.address, 0, o.name, o.scope) for o in program.labels
+                         if o.address not in program.function_index], lambda a: f"{a:08X}")
+    starts = {f.address: f for f in program.functions}
+
+    def known(address: int, name: str, scope: str | None) -> str | None:
+        return None if unnamed(name) else key(name, scope or "global", unit_of(address))
+    order, found = [], []
+    for function in program.functions:
+        named = known(function.address, function.name, function.scope)
+        order.append(named)
+        shape = image_shape(program, function) if named else None
+        if shape is None:
+            continue
+        references = []
+        for offset, kind, target in shape.references:
+            token = None
+            entry = starts.get(target)
+            if entry is not None:
+                name = known(target, entry.name, entry.scope)
+                token = ("n", name, 0) if name else None
+            else:
+                holder = symbols.containing(target)
+                name = known(holder.address, holder.name, holder.scope) if holder is not None else None
+                if name:
+                    token = ("n", name, target - holder.address)
+                    if holder.size:
+                        donor.sizes[name] = holder.size
+                else:
+                    text = text_at(program.read, target)
+                    token = ("s", text) if text is not None else None
+            references.append(Reference(offset, kind, token))
+        found.append(Signature(named, shape.size, shape.shape, tuple(references), unit_of(function.address),
+                               donor.name))
+    _neighbours(found, order)
+    donor.signatures += found
+    for table in program.objects:
+        if not table.name.startswith("__vt__") or table.size < 12:
+            continue
+        try:
+            words = struct.unpack(f">{table.size // 4}I", program.read(table.address, table.size // 4 * 4))
+        except ValueError:
+            continue
+        donor.tables[key(table.name, table.scope, unit_of(table.address))] = [
+            known(w, starts[w].name, starts[w].scope) if w in starts else None for w in words[2:]]
+    donor.images.append(hashlib.sha1(program.image.raw).hexdigest())
+
+
+def add_object(donor: Donor, elf, unit: str = "") -> None:
+    """Every function a relocatable PowerPC object defines (CodeWarrior's, or a delinker's), its virtual
+    tables' slots and the sizes of the data its functions name."""
+    from .elf import SHT_NOBITS
+    rows: dict[int, list] = collections.defaultdict(list)
+    for symbol in elf.symbols:
+        if symbol.kind in ("func", "object") and 0 < symbol.section < 0xFF00:
+            rows[symbol.section].append(symbol)
+    for index, symbols in rows.items():
+        section = elf.sections[index]
+        data = elf.data(section)
+        relocations = elf.relocations(section) if section.type != SHT_NOBITS else []
+        order, found = [], []
+        for symbol in sorted(symbols, key=lambda s: s.value):
+            named = None if unnamed(symbol.name) else key(symbol.name, symbol.bind, unit)
+            if symbol.kind == "object" and named and symbol.name.startswith("__vt__") and symbol.size >= 12:
+                slots: list[str | None] = [None] * ((symbol.size - 8) // 4)
+                for r in relocations:
+                    if symbol.value + 8 <= r.offset < symbol.value + symbol.size and r.type == ppc.ADDR32:
+                        token = _object_token(elf, r, unit, {})
+                        slots[(r.offset - symbol.value - 8) // 4] = token[1] if token and token[0] == "n" else None
+                donor.tables[named] = slots
+            if symbol.kind != "func" or not symbol.size:
+                continue
+            order.append(named)
+            if not named:
+                continue
+            body = data[symbol.value:symbol.value + symbol.size]
+            words = list(struct.unpack(f">{len(body) // 4}I", body[:len(body) // 4 * 4]))
+            references, places = [], []
+            for r in relocations:
+                if not symbol.value <= r.offset < symbol.value + len(words) * 4 or r.type not in MASKS:
+                    continue
+                word = (r.offset - symbol.value) // 4
+                words[word] &= MASKS[r.type]
+                places.append((word * 4, r.type))
+                references.append(Reference(word * 4, r.type, _object_token(elf, r, unit, donor.sizes)))
+            found.append(Signature(named, len(words) * 4, digest(words, places), tuple(references), unit,
+                                   donor.name))
+        _neighbours(found, order)
+        donor.signatures += found
+
+
+def _object_token(elf, reloc, unit: str, sizes: dict[str, int]) -> tuple | None:
+    symbol = elf.symbols[reloc.symbol] if reloc.symbol < len(elf.symbols) else None
+    if symbol is None:
+        return None
+    if symbol.kind != "section" and not unnamed(symbol.name):
+        named = key(symbol.name, symbol.bind, unit)
+        if symbol.kind == "object" and symbol.size:
+            sizes[named] = symbol.size
+        return ("n", named, reloc.addend)
+    if not 0 < symbol.section < min(0xFF00, len(elf.sections)):
+        return None
+    section = elf.sections[symbol.section]
+    if section.flags & 0x4:                       # code: an unnamed local function or label
+        return None
+    data = elf.data(section)
+
+    def read(address: int, size: int) -> bytes:
+        if address + size > len(data):
+            raise ValueError("past the section")
+        return data[address:address + size]
+    text = text_at(read, (0 if symbol.kind == "section" else symbol.value) + reloc.addend)
+    return ("s", text) if text is not None else None
+
+
+def archive_members(raw: bytes) -> Iterable[tuple[str, bytes]]:
+    """(name, bytes) of every member of a Unix `ar` archive (GNU and BSD long names)."""
+    if not raw.startswith(b"!<arch>\n"):
+        raise ValueError("not an ar archive")
+    cursor, names = 8, b""
+    while cursor + 60 <= len(raw):
+        header = raw[cursor:cursor + 60]
+        name, size = header[:16].decode("latin1").rstrip(), int(header[48:58].decode("latin1").strip() or 0)
+        body = raw[cursor + 60:cursor + 60 + size]
+        cursor += 60 + size + (size & 1)
+        if name == "//":
+            names = body
+            continue
+        if name in ("/", "/SYM64/", "__.SYMDEF", "__.SYMDEF SORTED"):
+            continue
+        if name.startswith("#1/"):
+            length = int(name[3:])
+            name, body = body[:length].decode("latin1").rstrip("\0"), body[length:]
+        elif name.startswith("/") and name[1:].isdigit():
+            start = int(name[1:])
+            name = names[start:names.index(b"\n", start)].decode("latin1").rstrip("/")
+        else:
+            name = name.rstrip("/")
+        yield name, body
+
+
+def objects_in(paths: Iterable[Path]) -> Iterable[tuple[str, bytes]]:
+    """(unit, bytes) of every object in files, folders of them and `ar` archives."""
+    for path in paths:
+        files = sorted(p for p in path.rglob("*") if p.suffix in (".o", ".a")) if path.is_dir() else [path]
+        for file in files:
+            raw = file.read_bytes()
+            if raw.startswith(b"!<arch>\n"):
+                for member, body in archive_members(raw):
+                    yield f"{file.stem}/{member}", body
+            else:
+                yield str(file.relative_to(path)) if path.is_dir() else file.name, raw
+
+
+def map_program(platform, image: Path, map_path: Path) -> tuple[Program, list[tuple[int, int, str]]]:
+    """An original named by a CodeWarrior linker map, and the map's units."""
+    from . import mwmap
+    from .gc import Symbol
+    split = mwmap.read(map_path)
+    symbols = [Symbol(name, ".text", address, "function", size, "global")
+               for address, (size, name) in split.functions.items()]
+    symbols += [Symbol(name, section, address, "object", size, "global")
+                for address, (size, name, section) in split.objects.items()]
+    units = [(start, end, unit) for unit, rows in split.units.items() for _, start, end in rows]
+    return Program.from_symbol_list(platform, platform.open(image), symbols), units
+
+
+def build(name: str, image: Path | None = None, symbols: Path | None = None, map_path: Path | None = None,
+          splits: Path | None = None, objects: Iterable[Path] = ()) -> Donor:
+    """A donor: an original with its symbols.txt (and splits.txt, which places file-local names) or with a
+    CodeWarrior map, and/or compiled objects and libraries."""
+    from .elf import Elf
+    from .gc import read_splits
+    from .platform import GameCube
+    donor = Donor(name, built=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    if image is not None:
+        if map_path is not None:
+            program, units = map_program(GameCube(), image, map_path)
+        elif symbols is not None:
+            program = Program.from_symbols(GameCube(), image, symbols)
+            units = [(start, end, unit) for unit, _, start, end in read_splits(splits)] if splits else []
+        else:
+            raise ValueError("An original needs its names: a symbols.txt or a linker map")
+        add_program(donor, program, units)
+        donor.sources.append(f"{image} named by {map_path or symbols}")
+    for unit, raw in objects_in(objects):
+        try:
+            elf = Elf(raw, unit)
+        except ValueError:
+            continue
+        if elf.machine == "ppc" and elf.type == 1:
+            add_object(donor, elf, unit)
+    donor.sources += [str(p) for p in objects]
+    if not donor.signatures:
+        raise ValueError(f"No named functions found for {name}")
+    return donor
+
+
+def folder() -> Path:
+    from .paths import cache_home
+    return cache_home() / "signatures"
+
+
+def _path(name: str) -> Path:
+    return folder() / f"{re.sub(r'[^\w.-]', '_', name)}.json.gz"
+
+
+def save(donor: Donor) -> Path:
+    path = _path(donor.name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [[s.shape, s.key, s.size, s.unit, s.before, s.after,
+             [[r.offset, r.kind, list(r.token) if r.token else None] for r in s.references]]
+            for s in donor.signatures]
+    data = {"version": VERSION, "name": donor.name, "built": donor.built, "sources": donor.sources,
+            "images": donor.images, "tables": donor.tables, "sizes": donor.sizes, "functions": rows}
+    temporary = path.with_name(path.name + ".partial")
+    with gzip.open(temporary, "wt", encoding="utf-8") as stream:
+        json.dump(data, stream, separators=(",", ":"))
+    temporary.replace(path)
+    return path
+
+
+def load(name: str) -> Donor:
+    path = _path(name)
+    if not path.is_file():
+        raise ValueError(f"No signatures named {name!r} (have: {', '.join(listed()) or 'none'}); build them with "
+                         f"`zkit signatures build`")
+    with gzip.open(path, "rt", encoding="utf-8") as stream:
+        data = json.load(stream)
+    if data.get("version") != VERSION:
+        raise ValueError(f"Signatures {name!r} were built by another zkit version; build them again")
+    signatures = [Signature(k, size, shape, tuple(Reference(o, kind, tuple(t) if t else None) for o, kind, t in refs),
+                            unit, data["name"], before, after)
+                  for shape, k, size, unit, before, after, refs in data["functions"]]
+    return Donor(data["name"], signatures, data["tables"], data["sizes"], data["images"], data["sources"],
+                 data["built"])
+
+
+def listed() -> list[str]:
+    base = folder()
+    return sorted(p.name[:-len(".json.gz")] for p in base.glob("*.json.gz")) if base.is_dir() else []
+
+
+def remove(name: str) -> bool:
+    path = _path(name)
+    if path.is_file():
+        path.unlink()
+        return True
+    return False
+
+
+# Matching a target against donors
+
+@dataclass
+class Proposal:
+    address: int
+    name: str
+    kind: str                     # function, label (a place inside a function the code refers to) or object
+    evidence: str                 # shape, shape+references, shape+layout, reference, slot, table, strings
+    size: int = 0                 # the donors' size of the symbol, when they agree on one
+    donors: tuple[str, ...] = ()
+    unit: str = ""                # the donor unit it was in, when the donors agree on one
+    source: int | None = None     # the function (or table) whose reference named it
+    agreed: int = 0               # references and neighbours the target agreed with when its shape matched
+
+
+class Matcher:
+    """The target's shapes against every donor signature."""
+
+    def __init__(self, program: Program, donors: list[Donor]):
+        self.program = program
+        self.by_shape: dict[str, list[Signature]] = collections.defaultdict(list)
+        self.by_key: dict[str, list[Signature]] = collections.defaultdict(list)
+        self.tables: dict[str, list[list[str | None]]] = collections.defaultdict(list)
+        self.sizes: dict[str, set[int]] = collections.defaultdict(set)
+        for donor in donors:
+            for signature in donor.signatures:
+                self.by_shape[signature.shape].append(signature)
+                self.by_key[signature.key].append(signature)
+            for name, slots in donor.tables.items():
+                self.tables[name].append(slots)
+            for name, size in donor.sizes.items():
+                self.sizes[name].add(size)
+        functions = program.functions
+        self.extent = {f.address: f.size for f in functions}
+        self.neighbours = {f.address: (functions[i - 1].address if i else None,
+                                       functions[i + 1].address if i + 1 < len(functions) else None)
+                           for i, f in enumerate(functions)}
+        self.shapes: dict[int, Shape] = {}
+        self.groups: dict[str, list[int]] = collections.defaultdict(list)
+        for function in functions:
+            shape = image_shape(program, function)
+            if shape is not None:
+                self.shapes[function.address] = shape
+                if shape.shape in self.by_shape:
+                    self.groups[shape.shape].append(function.address)
+        # per shape: the donor functions that refer to something nameable, the others by key, and the others
+        # by the keys of their layout neighbours
+        self.plain: dict[str, tuple] = {}
+        self.keys: dict[str, set[str]] = {}
+        for shape in self.groups:
+            referring, plain = [], collections.defaultdict(list)
+            before, after = collections.defaultdict(list), collections.defaultdict(list)
+            for signature in self.by_shape[shape]:
+                if any(r.token for r in signature.references):
+                    referring.append(signature)
+                    continue
+                plain[signature.key].append(signature)
+                before[signature.before].append(signature)
+                after[signature.after].append(signature)
+            before.pop(None, None)
+            after.pop(None, None)
+            self.plain[shape] = (referring, plain, before, after)
+            self.keys[shape] = {s.key for s in self.by_shape[shape]}
+        # what a group's decision depends on: the addresses its references and neighbours name, and its keys
+        self.dependents: dict[int, set[str]] = collections.defaultdict(set)
+        self.key_groups: dict[str, set[str]] = collections.defaultdict(set)
+        for shape, addresses in self.groups.items():
+            for signature in self.by_shape[shape]:
+                self.key_groups[signature.key].add(shape)
+            for address in addresses:
+                for neighbour in self.neighbours[address]:
+                    if neighbour is not None:
+                        self.dependents[neighbour].add(shape)
+                for offset, _, target in self.shapes[address].references:
+                    for addend in {r.token[2] for s in self.by_shape[shape] for r in s.references
+                                   if r.offset == offset and r.token and r.token[0] == "n"}:
+                        self.dependents[target - addend].add(shape)
+        self._texts: dict[int, str | None] = {}
+        self._text_sets: tuple | None = None
+        self._vtables = None
+
+    def text(self, address: int) -> str | None:
+        if address not in self._texts:
+            self._texts[address] = text_at(self.program.read, address)
+        return self._texts[address]
+
+    def texts(self) -> tuple[dict[tuple, set[str]], dict[tuple, list[int]]]:
+        """{texts: donor C keys} for donor functions using enough text, and {texts: target functions} for the
+        target functions using exactly such a set."""
+        if self._text_sets is None:
+            from .cwnames import parse
+            donor_sets: dict[tuple, set[str]] = collections.defaultdict(set)
+            for named, entries in self.by_key.items():
+                if parse(display(named)) is not None:
+                    continue
+                for signature in entries:
+                    texts = tuple(sorted({r.token[1] for r in signature.references if r.token and r.token[0] == "s"}))
+                    if texts and sum(map(len, texts)) >= MINIMUM_STRINGS:
+                        donor_sets[texts].add(named)
+            target_sets: dict[tuple, list[int]] = collections.defaultdict(list)
+            for address, shape in self.shapes.items():
+                texts = tuple(sorted({t for _, _, a in shape.references if (t := self.text(a)) is not None}))
+                if texts in donor_sets:
+                    target_sets[texts].append(address)
+            self._text_sets = (donor_sets, target_sets)
+        return self._text_sets
+
+    def vtables(self):
+        if self._vtables is None:
+            from . import vtables
+            self._vtables = vtables.find(self.program) if self.tables else {}
+        return self._vtables
+
+    def run(self, strings: bool = True, rounds: int = 8) -> list[Proposal]:
+        """Proposals, after withdrawing every name some evidence contradicts and matching again without it."""
+        banned_addresses: set[int] = set()
+        banned_keys: set[str] = set()
+        for _ in range(rounds):
+            state = _State(self, banned_addresses, banned_keys)
+            state.settle(strings)
+            addresses, keys = state.conflicts()
+            if addresses <= banned_addresses and keys <= banned_keys:
+                break
+            banned_addresses |= addresses
+            banned_keys |= keys
+        return sorted(state.proposals.values(), key=lambda p: p.address)
+
+
+class _State:
+    def __init__(self, matcher: Matcher, banned_addresses: set[int], banned_keys: set[str]):
+        self.m = matcher
+        self.banned_addresses, self.banned_keys = banned_addresses, banned_keys
+        self.known: dict[int, str] = {}                # address -> key
+        self.owner: dict[str, int] = {}                # key -> address
+        self.proposals: dict[int, Proposal] = {}
+        self.votes: dict[int, dict[str, list[int]]] = collections.defaultdict(dict)
+        self.clashes: set[str] = set()                 # keys two addresses claim
+        self.contradicted: set[int] = set()            # addresses two pieces of evidence name differently
+        self.named_tables: set[int] = set()
+        self.dirty: set[str] = set(matcher.groups)     # groups to decide again
+        self.changed = False
+
+    # evidence
+
+    def support(self, signature: Signature, shape: Shape, disagreeing: list[int] | None = None
+                ) -> tuple[int, int] | None:
+        """(references, neighbours) of a donor function the target agrees with; None when a reference
+        disagrees (a neighbour that differs proves nothing: layouts change between builds). The addresses whose
+        names disagree go to `disagreeing`."""
+        agreed = 0
+        for reference, (_, _, target) in zip(signature.references, shape.references):
+            token = reference.token
+            if token is None:
+                continue
+            if token[0] == "n":
+                known = self.known.get(target - token[2])
+                if known is None:
+                    continue
+                if known != token[1]:
+                    if disagreeing is not None:
+                        disagreeing.append(target - token[2])
+                    return None
+                agreed += 1
+            else:
+                if self.m.text(target) != token[1]:
+                    return None
+                agreed += len(token[1]) >= 4
+        before, after = self.m.neighbours[shape.address]
+        placed = (signature.before is not None and self.known.get(before) == signature.before) + \
+            (signature.after is not None and self.known.get(after) == signature.after)
+        return agreed, placed
+
+    def name(self, address: int, named: str, kind: str, evidence: str, source: int | None = None,
+             entries: list[Signature] = (), agreed: int = 0) -> bool:
+        if address in self.banned_addresses or named in self.banned_keys or self.known.get(address) == named:
+            return False
+        if address in self.known:
+            self.contradicted.add(address)
+            return False
+        if named in self.owner:
+            self.clashes.add(named)
+            return False
+        self.known[address], self.owner[named] = named, address
+        self.dirty |= self.m.dependents.get(address, set()) | self.m.key_groups.get(named, set())
+        entries = entries or self.m.by_key.get(named, ())
+        sizes = {s.size for s in entries} if kind == "function" else self.m.sizes.get(named, set())
+        units = {s.unit for s in entries if s.unit}
+        self.proposals[address] = Proposal(address, display(named), kind, evidence,
+                                           next(iter(sizes)) if len(sizes) == 1 else 0,
+                                           tuple(sorted({s.donor for s in entries})),
+                                           next(iter(units)) if len(units) == 1 else "", source, agreed)
+        self.changed = True
+        return True
+
+    def plausible(self, address: int, named: str) -> bool:
+        """A function named by evidence other than its shape keeps roughly the donors' extent of that name: a
+        caller's call site stays the same when its callee is replaced (a new wrapper, another helper), and the
+        target's own extent then gives it away."""
+        size = self.m.extent.get(address)
+        sizes = [s.size for s in self.m.by_key.get(named, ())]
+        return not size or not sizes or min(sizes) * 3 <= size * 4 and size * 3 <= max(sizes) * 4
+
+    def vote(self, address: int, named: str, source: int, evidence: str = "reference") -> None:
+        if address in self.banned_addresses or not self.plausible(address, named):
+            return
+        self.votes[address].setdefault(named, []).append(source)
+        if len(self.votes[address]) == 1:
+            kind = "function" if address in self.m.extent else "label" if self.m.program.in_code(address) else \
+                "object"
+            self.name(address, named, kind, evidence, source)
+
+    def accept(self, address: int, named: str, agreed: tuple[int, int], entries: list[Signature]) -> None:
+        evidence = "shape" + ("+references" if agreed[0] else "") + ("+layout" if agreed[1] else "")
+        if not self.name(address, named, "function", evidence, None, entries, sum(agreed)):
+            return
+        for index, (_, _, target) in enumerate(self.m.shapes[address].references):
+            tokens = {t for e in entries if (t := e.references[index].token) is not None}  # unnamed there: silent
+            token = next(iter(tokens), None)
+            if len(tokens) == 1 and token[0] == "n":
+                self.vote(target - token[2], token[1], address)
+
+    # passes
+
+    def options(self, shape: str, address: int) -> dict[str, tuple[tuple[int, int], list[Signature]]]:
+        """Every donor key of a shape that agrees with a target function, with its best evidence and the donor
+        functions behind it."""
+        referring, plain, before, after = self.m.plain[shape]
+        target = self.m.shapes[address]
+        options: dict[str, tuple[tuple[int, int], list[Signature]]] = {}
+        disagreeing: list[int] = []
+        for signature in referring:
+            if signature.key in self.banned_keys:
+                continue
+            agreed = self.support(signature, target, disagreeing)
+            if agreed is not None:
+                best, entries = options.get(signature.key, ((0, 0), []))
+                options[signature.key] = (max(best, agreed, key=sum), entries + [signature])
+        if disagreeing and not options and len(self.m.groups[shape]) == 1 and target.size // 4 >= MINIMUM_WORDS \
+                and len({s.key for s in self.m.by_shape[shape]}) == 1:
+            self.contradicted.update(disagreeing)    # a shape that names itself alone, against a derived name
+        # functions referring to nothing nameable agree everywhere; only their neighbours can place them
+        previous, following = (self.known.get(a) for a in self.m.neighbours[address])
+        placed: dict[str, int] = collections.defaultdict(int)
+        for signature in before.get(previous, ()):
+            placed[signature.key] = max(placed[signature.key], 1 + (signature.after == following))
+        for signature in after.get(following, ()):
+            placed[signature.key] = max(placed[signature.key], 1 + (signature.before == previous))
+        for named, entries in plain.items():
+            if named in self.banned_keys:
+                continue
+            best, more = options.get(named, ((0, 0), []))
+            options[named] = (max(best, (0, placed.get(named, 0)), key=sum), more + entries)
+        if len(self.m.keys[shape]) > 1:
+            # between names for one code, one neighbour proves nothing: the linker drops unused functions, so a
+            # neighbour of one twin in the donor is a neighbour of the other in the target
+            options = {k: ((agreed[0], agreed[1] if agreed[1] == 2 else 0), entries)
+                       for k, (agreed, entries) in options.items()}
+        return options
+
+    def shapes(self) -> None:
+        dirty, self.dirty = self.dirty, set()
+        for shape in sorted(dirty):
+            open_ = [a for a in self.m.groups[shape] if a not in self.known and a not in self.banned_addresses]
+            viable: dict[int, dict[str, tuple[tuple[int, int], list[Signature]]]] = {}
+            for address in open_:
+                options = self.options(shape, address)
+                (named, (agreed, _)), = options.items() if len(options) == 1 else [(None, ((0, 0), []))]
+                if named in self.owner and sum(agreed):
+                    self.clashes.add(named)                  # the evidence points at a name already elsewhere
+                viable[address] = {k: o for k, o in options.items() if k not in self.owner}
+            for address in open_:
+                best = second = None
+                for item in viable[address].items():
+                    if best is None or sum(item[1][0]) > sum(best[1][0]):
+                        best, second = item, best
+                    elif second is None or sum(item[1][0]) > sum(second[1][0]):
+                        second = item
+                if best is None or second is not None and sum(second[1][0]) >= sum(best[1][0]):
+                    continue                                 # no one name has the most evidence
+                named, (agreed, entries) = best
+                rivals = [sum(viable[b][named][0]) for b in open_ if b != address and named in viable[b]]
+                if rivals and not (sum(agreed) and all(r < sum(agreed) for r in rivals)):
+                    continue
+                if self.m.shapes[address].size // 4 < MINIMUM_WORDS and agreed[0] < CONFIRMING and not agreed[1]:
+                    continue
+                self.accept(address, named, agreed, entries)
+
+    def tables(self) -> None:
+        """A named table names its slots from the donors' table of that class (same length, donors agreeing);
+        an unnamed one takes the one donor class whose table agrees with every slot already named."""
+        for address, table in self.m.vtables().items():
+            named = self.known.get(address)
+            if named is not None and named.startswith("__vt__"):
+                if address in self.named_tables:
+                    continue
+                self.named_tables.add(address)
+                donors = self.m.tables.get(named, [])
+                if not donors or any(len(slots) != len(table.slots) for slots in donors):
+                    continue
+                for index, target in enumerate(table.slots):
+                    keys = {slots[index] for slots in donors}
+                    if target and len(keys) == 1 and None not in keys:
+                        self.vote(target, keys.pop(), address, "slot")
+            elif named is None and address not in self.banned_addresses:
+                known = [(i, self.known[t]) for i, t in enumerate(table.slots) if t in self.known]
+                if not known:
+                    continue
+                fits = {cls for cls, rows in self.m.tables.items() if all(
+                    len(slots) == len(table.slots) and all(slots[i] in (None, k) for i, k in known)
+                    and any(slots[i] == k for i, k in known) for slots in rows)}
+                if len(fits) == 1:
+                    self.vote(address, fits.pop(), address, "table")
+
+    def strings(self) -> None:
+        """Functions whose shape matched nothing, by the exact set of texts they refer to, where one donor name
+        and one target function have that set. Only C names: the code changed, and a C++ name's parameters
+        may have changed with it."""
+        donor_sets, target_sets = self.m.texts()
+        for texts, addresses in target_sets.items():
+            keys = donor_sets[texts]
+            named = next(iter(keys))
+            if len(addresses) == 1 and len(keys) == 1 and addresses[0] not in self.known \
+                    and self.plausible(addresses[0], named):
+                self.name(addresses[0], named, "function", "strings")
+
+    def settle(self, strings: bool) -> None:
+        while True:
+            self.changed = False
+            self.shapes()
+            self.tables()
+            if not self.changed and strings:
+                self.strings()
+            if not self.changed:
+                return
+
+    def conflicts(self) -> tuple[set[int], set[str]]:
+        """Addresses two pieces of evidence name differently, and keys two addresses claim."""
+        return {a for a, keys in self.votes.items() if len(keys) > 1} | self.contradicted, set(self.clashes)
+
+
+def propose(program: Program, donors: list[Donor], strings: bool = True) -> list[Proposal]:
+    """Names for a target's functions and data from donors' signatures, read blind: the target's own names are
+    never evidence (compare them with the proposals afterwards). A donor read from this very original is left
+    out."""
+    image = hashlib.sha1(program.image.raw).hexdigest() if hasattr(program.image, "raw") else None
+    return Matcher(program, [d for d in donors if image is None or image not in d.images]).run(strings)
+
+
+def renamed(program: Program, proposals: list[Proposal]) -> Program:
+    """The program with every proposed name in place of a placeholder (its own names stay)."""
+    from dataclasses import replace
+    from .score import placeholder
+    names = {p.address: p.name for p in proposals}
+    out = Program(program.platform, program.image,
+                  [replace(f, name=names[f.address]) if f.address in names and placeholder(f.name) else f
+                   for f in program.functions],
+                  [replace(o, name=names[o.address]) if o.address in names and placeholder(o.name) else o
+                   for o in program.objects], program.sda)
+    out.labels, out.sections = program.labels, program.sections
+    return out
+
+
+# Projects and the command line
+
+def donors(names: Iterable[str] = ()) -> list[Donor]:
+    """The named donors, or every donor in the cache."""
+    return [load(name) for name in (list(names) or listed())]
+
+
+def build_project(project, target: str, name: str, complete: bool = False) -> Donor:
+    """A donor from a project target: its original named by its symbols (its splits place file-local names), or
+    with `complete` only the compiled objects of the units its objdiff report marks complete."""
+    from .gc import read_splits
+    from .objects import objdiff_units
+    from .score import complete_units
+    config = project.target(target)
+    donor = Donor(name, built=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    if not complete:
+        splits = project.file(config["repository"], config["splits"]) if config.get("splits") else None
+        units = [(s, e, u) for u, _, s, e in read_splits(splits)] if splits and splits.is_file() else []
+        add_program(donor, Program.from_project(project, target), units)
+        donor.sources.append(f"{project.config['id']}:{target}")
+        return donor
+    from .elf import Elf
+    if not config.get("report"):
+        raise ValueError(f"Target {target} has no objdiff report to say which units are complete")
+    proven = complete_units(project.file(config["repository"], config["report"]), config.get("module"))
+    for unit, entry in objdiff_units(project, target).items():
+        base = entry.get("base_path")
+        source = (entry.get("metadata") or {}).get("source_path") or unit
+        path = project.file(config["repository"], base) if base else None
+        if path is None or not path.is_file() or not any(p == source or p == unit or unit.endswith("/" + p)
+                                                         for p in proven):
+            continue
+        add_object(donor, Elf.load(path), source)
+    donor.sources.append(f"{project.config['id']}:{target} complete units")
+    return donor
+
+
+def match_project(project, target: str, names: Iterable[str] = (), every: bool = False) -> dict:
+    """Proposals for a project target against the donors, each with the target's current name: new where that
+    is a placeholder, differs where the target names it otherwise, same (listed with `every`)."""
+    from .score import placeholder
+    program = Program.from_project(project, target)
+    chosen = donors(names)
+    if not chosen:
+        raise ValueError("No signatures in the cache yet; build a donor with `zkit signatures build`")
+    current = {f.address: f.name for f in program.functions} | {o.address: o.name for o in program.objects}
+    rows, counts = [], collections.Counter()
+    for p in propose(program, chosen):
+        now = current.get(p.address)
+        status = "new" if not now or placeholder(now) else "same" if now == p.name else "differs"
+        counts[status] += 1
+        counts[f"{p.kind}s"] += 1
+        if status != "same" or every:
+            rows.append({"address": f"0x{p.address:08X}", "name": p.name, "current": now, "status": status,
+                         "kind": p.kind, "evidence": p.evidence, "size": p.size, "donors": list(p.donors),
+                         "unit": p.unit, "source": f"0x{p.source:08X}" if p.source is not None else None})
+    return {"target": target, "donors": [d.name for d in chosen], "counts": dict(counts), "rows": rows}
+
+
+def command(args, project=None, target: str | None = None) -> tuple[dict, str]:
+    """`zkit signatures build|list|remove|match`."""
+    if args.action == "list":
+        rows = []
+        for name in listed():
+            donor = load(name)
+            rows.append({"name": name, "functions": len(donor.signatures), "tables": len(donor.tables),
+                         "built": donor.built, "sources": donor.sources})
+        text = "\n".join(f"{r['name']:<20} {r['functions']:>6} functions {r['tables']:>5} tables  {r['built']}  "
+                         + "; ".join(r["sources"]) for r in rows)
+        return {"cache": str(folder()), "donors": rows}, text or f"no signatures in {folder()} yet"
+    if args.action == "remove":
+        if not args.name:
+            raise ValueError("Name the donor to remove")
+        gone = remove(args.name)
+        return {"removed": gone, "name": args.name}, f"{'removed' if gone else 'no signatures named'} {args.name}"
+    if args.action == "build":
+        if not args.name:
+            raise ValueError("Name the donor: zkit signatures build NAME ...")
+        given = lambda p: p.expanduser().resolve() if p else None
+        if args.image or args.objects:
+            donor = build(args.name, given(args.image), given(args.symbols), given(args.map), given(args.splits),
+                          [given(p) for p in args.objects])
+        elif project is not None:
+            donor = build_project(project, target, args.name, args.complete)
+        else:
+            raise ValueError("Pass --image with --symbols or --map, or --objects; or run inside a project")
+        path = save(donor)
+        return ({"name": donor.name, "functions": len(donor.signatures), "tables": len(donor.tables),
+                 "path": str(path)},
+                f"{donor.name}: {len(donor.signatures):,} function signatures, {len(donor.tables):,} virtual tables "
+                f"-> {path}")
+    if args.action == "match":
+        if project is None:
+            raise ValueError("Run inside a project (or pass --project) to match its target")
+        data = match_project(project, target, args.donor, args.all)
+        return data, match_text(data, args.limit)
+    raise ValueError(f"Unknown signatures action {args.action}")
+
+
+def match_text(data: dict, limit: int = 60) -> str:
+    c = data["counts"]
+    lines = [f"{data['target']}: {c.get('functions', 0):,} functions and {c.get('objects', 0):,} data symbols named "
+             f"from {', '.join(data['donors'])}: {c.get('new', 0):,} new, {c.get('differs', 0):,} differ from the "
+             f"current name, {c.get('same', 0):,} the same"]
+    for row in data["rows"][:limit]:
+        was = f" (now {row['current']})" if row["status"] == "differs" else ""
+        via = f" via {row['source']}" if row["source"] else ""
+        lines.append(f"  {row['address']} {row['name']}{was}  [{row['evidence']}{via}; {'/'.join(row['donors'])}"
+                     + (f" {row['unit']}" if row["unit"] else "") + "]")
+    if len(data["rows"]) > limit:
+        lines.append(f"  ... {len(data['rows']) - limit} more (--limit, --json)")
+    return "\n".join(lines)
