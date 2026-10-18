@@ -99,8 +99,10 @@ def valid(word: int) -> bool:
 
 def _ends_path(word: int | None) -> bool:
     """An unconditional jump, return or `rfi`: nothing falls through to the next instruction."""
-    if word is None or word == RFI:
-        return word is not None
+    if word is None:
+        return False
+    if word == RFI:
+        return True
     found = branch(word, 0)
     return found is not None and not found[1] and not found[2]
 
