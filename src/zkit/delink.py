@@ -274,14 +274,15 @@ def _mw_comment(version: int, records: list[tuple[int, int, int]]) -> bytes:
 
 def write_object(machine: Machine, sections: list[tuple[str, int, bytes | int, int]], symbols: list[dict],
                  relocations: dict[str, list], path: Path, source: str | None = None,
-                 comment: int | None = None) -> None:
+                 comment: int | None = None, starts: dict[str, int] | None = None) -> None:
     """A relocatable ELF object for the machine.
 
     sections: (name, sh_type, data or NOBITS size, alignment); symbols: {name, section (name or None), value, size,
     kind, bind, address}; relocations: section name -> [(offset, type, symbol index, addend)]. With `comment` (a
     CodeWarrior .comment version, PowerPC only), the object carries the `.comment` mwld needs, marking every defined
     function and object active so the linker keeps it; below version 14 `.note.split` takes CodeWarrior's section
-    type, since those linkers do not skip notes."""
+    type, since those linkers do not skip notes. `starts` gives each section's original address, which
+    `.note.split` records for its section symbol (objdiff reports a section at it)."""
     o = machine.order
     sym_format, rela_format = (o + "IBBHQQ", o + "QQq") if machine.elf64 else (o + "IIIBBH", o + "IIi")
     shdr_format = o + ("IIQQQQIIQQ" if machine.elf64 else "IIIIIIIIII")
@@ -309,9 +310,9 @@ def write_object(machine: Machine, sections: list[tuple[str, int, bytes | int, i
     if source:
         entries.append(sym(string(source), 4, 0xFFF1, 0, 0))   # STT_FILE, SHN_ABS
         addresses.append(0)
-    for index in range(1, len(sections) + 1):
+    for index, (name, *_rest) in enumerate(sections, 1):
         entries.append(sym(0, 3, index, 0, 0))                 # STT_SECTION
-        addresses.append(0)
+        addresses.append((starts or {}).get(name, 0))
     binds, kinds = {"local": 0, "global": 1, "weak": 2}, {"notype": 0, "object": 1, "func": 2, "section": 3}
     order = sorted(range(len(symbols)), key=lambda i: symbols[i]["bind"] != "local")
     index_of = {}
@@ -655,8 +656,10 @@ def write_unit(image: Image, cut: Cut, path: Path, plan: Plan | None = None) -> 
         rows += _fill(image, cut, section_name, rows)
     alignment = plan.alignment if plan else {}
     sections = [(n, k, b if isinstance(b, int) else bytes(blobs[n]), alignment.get(n, a)) for n, k, b, a in cut.sections]
+    starts = {n: image.original(min(start for start, _, offset in placed if offset == 0))
+              for n, placed in cut.placed.items() if any(offset == 0 for _, _, offset in placed)}
     write_object(image.machine, sections, rows, relocations, path, source=cut.unit.name.rsplit("/", 1)[-1],
-                 comment=plan.comment if plan else None)
+                 comment=plan.comment if plan else None, starts=starts)
     return {"unit": cut.unit.name, "object": str(path), "defined": defined,
             "undefined": sum(1 for s in rows if s["section"] is None),
             "labels": sum(1 for s in rows if s["name"].startswith("lbl_")),

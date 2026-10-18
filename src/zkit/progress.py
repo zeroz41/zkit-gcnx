@@ -130,8 +130,8 @@ def _data_ranges(report: dict, exact_only: bool = False, linked_only: bool = Fal
             if exact_only and number(section.get("fuzzy_match_percent")) != 100:
                 continue
             address = (section.get("metadata") or {}).get("virtual_address")
-            if address is None:
-                continue
+            if address is None or not int(number(address)):
+                continue                                # 0: a report that does not place its sections
             start = int(number(address))
             ranges.setdefault((module, name), []).append((start, start + size))
     for key, rows in ranges.items():
