@@ -9,7 +9,7 @@ description = "Matching decomps of GameCube and Switch games and native ports bu
 requires-python = ">=3.11"
 readme = "README.md"
 license = "GPL-3.0-only"
-keywords = ["gamecube", "switch", "decompilation", "delinker", "mcp", "claude-code", "codex"]
+keywords = ["gamecube", "switch", "decompilation", "delinker", "mcp"]
 dependencies = [
   "mcp>=1.30,<2",
   "psutil>=5.9; sys_platform != 'linux'",

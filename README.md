@@ -2,8 +2,8 @@
 
 zkit helps you decompile GameCube and Switch games and build native ports from them. It works from the original
 game file alone: it finds the functions, splits the program into units, recovers classes and names, and links
-everything back into a byte-identical executable. It also gives AI coding agents (Claude Code and Codex) the
-evidence they need to work without guessing.
+everything back into a byte-identical executable. It also gives AI coding agents the evidence
+they need to work without guessing.
 
 It runs locally and only uses the network when you ask it to download compilers (`zkit build --download`).
 
@@ -40,7 +40,7 @@ zkit setup                          # the decomp
 zkit setup --native ../your-port    # the decomp and its port
 ```
 
-Restart Claude Code or Codex in the project folder. `zkit doctor` checks everything and tells you how to fix
+Restart your agent in the project folder. `zkit doctor` checks everything and tells you how to fix
 what's missing.
 
 ## Use with agents
@@ -85,8 +85,8 @@ Clean up the decomp source in large proven steps. Use zkit-clean-source. Finish 
 ## Update or remove
 
 - Update: `uv tool upgrade zkit`, then `zkit setup --refresh-agents`.
-- Remove: `uv tool uninstall zkit`, `claude plugin uninstall zkit@zkit`, `codex plugin remove zkit@zkit`, and
-  delete `~/.config/zkit`, `~/.cache/zkit` and `~/.local/state/zkit`.
+- Remove: `uv tool uninstall zkit`, remove the zkit plugin from your agent, and delete `~/.config/zkit`,
+  `~/.cache/zkit` and `~/.local/state/zkit`.
 
 More: [how zkit works](docs/architecture.md), [the project file](docs/project-file.md).
 
