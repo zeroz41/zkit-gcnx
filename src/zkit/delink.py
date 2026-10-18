@@ -492,13 +492,15 @@ class Plan:
     other object reaches (one table for the whole link), labels other objects reach in this unit (defined here,
     global), names the linker itself defines (never defined here; a reference landing exactly on one's address
     names it, as mwld wants `_ctors` named, not the entry that starts .ctors), each section's alignment, the
-    CodeWarrior .comment version, and the sections to cover with symbols."""
+    CodeWarrior .comment version, the sections to cover with symbols, and the addresses no object names (a compiled
+    object keeps them local), whose references stay as the original's bytes: the link puts them where they were."""
     names: dict[int, str]
     labels: dict[str, int] = field(default_factory=dict)
     linker: dict[str, int | None] = field(default_factory=dict)   # name -> its address when the symbols place it
     alignment: dict[str, int] = field(default_factory=dict)
     comment: int | None = None
     fill: frozenset[str] = frozenset()   # sections whose every byte must belong to a symbol (see _fill)
+    fixed: frozenset[int] = frozenset()  # addresses no object can name: references to them keep the original bytes
 
 
 def cut_unit(image: Image, unit: Unit) -> Cut:
@@ -569,12 +571,18 @@ def write_unit(image: Image, cut: Cut, path: Path, plan: Plan | None = None) -> 
                          "address": 0})
         return index_by_name[name]
     relocations = collections.defaultdict(list)
+    blobs = {n: bytearray(b) for n, _, b, _ in cut.sections if not isinstance(b, int)}
     for section_name, found in cut.found.items():
         for offset, kind, target, got in found:
             if target in landing:
                 name, addend = landing[target], 0
             else:
                 name, addend = symbols.resolve(target)
+                if plan and target - addend in plan.fixed:   # the original's bytes stay, unrelocated
+                    word = offset & ~3
+                    at = cut.offset(section_name, word)
+                    blobs[section_name][at:at + 4] = image.read(word, 4)
+                    continue
                 name = names.get(target - addend, name)
             if got:
                 addend = 0
@@ -608,7 +616,7 @@ def write_unit(image: Image, cut: Cut, path: Path, plan: Plan | None = None) -> 
     for section_name in (plan.fill if plan else ()):
         rows += _fill(image, cut, section_name, rows)
     alignment = plan.alignment if plan else {}
-    sections = [(n, k, bytes(b) if isinstance(b, bytearray) else b, alignment.get(n, a)) for n, k, b, a in cut.sections]
+    sections = [(n, k, b if isinstance(b, int) else bytes(blobs[n]), alignment.get(n, a)) for n, k, b, a in cut.sections]
     write_object(image.machine, sections, rows, relocations, path, source=cut.unit.name.rsplit("/", 1)[-1],
                  comment=plan.comment if plan else None)
     return {"unit": cut.unit.name, "object": str(path), "defined": defined,
