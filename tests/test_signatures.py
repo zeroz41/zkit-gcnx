@@ -233,7 +233,7 @@ class SignatureTests(unittest.TestCase):
         self.assertEqual(next(s for s in donor.signatures if s.key == "ReadGlobal").references[0].token,
                          ("n", "gLib", 0))
         program, at = self.target(functions + [("Game", GAME, "global", "game.c")])
-        self.assertEqual(program.sda, {})
+        self.assertEqual(program.sda, {2: 0x80108000, 13: 0x80108000})   # found without the name
         self.assertEqual(signatures.small_data(program), {2: 0x80108000, 13: 0x80108000})
         named = {p.address: p.name for p in signatures.propose(program, [donor])}
         self.assertEqual((named[at["ReadGlobal"][0]], named[DATA]), ("ReadGlobal", "gLib"))

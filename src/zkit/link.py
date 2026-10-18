@@ -577,10 +577,15 @@ def config_yml(path: Path) -> dict[str, Any]:
 def stack_address(program) -> int | None:
     """r1 as `__init_registers` sets it (lis/ori or lis/addi): the stack's top, which the script reproduces."""
     start = next((f for f in program.functions if f.name == "__init_registers"), None)
+    if start is None and hasattr(program.image, "entry"):   # not named yet: the entry point's register setup
+        from .discover import small_data_bases
+        found = small_data_bases(program.image)[1]
+        index = program.function_index.get(found) if found is not None else None
+        start = program.functions[index] if index is not None else None
     if start is None:
         return None
     value = None
-    for word in program.image.words(start.address, min(start.size, 0x40)):
+    for word in program.image.words(start.address, start.size):   # some runtimes clear every register first
         op, rd, ra, imm = word >> 26, (word >> 21) & 31, (word >> 16) & 31, word & 0xFFFF
         if op == 15 and rd == 1 and ra == 0:
             value = imm << 16

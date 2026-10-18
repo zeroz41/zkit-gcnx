@@ -1,4 +1,5 @@
 import support  # noqa: F401  (isolates config, cache and state)
+import dataclasses
 import os
 import shutil
 import struct
@@ -55,6 +56,15 @@ class AsmFileTests(unittest.TestCase):
         self.assertEqual(referenced, {DATA, SDA[2] + 8})
         block = asmfile.data(img, SDA[2] + 8, set())
         self.assertEqual(block, [".obj scale, global", "\t.4byte 0x3FC00000", ".endobj scale"])
+
+    def test_switch_cases_are_labelled_from_their_jump_table(self):
+        body = [lis(3, DATA), addi(3, 3, DATA), BLR, BLR, BLR, BLR, BLR, BLR]   # cases reached only by the table
+        words = {START + 4 * i: w for i, w in enumerate(body)}
+        img = dataclasses.replace(image(words, {DATA: struct.pack(">II", START + 12, START + 16)}),
+                                  pointers=lambda s, e: [(DATA, START + 12, "code"), (DATA + 4, START + 16, "code")])
+        text = "\n".join(asmfile.function(img, OBJDUMP, START, 0x20, set()))
+        self.assertIn(f".L_{START + 12:08X}:", text)
+        self.assertIn(f".L_{START + 16:08X}:", text)
 
 
 if __name__ == "__main__":

@@ -101,18 +101,15 @@ def sda_bases(project: Project, target: str, dol) -> dict[int, int]:
     if configured:
         return {int(k.lstrip("r")): int(v, 16) for k, v in configured.items()}
     config = project.target(target)
-    if not config.get("symbols"):
-        return {}
-    path = project.file(config["repository"], config["symbols"])
-    if not path.is_file():
-        return {}
+    path = project.file(config["repository"], config["symbols"]) if config.get("symbols") else None
     start = None
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in (path.read_text(encoding="utf-8", errors="replace").splitlines() if path and path.is_file() else []):
         if line.startswith("__init_registers "):
             start = int(re.search(r":0x([0-9A-Fa-f]+)", line)[1], 16)
             break
-    if start is None:
-        return {}
+    if start is None:                                 # not named yet: the function the entry point calls to set them
+        from .discover import small_data_bases
+        return small_data_bases(dol)[0]
     from .program import _gamecube_sda
     return _gamecube_sda(dol, start)
 
