@@ -17,6 +17,7 @@ from __future__ import annotations
 import collections
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from . import ppcflow
@@ -560,3 +561,183 @@ def _members(info: ClassInfo, start: int, size: int | None, pointer: int | None)
     if size and size > cursor:
         out.append((cursor, f"u8 pad_{cursor:X}[0x{size - cursor:X}];"))
     return out
+
+
+# Proving declarations with the project's compiler
+
+TYPES = ("typedef unsigned char u8; typedef unsigned short u16; typedef unsigned long u32; "
+         "typedef unsigned long long u64; typedef float f32; typedef double f64;")
+
+
+def source(found: dict[int, ClassInfo], tables: dict[int, VTable], declared: dict[int, Declared],
+           members: list[int]) -> str:
+    """A translation unit declaring `members` (bases first) and defining what makes the compiler emit their tables:
+    constructors, destructors, every virtual a class defines itself; and each class's size as data."""
+    out = [TYPES]
+    out += [declared[a].text for a in members]
+    for address in members:
+        info, table, cls = found[address], tables[address], declared[address].name
+        base = tables[info.base].slots if info.base in found else []
+        out.append(f"{cls}::{cls}() {{}}")
+        for index, slot in enumerate(table.slots):
+            if not slot or (index < len(base) and base[index] == slot):
+                continue
+            if slot == info.destructor:
+                out.append(f"{cls}::~{cls}() {{}}")
+            else:
+                out.append(f"void {cls}::{cwnames.parse(declared[address].methods[index]).method}() {{}}")
+        out.append(f"unsigned long zkit_size_{cls} = sizeof({cls});")
+    return "\n".join(out) + "\n"
+
+
+def prove(project, target: str | None = None, class_filter: str | None = None, limit: int = 60) -> dict[str, Any]:
+    """Compile every recovered class's declaration with the project's own compile command and compare what the
+    compiler emits with the original: the table (each slot's function, its size), where the constructor stores
+    the table pointer, and the class's size."""
+    import subprocess
+    from .bridge import default_target
+    from .candidate import _restage, compile_command
+    from .elf import Elf
+    from .objects import objdiff_units
+    target = default_target(project, target)
+    program = Program.from_project(project, target)
+    tables = find(program)
+    found = recover(program, tables)
+    declared = declarations(program, tables, found)
+    unit = next((u for u in objdiff_units(project, target).values()
+                 if str((u.get("metadata") or {}).get("source_path", "")).endswith((".cpp", ".cp", ".cc"))), None)
+    if unit is None:
+        raise ValueError("No C++ unit in objdiff.json to borrow a compile command from")
+    argv, workdir, source_arg = compile_command(project, target, unit)
+    scratch = project.root(project.target(target)["repository"]) / "build" / "zkit-classes"
+    scratch.mkdir(parents=True, exist_ok=True)
+    families: dict[int, list[int]] = collections.defaultdict(list)
+    for address in _base_first(found):
+        if not class_filter or declared[address].name.lower() == class_filter.lower():
+            families[_root(found, address)].append(address)
+    if class_filter:                                   # a class needs its bases declared too
+        for root, members in families.items():
+            chain = []
+            for address in members:
+                while address in found and address not in chain:
+                    chain.insert(0, address)
+                    address = found[address].base
+            members[:] = [a for a in _base_first(found) if a in chain]
+    counts: collections.Counter = collections.Counter()
+    differences = []
+    for root, members in sorted(families.items()):
+        path = scratch / f"family_{root:08X}.cpp"
+        path.write_text(source(found, tables, declared, members), encoding="utf-8")
+        command, obj = _restage(argv, source_arg, path, scratch, scratch, workdir)
+        result = subprocess.run(command, cwd=workdir, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=300)
+        if result.returncode or not obj.is_file():
+            counts["family_failed_to_compile"] += 1
+            differences.append({"class": declared[root].name, "problem": "does not compile",
+                                "output": (result.stdout + result.stderr)[-400:]})
+            continue
+        compiled = _compiled_classes(Elf.load(obj), program)
+        for address in members:
+            name = declared[address].name
+            got = compiled.get(name)
+            if got is None:
+                counts["table_missing"] += 1
+                differences.append({"class": name, "problem": "the compiler emitted no table"})
+                continue
+            want_slots = declared[address].methods
+            if got["slots"] != want_slots:
+                counts["table_differs"] += 1
+                differences.append({"class": name, "problem": "table differs",
+                                    "slots": [(i, g, w) for i, (g, w) in enumerate(
+                                        zip(got["slots"] + [None] * len(want_slots), want_slots)) if g != w][:4]})
+            else:
+                counts["table_equal"] += 1
+            info = found[address]
+            if info.pointer is not None and got.get("pointer") is not None:
+                counts["pointer_equal" if got["pointer"] == info.pointer else "pointer_differs"] += 1
+                if got["pointer"] != info.pointer:
+                    differences.append({"class": name, "problem": "table pointer offset differs",
+                                        "compiled": got["pointer"], "original": info.pointer})
+            if info.size and got.get("size") is not None:
+                counts["size_equal" if got["size"] == info.size else "size_differs"] += 1
+                if got["size"] != info.size:
+                    differences.append({"class": name, "problem": "size differs", "compiled": got["size"],
+                                        "original": info.size})
+    return {"target": target, "classes": sum(len(m) for m in families.values()), "counts": dict(counts),
+            "differences": differences[:limit], "scratch": str(scratch),
+            "limits": "Each family is compiled standalone with one C++ unit's command; equal tables, pointer "
+                      "offsets and sizes prove the declarations' virtual blocks and layout, not field types."}
+
+
+def _compiled_classes(elf, program: Program) -> dict[str, dict]:
+    """{class: {slots, pointer, size}} from a compiled object: its __vt__ tables' relocations, the offset its
+    constructor stores the table at (read with the object's relocations applied), and zkit_size_ data."""
+    import struct
+    from .elf import Elf  # noqa: F401  (the object is an Elf)
+    symbols = elf.symbols
+    relocations: dict[tuple[int, int], str] = {}
+    for section in elf.sections:
+        for reloc in elf.relocations(section):
+            relocations[(section.index, reloc.offset)] = symbols[reloc.symbol].name
+    out: dict[str, dict] = {}
+    for symbol in symbols:
+        if symbol.name.startswith("__vt__") and 0 < symbol.section < len(elf.sections):
+            cls = vtables._class_from_vtable(symbol.name)
+            count = max(0, (symbol.size - 8) // 4)
+            out[cls] = {"slots": [relocations.get((symbol.section, symbol.value + 8 + 4 * i)) for i in range(count)]}
+    fake = {s.index: 0x81000000 + (s.section << 16) + s.value for s in symbols if 0 < s.section < 0xFF00}
+    for section in elf.sections:
+        if not section.flags & 0x4:
+            continue
+        words = list(struct.unpack(f">{section.size // 4}I", elf.data(section)))
+        for reloc in elf.relocations(section):
+            value = fake.get(reloc.symbol, 0) + reloc.addend
+            i = reloc.offset // 4
+            if reloc.type == 6:                       # R_PPC_ADDR16_HA
+                words[i] = (words[i] & ~0xFFFF) | (((value + 0x8000) >> 16) & 0xFFFF)
+            elif reloc.type == 4:                     # R_PPC_ADDR16_LO
+                words[i] = (words[i] & ~0xFFFF) | (value & 0xFFFF)
+        for symbol in symbols:
+            if symbol.section != section.index or symbol.kind != "func":
+                continue
+            parsed = cwnames.parse(symbol.name)
+            if not parsed or parsed.method != "__ct" or parsed.qualified not in out:
+                continue
+            body = words[symbol.value // 4:(symbol.value + symbol.size) // 4]
+            table = next((s for s in symbols if s.name == f"__vt__{len(parsed.qualified)}{parsed.qualified}"), None)
+            if table is None:
+                continue
+            for store in ppcflow.flow(body, 0x81F00000 + symbol.value).stores:
+                if store.value is not None and store.value.kind == ppcflow.ADDR and \
+                        store.value.amount == fake.get(table.index) and store.base.kind == ppcflow.THIS:
+                    out[parsed.qualified]["pointer"] = store.base.amount + store.offset
+    for symbol in symbols:
+        if symbol.name.startswith("zkit_size_") and 0 < symbol.section < len(elf.sections):
+            data = elf.data(elf.sections[symbol.section])
+            cls = symbol.name[len("zkit_size_"):]
+            if cls in out and len(data) >= symbol.value + 4:
+                out[cls]["size"] = struct.unpack(">I", data[symbol.value:symbol.value + 4])[0]
+    return out
+
+
+def write_headers(project, target: str | None, folder: Path, types_include: str = "types.h") -> dict[str, Any]:
+    """One header per recovered class (its base's header included), for a decomp that has none yet."""
+    from .bridge import default_target
+    target = default_target(project, target)
+    program = Program.from_project(project, target)
+    tables = find(program)
+    found = recover(program, tables)
+    declared = declarations(program, tables, found)
+    folder.mkdir(parents=True, exist_ok=True)
+    written = []
+    for address in _base_first(found):
+        info, entry = found[address], declared[address]
+        includes = [f'#include "{types_include}"']
+        if info.base in declared:
+            includes.append(f'#include "{declared[info.base].name}.h"')
+        guard = re.sub(r"\W", "_", entry.name).upper() + "_H"
+        path = folder / f"{entry.name}.h"
+        path.write_text("\n".join([f"#ifndef {guard}", f"#define {guard}", "", *includes, "", entry.text, "",
+                                   f"#endif"]) + "\n", encoding="utf-8")
+        written.append(str(path))
+    return {"target": target, "folder": str(folder), "headers": len(written)}
