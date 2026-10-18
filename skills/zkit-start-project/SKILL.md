@@ -1,6 +1,6 @@
 ---
 name: zkit-start-project
-description: Set up a new matching decomp (GameCube/Wii with decomp-toolkit, or Switch with clang) or a new native port of one, with the right structure from the first commit. Use when the user starts a decomp or port, or asks how a new one should be laid out.
+description: Set up a new matching decomp (GameCube/Wii built with CodeWarrior, or Switch with clang) or a new native port of one, with the right structure from the first commit. Use when the user starts a decomp or port, or asks how a new one should be laid out.
 ---
 
 # Start a project the right way
@@ -12,9 +12,12 @@ Most later repair work came from early shortcuts. Get these right before matchin
 2. Identify the toolchain: compiler and version, SDK and library versions (version strings, prologues, a seed
    probe). Pin donor sources for libraries before touching game code.
 3. Partition every address into units from boundary evidence ("Units come from boundary evidence") and give each unit its data
-   ("A unit owns its data"). Placeholder units for unknown ranges; no slices or wrappers, ever.
-4. Build the class graph and generate headers with bases and full virtual blocks before matching methods.
-5. Wire objdiff: `objdiff.json` with every unit, a `report.json` from the build, `zkit report` for the page.
+   ("A unit owns its data"): `zkit units` proposes them, `zkit units --check` audits a split. Placeholder units for
+   unknown ranges; no slices or wrappers, ever.
+4. Build the class graph and generate headers with bases and full virtual blocks before matching methods:
+   `zkit classes --headers include/classes --prove`.
+5. Wire objdiff: `zkit delink --objdiff objdiff.json` writes every unit's target object and the project file, the
+   build writes `report.json`, `zkit report` the page.
 6. `zkit init <repo>` writes the project file with strict hygiene and quality gates; `zkit install git-hook
    --write <repo>` enforces commit rules and the slop gate locally.
 
