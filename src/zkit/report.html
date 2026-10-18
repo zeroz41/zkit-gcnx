@@ -18,7 +18,8 @@ td:first-child{max-width:560px;white-space:normal;overflow-wrap:anywhere}td butt
 td small{display:block}.meter{display:block;height:4px;background:var(--track);margin:4px 0}.meter span{display:block;height:100%;background:var(--matched)}
 .linked span{background:var(--linked)}tbody tr:hover{background:#252d37}#pager{display:flex;gap:12px;align-items:center;margin:14px 0}
 #crumbs{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}#crumbs button{padding:3px 8px}
-details{margin-top:18px;color:var(--muted)}footer{margin-top:20px;color:var(--muted);font-size:12px}
+#detail{min-height:44px;overflow-wrap:anywhere;color:var(--muted)}#detail strong{color:var(--text)}#warning{color:#eab968}
+details{margin-top:18px;color:var(--muted)}footer{margin-top:20px;color:var(--muted);font-size:12px}a{color:var(--link)}
 @media(max-width:700px){main{padding:12px}.card strong{font-size:18px}#search{min-width:170px}}
 </style></head><body><main>
 <h1 id="title"></h1><p id="subtitle" class="muted"></p>
@@ -37,6 +38,7 @@ details{margin-top:18px;color:var(--muted)}footer{margin-top:20px;color:var(--mu
 <button id="reset">Reset</button>
 </div>
 <nav id="crumbs" aria-label="Selected object"></nav>
+<div id="detail" aria-live="polite"></div>
 <p id="shown" class="muted"></p>
 <div class="tablewrap"><table><thead><tr>
 <th><button data-sort="name">Object / function</button></th><th><button data-sort="address">Address</button></th>
@@ -44,6 +46,7 @@ details{margin-top:18px;color:var(--muted)}footer{margin-top:20px;color:var(--mu
 <th><button data-sort="linked">Linked</button></th><th><button data-sort="remaining">Unmatched bytes ↓</button></th><th>Exact functions</th>
 </tr></thead><tbody id="rows"></tbody></table></div>
 <div id="pager"><button id="prev">Previous</button><span id="page"></span><button id="next">Next</button></div>
+<p id="empty" hidden>No entries in this view.</p><p id="warning"></p>
 <details><summary>What the numbers mean</summary>
 <p>Every number is objdiff's own counter from the build's report. Matched bytes compare exactly with the original. Linked bytes come from units the build links from source (objdiff's "complete" units). Data counts every non-code section, including zero-initialized ones.</p>
 <p>Objects are the build's current units. Their names and count are not proof of the original translation units; folding units changes ownership, not the totals.</p>
@@ -66,7 +69,7 @@ function entries(u){
 }
 function keep(n){const t=amount(n,'total');if(!t)return false;const m=amount(n,'matched'),l=amount(n,'linked');
  return filter==='all'||filter==='unmatched'&&m<t||filter==='unlinked'&&l<t||filter==='exact-unlinked'&&m===t&&l<t;}
-function hit(n){return !query||[n.name,n.symbol,n.source,n.owner&&n.owner.name,hex(n.address)].join(' ').toLowerCase().includes(query);}
+function hit(n){return !query||[n.name,n.symbol,n.source,n.owner&&n.owner.name,n.owner&&n.owner.source,hex(n.address)].join(' ').toLowerCase().includes(query);}
 function scope(){const mod=$('module').value,cat=$('category').value;return units.filter(u=>(!mod||u.module===mod)&&(!cat||u.categories.includes(cat)));}
 function rows(){const list=selected?[selected]:scope(),out=[];
  for(const u of list){if(selected||view==='entries'){out.push(...entries(u).filter(n=>keep(n)&&hit(n)));continue;}
@@ -85,6 +88,9 @@ function categories(){const box=$('categories');box.replaceChildren();const cats
  w.append(t);box.append(w);}
 function meter(n,kind){const td=el('td',pct(amount(n,kind),amount(n,'total'))),m=el('span',undefined,{class:'meter'+(kind==='linked'?' linked':'')}),f=el('span');
  f.style.width=(amount(n,'total')?100*amount(n,kind)/amount(n,'total'):0)+'%';m.append(f);td.append(m,el('small',fmt(amount(n,kind))+' bytes'));return td;}
+function inspect(n){const m=[hex(n.address),fmt(amount(n,'total'))+' bytes',n.owner?'Object: '+n.owner.name:(n.source||'')].filter(Boolean);
+ if(n.symbol&&n.symbol!==n.name)m.push(n.symbol);if(n.match!==undefined)m.push(n.match.toFixed(1)+'% similar');
+ $('detail').replaceChildren(el('strong',n.name),el('div',m.join(' · ')),el('div','Matched: '+fmt(amount(n,'matched'))+' · Linked: '+fmt(amount(n,'linked'))+' bytes'));}
 function render(){
  numbers();categories();
  $('crumbs').replaceChildren();if(selected){const b=el('button',R.label);b.onclick=()=>{selected=null;page=0;render();};$('crumbs').append(b,el('span','/'),el('span',selected.name));}
@@ -94,16 +100,20 @@ function render(){
  $('shown').textContent=fmt(list.length)+' rows · '+fmt(list.reduce((s,n)=>s+amount(n,'total'),0))+' bytes'+(query||filter!=='all'?' (filtered)':'');
  const body=$('rows');body.replaceChildren();
  for(const n of list.slice(page*size,(page+1)*size)){const tr=el('tr'),name=el('td'),b=el('button',n.name);
-  b.onclick=()=>{if(n.functions){selected=n;query='';$('search').value='';page=0;render();}};name.append(b);
+  b.onclick=()=>{if(n.functions){selected=n;query='';$('search').value='';page=0;render();}else inspect(n);};name.append(b);
   if(n.source)name.append(el('small',n.source));else if(n.owner)name.append(el('small',n.owner.name+(n.match!==undefined&&n.match<100?' · '+n.match.toFixed(1)+'%':'')));
   tr.append(name,el('td',hex(n.address)),el('td',fmt(amount(n,'total'))),meter(n,'matched'),meter(n,'linked'),el('td',fmt(amount(n,'total')-amount(n,'matched'))),
    el('td',n.measures.total_functions?fmt(n.measures.matched_functions||0)+' / '+fmt(n.measures.total_functions):'—'));body.append(tr);}
+ $('empty').hidden=list.length>0;
+ $('warning').textContent=Object.keys(R.differences||{}).length?'The report\'s totals differ from the sum of its objects ('+Object.keys(R.differences).join(', ')+'). Module and object views add up the objects; the downloaded report keeps its own totals.':'';
+ if(selected)inspect(selected);else $('detail').textContent='Select an object to see its functions or data sections, or a function to inspect it. Search also finds symbols inside objects.';
  $('view').disabled=!!selected;$('view').options[1].textContent=metric==='code'?'Functions':'Data sections';}
 function pick(i){R=D.reports[i];units=R.units;selected=null;page=0;
+ $('footer').replaceChildren(el('span','Generated '+D.generated+' from objdiff\'s report'+(R.file?' · ':'')));if(R.file)$('footer').append(el('a','Download '+R.file,{href:R.file,download:''}));
  const mods=[...new Set(units.map(u=>u.module))].sort();$('module').replaceChildren(el('option','All modules',{value:''}),...mods.map(m=>el('option',m,{value:m})));
  const cats=R.summary.categories;$('category').replaceChildren(el('option','All categories',{value:''}),...cats.map(c=>el('option',c.name,{value:c.id})));
  $('category').disabled=!cats.length;render();}
-$('title').textContent=D.title;$('subtitle').textContent=D.subtitle||'';$('footer').textContent='Generated '+D.generated+' from objdiff report.json';
+$('title').textContent=D.title;$('subtitle').textContent=D.subtitle||'';
 D.reports.forEach((r,i)=>$('report').append(el('option',r.label,{value:i})));$('report').onchange=()=>pick(Number($('report').value));
 for(const id of['module','category'])$(id).onchange=()=>{selected=null;page=0;render();};
 for(const id of['metric','view','filter'])$(id).onchange=()=>{metric=$('metric').value;view=$('view').value;filter=$('filter').value;page=0;render();};
@@ -112,5 +122,5 @@ $('reset').onclick=()=>{for(const[id,v]of[['metric','code'],['view','units'],['f
 $('prev').onclick=()=>{page--;render();};$('next').onclick=()=>{page++;render();};
 document.querySelectorAll('[data-sort]').forEach(b=>b.onclick=()=>{const k=b.dataset.sort;desc=sort===k?!desc:!['name','address'].includes(k);sort=k;page=0;
  document.querySelectorAll('[data-sort]').forEach(x=>x.textContent=x.textContent.replace(/ [↑↓]$/,''));b.textContent+=' '+(desc?'↓':'↑');render();});
-if(D.reports.length)pick(0);
+if(D.reports.length)pick(0);else{$('empty').hidden=false;$('empty').textContent='No report units.';}
 </script></body></html>

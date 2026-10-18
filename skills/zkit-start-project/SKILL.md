@@ -19,7 +19,8 @@ Most later repair work came from early shortcuts. Get these right before matchin
 4. Build the class graph and generate headers with bases and full virtual blocks before matching methods:
    `zkit classes --headers include/classes --prove`.
 5. Wire objdiff: `zkit delink --objdiff objdiff.json` writes every unit's target object and the project file, the
-   build writes `report.json`, `zkit report` the page.
+   build writes `report.json` and the page (`build/progress/index.html`), `zkit report --readme` the README's
+   progress table.
 6. `zkit build --download` fetches the compilers and tools the target's platform needs, pinned and hash-checked,
    into `build/` (never committed). It never fetches another platform's tools; don't download any by hand.
 7. `zkit init <repo>` writes the project file with strict hygiene and quality gates; `zkit install git-hook

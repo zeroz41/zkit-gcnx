@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 import time
 from datetime import datetime, timezone
 from importlib import resources
@@ -338,9 +339,22 @@ def _unit_rows(report: dict) -> list[dict]:
     return rows
 
 
+def _differences(report: dict, units: list[dict]) -> dict[str, dict[str, int]]:
+    """Counters where the report's own totals are not the sum of its units' (objdiff's aggregates kept apart)."""
+    reported = measures(report.get("measures"))
+    summed = {key: sum(u["measures"][key] for u in units) for key in COUNTERS if key not in ("total_units",
+                                                                                              "complete_units")}
+    return {key: {"report": reported[key], "units": value} for key, value in summed.items() if reported[key] != value}
+
+
 def page(reports: list[tuple[str, dict]], title: str, subtitle: str = "") -> str:
-    """One self-contained HTML file for one or more reports (labels such as target names)."""
-    payload = [{"label": label, "summary": summary(report), "units": _unit_rows(report)} for label, report in reports]
+    """One self-contained HTML file for one or more reports (labels such as target names); each report's own file
+    is `<label>.json` beside it."""
+    payload = []
+    for label, report in reports:
+        units = _unit_rows(report)
+        payload.append({"label": label, "file": f"{label}.json", "summary": summary(report), "units": units,
+                        "differences": _differences(report, units)})
     data = json.dumps({"title": title, "subtitle": subtitle, "reports": payload,
                        "generated": datetime.now(timezone.utc).isoformat(timespec="seconds")},
                       ensure_ascii=True, separators=(",", ":")).replace("<", "\\u003c")
@@ -360,6 +374,61 @@ def write_page(project: Project, targets: list[str], out: Path, title: str | Non
             raise ValueError(f"No report for {target} at {path}")
         reports.append((target, load(path)))
     out.mkdir(parents=True, exist_ok=True)
+    for label, report in reports:  # the page links each report it shows
+        (out / f"{label}.json").write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")
     index = out / "index.html"
     index.write_text(page(reports, title or project.config.get("title") or project.config["id"]), encoding="utf-8")
     return index
+
+
+# The progress table in a decomp's README, between these markers.
+
+README_START, README_END = "<!-- progress -->", "<!-- /progress -->"
+
+
+def readme_block(reports: list[tuple[str, dict]]) -> str:
+    """A small Markdown table per report: code and data matched and linked, exact functions, linked units."""
+    lines = []
+    for label, report in reports:
+        m = measures(report.get("measures"))
+        share = lambda part, whole: f"{100 * part / whole:.2f}%" if whole else "—"
+        if len(reports) > 1:
+            lines += [f"**{label}**", ""]
+        code = share(m["matched_code"], m["total_code"]), share(m["complete_code"], m["total_code"])
+        data = share(m["matched_data"], m["total_data"]), share(m["complete_data"], m["total_data"])
+        lines += ["| | Matched | Linked |", "|:--|--:|--:|", f"| Code | {code[0]} | {code[1]} |",
+                  f"| Data | {data[0]} | {data[1]} |",
+                  f"| Functions | {m['matched_functions']:,} of {m['total_functions']:,} | |",
+                  f"| Units | | {m['complete_units']:,} of {m['total_units']:,} |", ""]
+    return "\n".join(lines).rstrip("\n")
+
+
+def write_readme(project: Project, targets: list[str], path: Path) -> bool:
+    """Rewrite the progress table between the README's markers from the current reports; True when it changed.
+    A README without the markers gets a `## Progress` section with them before its first `##` heading."""
+    reports = []
+    for target in targets:
+        report = report_path(project, target)
+        if not report.is_file():
+            raise ValueError(f"No report for {target} at {report}: build the project first")
+        reports.append((target, load(report)))
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    start, end = text.find(README_START), text.find(README_END)
+    if start < 0 or end < start:
+        section = f"## Progress\n\n{README_START}\n{README_END}\n\n"
+        heading = re.search(r"(?m)^## ", text)
+        at = heading.start() if heading else len(text)
+        text = text[:at] + ("" if not text[:at] or text[:at].endswith("\n\n") else
+                            "\n" if text[:at].endswith("\n") else "\n\n") + section + text[at:]
+        start, end = text.find(README_START), text.find(README_END)
+    original = path.read_text(encoding="utf-8") if path.is_file() else None
+    updated = text[:start + len(README_START)] + "\n" + readme_block(reports) + "\n" + text[end:]
+    updated = updated.rstrip("\n") + "\n"
+    if updated == original:
+        return False
+    path.write_text(updated, encoding="utf-8")
+    return True
+    if updated == text:
+        return False
+    path.write_text(updated, encoding="utf-8")
+    return True

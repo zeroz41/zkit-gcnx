@@ -151,7 +151,10 @@ class ConfigureTests(unittest.TestCase):
         self.assertIn("build build/T/link/main.elf: link\n  ldflags = -fp hardware", text)
         self.assertIn("--target $target link --out $outdir --build build/build.ninja", text)
         self.assertIn("build build/T/ok: sha1 build/T/link/main.dol", text)
-        self.assertIn("default build/T/ok", text)
+        self.assertIn("default build/T/ok build/progress/index.html", text)
+        # every build leaves the browsable page of its reports
+        self.assertIn("build build/progress/index.html: page | build/T/report.json", text)
+        self.assertIn(" report --out build/progress --targets t\n", text)
 
     def test_no_link_without_the_linker(self):
         self.manifest = gamecube_project(self.root, linker="GC/9.9")

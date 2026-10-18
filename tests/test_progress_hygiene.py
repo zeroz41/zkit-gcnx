@@ -89,6 +89,39 @@ class ProgressTests(unittest.TestCase):
             self.assertTrue(progress.since(project, "t")["ok"])
             index = progress.write_page(project, ["t"], root / "out")
             self.assertTrue(index.read_text(encoding="utf-8").startswith("<!doctype html>"))
+            self.assertEqual(json.loads((root / "out/t.json").read_text(encoding="utf-8")), self.before)
+
+    def test_page_shows_where_report_totals_differ_from_its_units(self):
+        counts = {"total_code": "48", "matched_code": "32", "total_functions": 2, "matched_functions": 1}
+        consistent = {"version": 2, "measures": dict(counts), "units": [
+            {"name": "main/a", "metadata": {"module_name": "main"}, "measures": dict(counts), "sections": [],
+             "functions": [{"name": "f", "size": "32", "fuzzy_match_percent": 100.0,
+                            "metadata": {"virtual_address": "2147487744"}}]}]}
+        changed = copy.deepcopy(consistent)
+        changed["measures"]["total_code"] = "52"
+        data = lambda report: json.loads(progress.page([("T", report)], "Game").split(
+            'id="data" type="application/json">')[1].split("</script>")[0])["reports"][0]
+        self.assertEqual((data(consistent)["differences"], data(consistent)["file"]), ({}, "T.json"))
+        self.assertEqual(data(changed)["differences"], {"total_code": {"report": 52, "units": 48}})
+
+    def test_readme_progress_table_between_markers_or_added(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "build").mkdir()
+            (root / "build/report.json").write_text(json.dumps(self.before), encoding="utf-8")
+            manifest = root / "p.json"
+            manifest.write_text(json.dumps({"schema_version": 1, "id": "readme", "repositories": {
+                "decomp": {"root": ".", "role": "decomp"}}, "targets": {"t": {
+                "repository": "decomp", "module": "main", "report": "build/report.json"}}}), encoding="utf-8")
+            project = Project.load(manifest)
+            readme = root / "README.md"
+            readme.write_text("# Game\n\nAbout it.\n\n## Building\n\nninja\n", encoding="utf-8")
+            self.assertTrue(progress.write_readme(project, ["t"], readme))
+            text = readme.read_text(encoding="utf-8")
+            self.assertLess(text.index("## Progress"), text.index("## Building"))
+            self.assertIn("| Code |", text.split(progress.README_START)[1].split(progress.README_END)[0])
+            self.assertFalse(progress.write_readme(project, ["t"], readme))      # same report: no change
+            self.assertEqual(text.count(progress.README_START), 1)
 
 
 class QualityTests(unittest.TestCase):

@@ -99,6 +99,7 @@ Clean up the decomp source in large proven steps. Use zkit-clean-source. Finish 
 | `zkit try 0x80012345 f.cpp` | compile a candidate and compare it with the original |
 | `zkit compiled 0x80012345` | your built function against the original |
 | `zkit progress` | how much is matched and linked |
+| `zkit report --readme` | the browsable progress page, and the progress table in your README |
 | `zkit build` | build, check and relink the project |
 | `zkit gate` | what to run before you stop |
 

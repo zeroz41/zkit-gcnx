@@ -110,7 +110,8 @@ def new(source: Path, folder: Path, game_id: str | None = None, name: str | None
     manifest = {"schema_version": 1, "id": name or onboard._slug(f"{folder.name}-{game}"), "generated_by": "zkit new",
                 "repositories": {"decomp": {
                     "root": str(folder), "role": "decomp", "index_paths": ["README.md", "docs", "include", "src"],
-                    "finish": ["zkit progress --since session --check", "zkit hygiene"], "rules": [],
+                    "finish": ["zkit progress --since session --check", "zkit report --readme", "zkit hygiene"],
+                    "rules": [],
                     "quality": {"gate": "error"}, "hygiene": {"identity": identity}}},
                 "targets": {game.lower(): target}}
     path = onboard.projects_dir() / f"{manifest['id']}.json"
@@ -120,8 +121,8 @@ def new(source: Path, folder: Path, game_id: str | None = None, name: str | None
            **populate(path, game.lower())}
     readme = folder / "README.md"
     if not readme.exists():
-        readme.write_text(README[platform].format(game=game, original=target["original"], config=config,
-                                                  report=target["report"], name=source.name), encoding="utf-8")
+        readme.write_text(README.format(game=game, console=CONSOLES[platform], original=target["original"],
+                                        sha1=target["sha1"], report=target["report"]), encoding="utf-8")
         out["readme"] = str(readme)
     from .install import install
     from .project import Project
@@ -183,48 +184,26 @@ def write_symbols(program, path: Path) -> Path:
     return path
 
 
-_WORK = """
-## Work
+README = """# {game}
 
-- `{config}/splits.txt` lists the units (each one source file of the original) and their address ranges;
-  `{config}/symbols.txt` names the functions and data.
-- To decompile unit `a/b.cpp`, write `src/a/b.cpp`. `zkit build` compiles it and the report shows how much of it
-  matches; `zkit try <function> <file>` compiles a candidate with the unit's own command without touching `src/`.
-- `zkit progress` sums the report, `zkit unit <unit>` shows a unit, `zkit doctor` checks the setup. objdiff opens
-  `objdiff.json` (written by the build) to diff a unit function by function.
-- `orig/` and `build/` stay out of git: never commit the original or anything built from it.
+A work-in-progress matching decompilation of {game} for {console}: source code that compiles to the same code as
+the original executable, function for function. This repository contains no game code or assets; you need your
+own copy of the game.
+
+## Progress
+
+<!-- progress -->
+<!-- /progress -->
+
+## Building
+
+Place the original executable at `{original}` (SHA-1 `{sha1}`) and install Ninja, then build with
+[zkit](https://github.com/zeroz41/gc-switch-tool-zkit):
+
+    zkit build --download
+    zkit build
+
+The build writes the match report to `{report}` and a browsable page to `build/progress/index.html`; open the
+folder in [objdiff](https://github.com/encounter/objdiff) to compare functions.
 """
-README = {
-    "gamecube": """# {game}
-
-A matching decompilation of the GameCube game {game}, started from `{name}` with `zkit new`. The original
-executable is `{original}` (not in git; the project file pins its SHA-1).
-
-## Build
-
-    zkit build
-
-writes every unit's target object (cut from the original), compiles every unit that has a source in `src/` with
-CodeWarrior, writes `{report}` (with objdiff-cli) and relinks the executable to check it against the original
-(when this zkit has `zkit link`). It needs ninja; `zkit build --download` fetches the rest into `build/` (the
-CodeWarrior compilers, wibo, objdiff-cli, binutils, m2c and decomp-permuter), each checked against its pinned hash.
-The compiler version and flags are the `build` settings of the project file (`zkit projects` shows where it is):
-set them to what the game was built with, per unit where they differ.
-""" + _WORK,
-    "switch": """# {game}
-
-A matching decompilation of the Switch module {game}, started from `{name}` with `zkit new`. The original module
-is `{original}` (not in git; the project file pins its SHA-1).
-
-## Build
-
-    zkit build
-
-writes every unit's target object (cut from the original), compiles every unit that has a source in `src/` with
-clang and writes `{report}` (with objdiff-cli). It needs ninja; `zkit build --download` fetches objdiff-cli and
-LLVM's disassembler and demangler into `build/`, each checked against its pinned hash. The clang to use and its
-flags are the `build` settings of the project file (`zkit projects` shows where it is): set them to the toolchain
-the game was built with, per unit where they differ, and pin its archive in `build.compiler_download` so
-`zkit build --download` fetches it too.
-""" + _WORK,
-}
+CONSOLES = {"gamecube": "GameCube", "switch": "Nintendo Switch"}
