@@ -205,6 +205,18 @@ class FreshProject(unittest.TestCase):
         code, text = self.cli("projects")
         self.assertIn("* mine", text)
 
+    def test_setup_again_in_a_project_zkit_new_made(self):
+        """`zkit setup` (as after an update) in a project `zkit new` wrote: its project file, not init's layout."""
+        from zkit.onboard import projects_dir
+        manifest = projects_dir() / "made.json"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(json.dumps({"schema_version": 1, "id": "made", "generated_by": "zkit new",
+                                        "repositories": {"decomp": {"root": str(self.outside), "role": "decomp",
+                                                                    "index_paths": ["README.md"]}}}), encoding="utf-8")
+        code, text = self.cli("setup", str(self.outside), "--no-agents")
+        self.assertEqual(code, 0, text)
+        self.assertIn(f"default project: {manifest}", text)
+
     def test_not_a_decomp_project(self):
         code, _ = self.cli("init", str(self.outside))
         self.assertEqual(code, 2)

@@ -433,8 +433,15 @@ def _ready(project, notes: list[str], said: str, plugins_next: bool = True) -> s
 def run(args: argparse.Namespace) -> tuple[object, str]:
     from .project import Project
 
+    made = None
+    if args.command == "setup" and not args.native:   # a project `zkit new` made: init cannot read it back
+        from .onboard import project_for, registered
+        found = project_for(args.decomp, registered()) if args.decomp.is_dir() else None
+        made = found if found and Project.load(found).config.get("generated_by") == "zkit new" else None
     if args.command == "setup" and args.decomp.suffix == ".json" and args.decomp.is_file():
         args = argparse.Namespace(**{**vars(args), "manifest": args.decomp})  # 0.3: `setup <manifest>`
+    elif made is not None:
+        args = argparse.Namespace(**{**vars(args), "manifest": made})
     elif args.command == "setup":
         from .onboard import connect_agents
         _, said = run(argparse.Namespace(**{**vars(args), "command": "init", "from_setup": True}))
