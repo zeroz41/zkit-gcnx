@@ -806,19 +806,29 @@ def blocked_units(data: dict) -> str:
 
 def classes(data: dict) -> str:
     c = data.get("counts", {})
-    out = [f"class evidence from vtables: {c.get('consistent', 0)} consistent, "
-           f"{c.get('contradicted_strong', 0)} strong + {c.get('contradicted_weak', 0)} weak contradictions, "
-           f"{c.get('unclaimed', 0)} unclaimed single-class virtuals"]
-    if data.get("contradicted"):
-        out.append(f"named class not among the vtables holding it ({data['contradicted_total']}):")
-    for r in data.get("contradicted", []):
-        tables = ", ".join(r["classes"][:4]) + (f" +{r['class_count'] - 4}" if r["class_count"] > 4 else "")
-        unnamed = f" +{r['unnamed_tables']} unnamed" if r["unnamed_tables"] else ""
-        out.append(f"  [{r['strength']}] {r['address']} {r['name']} [{r['status']}] in {tables}{unnamed} -> {r['suggestion']}")
-    if data.get("unclaimed"):
-        out.append(f"no class in the name, one named class's vtables ({data['unclaimed_total']}):")
-    for r in data.get("unclaimed", []):
-        out.append(f"  {r['address']} {r['name']} [{r['status']}] -> {r['suggestion']}")
+    out = [f"{data['classes']} classes recovered from the code ({data['named_tables']} with a __vt__ symbol)"]
+    sections = [
+        ("not_a_table", "__vt__ symbols that are not tables",
+         lambda r: f"{r['address']} {r['symbol']} (starts {r['words']})"
+                   + (f" -> the class's table is {r['real_table']}" if r.get("real_table") else "")),
+        ("wrong_class", "filed under another class",
+         lambda r: f"{r['address']} {r['current']} is {r['class']}'s {r['role']} -> {r['suggested']}"),
+        ("spread", "one name per virtual slot",
+         lambda r: f"{r['address']} {r['current']} overrides slot {r['slot']} = {r['slot_name']} -> {r['suggested']}"),
+        ("role_named", "constructors and destructors named for a role",
+         lambda r: f"{r['address']} {r['current']} is {r['class']}'s {r['role']} -> {r['suggested']}"),
+        ("unnamed_class", "classes without a __vt__ symbol",
+         lambda r: f"{r['vtable']} {r['class'] or '(no name evidence)'}: constructors {', '.join(n or '?' for n in r['constructors'][:3])}; destructor {r['destructor']}"
+                   + (f" -> {r['suggested_symbol']}" if r['suggested_symbol'] else "")),
+        ("slot_name_conflict", "virtual slots with competing names",
+         lambda r: f"{r['root']} slot {r['slot']}: " + ", ".join(f"{n} x{k}" for n, k in r["names"].items())),
+    ]
+    for key, title, line in sections:
+        rows = data.get(key) or []
+        if not rows:
+            continue
+        out.append(f"{title} ({c.get(key, len(rows))}):")
+        out.extend("  " + line(r) for r in rows)
     out.append("limits: " + data["limits"])
     return "\n".join(out)
 

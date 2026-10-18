@@ -109,9 +109,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--gaps", action="store_true", help="per-section split coverage and every unclaimed range")
     c.add_argument("--section", help="with --gaps: only this section, e.g. .sdata2")
     c.add_argument("--limit", type=int, default=40)
-    c = add("classes", help="Function class names the original vtables contradict, and unclaimed single-class virtuals")
-    c.add_argument("--class", dest="cls", help="only rows naming or suggesting this class")
-    c.add_argument("--unit", help="only functions whose unit contains this text")
+    c = add("classes", help="Classes recovered from the original's code (tables, constructors, destructors, bases) "
+                            "against the current names: mislabelled tables, unnamed classes, misfiled and role-named "
+                            "functions, one name per virtual slot")
+    c.add_argument("--class", dest="cls", help="only this class")
     c.add_argument("--limit", type=int, default=60)
     c = add("renamed", help="Decomp symbols renamed since a git revision (old -> new)")
     c.add_argument("since")
@@ -471,8 +472,8 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
                             lambda q: structure.unit(project, q, target, args.limit))
         return data, render.unit(data)
     if command == "classes":
-        from . import structure
-        data = structure.classes(project, target, args.cls, args.unit, args.limit)
+        from . import classes
+        data = classes.audit_project(project, target, args.cls, args.limit)
         return data, render.classes(data)
     if command == "renamed":
         data = bridge.renamed(project, args.since, target)

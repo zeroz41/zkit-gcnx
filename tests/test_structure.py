@@ -1,4 +1,4 @@
-"""Split units, cross-unit data references and vtable class evidence on a hand-assembled DOL."""
+"""Split units, cross-unit data references and class evidence on a hand-assembled DOL."""
 
 import support  # noqa: F401  (isolates config, cache and state)
 import json
@@ -106,16 +106,12 @@ class StructureTests(unittest.TestCase):
         self.assertTrue(any("used by other units" in r for r in data["units"][0]["reasons"]))
         self.assertTrue(any("literal" in r for r in data["units"][0]["reasons"]))
 
-    def test_classes_flags_contradicted_and_unclaimed_virtuals(self):
-        from zkit.structure import classes
-        data = classes(self.project)
-        self.assertEqual(data["counts"], {"consistent": 1, "contradicted_strong": 1, "unclaimed": 1})
-        wrong = data["contradicted"][0]
-        self.assertEqual((wrong["name"], wrong["named_class"], wrong["classes"], wrong["strength"]),
-                         ("TPlayer__sub_80003010", "TPlayer", ["TEnemy"], "strong"))
-        self.assertEqual(data["unclaimed"][0]["suggestion"], "TPlayer")
-        self.assertEqual(classes(self.project, name="TEnemy")["contradicted_total"], 1)
-        self.assertEqual(classes(self.project, name="TOther")["contradicted_total"], 0)
+    def test_classes_reports_symbols_that_are_not_tables(self):
+        from zkit.classes import audit_project
+        data = audit_project(self.project)
+        # the two __vt__ symbols here are bare pointer lists, not CodeWarrior tables (no header, never installed)
+        self.assertEqual(sorted(r["symbol"] for r in data["not_a_table"]), ["__vt__6TEnemy", "__vt__7TPlayer"])
+        self.assertEqual(data["classes"], 0)
 
     def test_data_lookup_and_name_range_show_owner_and_data(self):
         from zkit.bridge import lookup, names
@@ -134,7 +130,7 @@ class StructureTests(unittest.TestCase):
         self.assertEqual(json.loads(cli.stdout)["unit"], "game/Enemy.cpp")
         text = subprocess.run([sys.executable, "-m", "zkit.cli", "--project", str(self.manifest), "classes"],
                               capture_output=True, text=True, env=env, check=True).stdout
-        self.assertIn("[strong] 0x80003010 TPlayer__sub_80003010", text)
+        self.assertIn("0x80003100 __vt__6TEnemy", text)
         import anyio
         from zkit.server import create_server
         server = create_server(self.project)
@@ -147,7 +143,7 @@ class StructureTests(unittest.TestCase):
         mcp = anyio.run(call, "zkit_unit", {"query": "game/Enemy", "response_format": "json"})
         self.assertEqual(json.loads(mcp)["unit"], json.loads(cli.stdout)["unit"])
         self.assertIn("exact but not linked", anyio.run(call, "zkit_unit", {"blocked": True}))
-        self.assertIn("TPlayer__sub_80003010", anyio.run(call, "zkit_classes", {}))
+        self.assertIn("__vt__6TEnemy", anyio.run(call, "zkit_classes", {}))
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ import collections
 import re
 from typing import Any
 
-from .bridge import HEX, _status, _symbol_table, class_of, default_target, resolve, status_word
+from .bridge import HEX, _status, _symbol_table, default_target, resolve, status_word
 from .gc import read_splits
 from .index import address_text, connect, containing, refresh
 from .project import Project
@@ -201,75 +201,6 @@ def unit(project: Project, query: str, target: str | None = None, limit: int = 4
                       "another unit's .sdata2/.rodata used by this unit's code usually means the compiled source will "
                       "emit its own copy there; whether to fold, merge or move the boundary is the decomp's own rule. "
                       "Link state comes from the current objdiff report."}
-
-
-def _vtables(project: Project, target: str) -> tuple[list, list[int]]:
-    symbols, _ = _symbol_table(project, target)
-    tables = sorted((s.address, s.address + max(s.size, 4), re.sub(r"^__vt__\d*", "", s.name))
-                    for s in symbols if s.name.startswith("__vt__"))
-    return tables, [t[0] for t in tables]
-
-
-def classes(project: Project, target: str | None = None, name: str | None = None, unit_filter: str | None = None,
-            limit: int = 60) -> dict[str, Any]:
-    """Class names the vtables contradict, and single-class virtuals without a class in their name."""
-    target = default_target(project, target)
-    refresh(project, [])
-    db = connect(project)
-    tables, starts = _vtables(project, target)
-    if not tables:
-        return {"target": target, "contradicted": [], "unclaimed": [], "counts": {},
-                "limits": "No __vt__ symbols in symbols.txt: no class evidence from vtables yet."}
-    own_table = {t[2] for t in tables}
-    holders: dict[int, collections.Counter] = collections.defaultdict(collections.Counter)
-    unnamed: collections.Counter = collections.Counter()
-    for pointee, holder in db.execute("SELECT pointee, holder FROM refs WHERE target=?", (target,)):
-        index = bisect.bisect_right(starts, holder) - 1
-        if index >= 0 and tables[index][0] <= holder < tables[index][1]:
-            holders[pointee][tables[index][2]] += 1
-        else:
-            unnamed[pointee] += 1
-    counts = collections.Counter()
-    contradicted, unclaimed = [], []
-    for row in db.execute("SELECT * FROM functions WHERE target=? ORDER BY address", (target,)):
-        held = holders.get(row["address"])
-        if not held:
-            continue
-        named = class_of(row["name"], row["demangled"])
-        label = row["demangled"] or row["name"]
-        in_class = named and named in held
-        prefixed = any(label.startswith((c + "::", c + "__")) for c in held)
-        if in_class or (not named and prefixed):
-            counts["consistent"] += 1
-            continue
-        status = _status(row)
-        entry = {"address": address_text(row["address"]), "name": label, "status": status_word(status),
-                 "unit": row["unit"], "classes": [c for c, _ in held.most_common(8)], "class_count": len(held),
-                 "unnamed_tables": unnamed.get(row["address"], 0)}
-        if unit_filter and unit_filter.lower() not in (row["unit"] or "").lower():
-            continue
-        if named:
-            entry["named_class"] = named
-            entry["strength"] = "strong" if named in own_table else "weak"
-            entry["suggestion"] = (f"{entry['classes'][0]} (the only named vtable holding it)" if len(held) == 1 else
-                                   f"a base class shared by {len(held)} named classes, not {named}")
-            if name and name not in (named, *held):
-                continue
-            counts["contradicted_" + entry["strength"]] += 1
-            contradicted.append(entry)
-        elif len(held) == 1:
-            entry["suggestion"] = entry["classes"][0]
-            if name and name not in held:
-                continue
-            counts["unclaimed"] += 1
-            unclaimed.append(entry)
-    contradicted.sort(key=lambda e: (e["strength"] != "strong", e["class_count"], e["address"]))
-    return {"target": target, "counts": dict(counts), "contradicted": contradicted[:limit],
-            "contradicted_total": len(contradicted), "unclaimed": unclaimed[:limit], "unclaimed_total": len(unclaimed),
-            "limits": "Evidence is which named __vt__ tables hold the function's address. Strong: the named class has "
-                      "its own named vtable and the function is not in it. Weak: that class's vtable is not named yet. "
-                      "Unnamed (lbl_) tables are counted, not classified. Without RTTI the base class of several "
-                      "holders is not identified; constructors and field use decide it."}
 
 
 def blocked(project: Project, target: str | None = None, limit: int = 40) -> dict[str, Any]:
