@@ -496,8 +496,10 @@ def adopt_project(project, target: str, map_path: Path | None = None, write: boo
     def in_work(address: int) -> bool:
         index = bisect.bisect_right(starts, address) - 1
         return index >= 0 and address < held[index][1]
-    offered = sum(1 for a in aligned.functions if in_work(a)) + \
-        sum(1 for objects in aligned.objects.values() for o in objects if in_work(o.address))
+    named = {f.address: f.name for f in program.functions} | {o.address: o.name for o in program.objects}
+    offered = sum(1 for a, (name, _, _) in aligned.functions.items() if in_work(a) and named.get(a) != name) + \
+        sum(1 for objects in aligned.objects.values() for o in objects
+            if in_work(o.address) and named.get(o.address) != o.name)
     aligned.functions = {a: v for a, v in aligned.functions.items() if not in_work(a)}
     aligned.objects = {s: [o for o in objects if not in_work(o.address)] for s, objects in aligned.objects.items()}
     names = {u["unit"] for u in worked}
