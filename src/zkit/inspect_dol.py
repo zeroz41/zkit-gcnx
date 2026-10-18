@@ -113,18 +113,8 @@ def sda_bases(project: Project, target: str, dol: Dol) -> dict[int, int]:
             break
     if start is None:
         return {}
-    regs: dict[int, int] = {}
-    for word in dol.words(start, 0x40):
-        op, rd, ra, imm = word >> 26, (word >> 21) & 31, (word >> 16) & 31, word & 0xFFFF
-        if op == 15 and ra == 0:  # lis
-            regs[rd] = (imm << 16) & 0xFFFFFFFF
-        elif op == 24 and rd in regs:  # ori (rA is the destination)
-            regs[ra] = regs.get(rd, 0) | imm
-        elif op == 14 and ra in regs:  # addi
-            regs[rd] = (regs[ra] + (imm - 0x10000 if imm & 0x8000 else imm)) & 0xFFFFFFFF
-        elif word == 0x4E800020:
-            break
-    return {r: v for r, v in regs.items() if r in (2, 13)}
+    from .program import _gamecube_sda
+    return _gamecube_sda(dol, start)
 
 
 def disasm(project: Project, target: str, address: int, size: int | None = None,
