@@ -60,6 +60,13 @@ def function(image, tool: str, start: int, size: int, referenced: set[int]) -> l
         found = ppc.branch(word, start + index * 4)
         if found and found[0] is not None and start <= found[0] < end and found[0] != start:
             labels.add(found[0])
+    for _, _, target, _ in relocs:                     # a switch's cases: reached only through its jump table
+        table = image.symbols.containing(target)
+        if table is not None and table.size and image.symbols.function_containing(target) is None and \
+                not (image.section_of(table.address) or ".bss").startswith((".bss", ".sbss")):
+            for _, pointee, _ in image.pointers(table.address, table.address + table.size - table.size % 4):
+                if start < pointee < end:
+                    labels.add(pointee)
     entry = image.symbols.functions[start]
     scope = "local" if entry.scope == "local" else "weak" if entry.scope == "weak" else "global"
     lines = [f".fn {entry.name}, {scope}"]

@@ -37,6 +37,7 @@ WINDOW = 24         # functions on each side of a boundary whose references deci
 FILL_FUNCTIONS, FILL_BYTES = 48, 0x8000  # between two functions of one file, fill only a gap this small
 SOURCE = re.compile(r"\.(c|cc|cp|cpp|cxx|h|hh|hpp|inl|inc)$", re.I)
 HEADER = re.compile(r"\.(h|hh|hpp|inl|inc)$", re.I)
+BARE_SOURCE = re.compile(r"^[A-Za-z_][\w.+-]*\.(c|cc|cp|cpp|cxx)$", re.I)   # `__FILE__` compiled from its folder
 SIGNATURE = re.compile(r"^(?P<name>(?:[A-Za-z_][\w<>,*& ]*::)+~?[A-Za-z_]\w*)\s*\(")
 
 
@@ -96,7 +97,7 @@ def evidence(program: Program) -> Evidence:
 def _file_evidence(program: Program, ev: Evidence) -> None:
     """Source paths and `Class::method` names the code cites; file runs become joins, file changes separations."""
     strings = program.strings()
-    files = {a: s for a, s in strings.items() if SOURCE.search(s) and ("/" in s or "\\" in s)}
+    files = {a: s for a, s in strings.items() if SOURCE.search(s) and ("/" in s or "\\" in s or BARE_SOURCE.match(s))}
     signatures = {a: m["name"] for a, s in strings.items() if (m := SIGNATURE.match(s))}
     cited: dict[int, set[str]] = collections.defaultdict(set)
     named: dict[int, set[str]] = collections.defaultdict(set)

@@ -132,6 +132,9 @@ class Program:
         start = next((s.address for s in symbols if s.name == "__init_registers"), None)
         if start is not None and platform.name == "gamecube":
             sda = _gamecube_sda(image, start)
+        elif platform.name == "gamecube" and hasattr(image, "entry"):
+            from .discover import small_data_bases     # no name yet: the function the entry point calls to set them
+            sda = small_data_bases(image)[0]
         program = cls(platform, image, functions, objects, sda)
         program.labels = labels
         program.sections = _named_sections(platform, image, symbols)
