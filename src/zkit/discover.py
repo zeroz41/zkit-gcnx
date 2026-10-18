@@ -48,8 +48,8 @@ one. The target of a `lis` and a load or store starts one only in `.rodata` (a c
 is left to the object before it, because CodeWarrior folds a member's offset into the access. Measured against
 Twilight Princess's map, 2,420 of 2,438 such `.bss` targets are inside an object, and taking them would cut the
 share of `.bss` and `.data` starts that are right from 65% and 92% to 18% and 29%; on PSO, units proposed from
-these objects find more of the decomp's boundaries (9.31%) than with every target (9.29%) or none in `.rodata`
-(8.36%).
+these objects find more of the decomp's boundaries (9.21%, 54.45% of them right) than with every target (9.19%,
+53.92%) or none in `.rodata` (8.27%, 53.88%).
 """
 
 from __future__ import annotations
