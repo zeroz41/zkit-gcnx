@@ -952,6 +952,15 @@ def score(data: dict) -> str:
     return "\n".join(out)
 
 
+def discovered(data: dict) -> str:
+    evidence = ", ".join(f"{k} {v:,}" for k, v in data["evidence"].items())
+    sda = ", ".join(f"{k}={v}" for k, v in data["sda"].items()) or "not found"
+    sections = ", ".join(f"{s['name']} {s['start']}-{s['end']}" for s in data["sections"])
+    return "\n".join([f"{data['functions']:,} functions ({data['code_bytes']:,} bytes), {data['labels']} entry labels, "
+                      f"{data['jump_tables']:,} jump tables, {data['objects']:,} data objects; small data {sda}",
+                      f"evidence: {evidence}", f"sections: {sections}", f"wrote {data['written']}"])
+
+
 def units_proposal(data: dict, limit: int = 30) -> str:
     c = data["counts"]
     named = ", ".join(f"{k} {v:,}" for k, v in c["named_by"].items())

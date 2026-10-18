@@ -100,8 +100,12 @@ def analyze_project(project, target: str | None, folder: Path) -> dict[str, Any]
     from .bridge import default_target
     target = default_target(project, target)
     config = project.target(target)
-    if not config.get("symbols"):
-        raise ValueError(f"Target {target} has no symbols file to start from (a decomp-toolkit symbols.txt)")
     program = Program.from_project(project, target)
-    return {"target": target, **write(program, analyze(program), project.file(config["repository"],
-                                                                                config["symbols"]), folder)}
+    if "discovered" in program.cache:                  # no symbols file: start from what discovery found
+        from .discover import write_symbols
+        symbols = write_symbols(program.cache["discovered"], folder / "symbols.txt")
+    elif config.get("symbols"):
+        symbols = project.file(config["repository"], config["symbols"])
+    else:
+        raise ValueError(f"Target {target} has no symbols file to start from (a decomp-toolkit symbols.txt)")
+    return {"target": target, **write(program, analyze(program), symbols, folder)}

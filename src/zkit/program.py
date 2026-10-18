@@ -77,15 +77,35 @@ class Program:
         return cls._build(platform, platform.open(image_path), symbols_path)
 
     @classmethod
+    def from_image(cls, platform: Platform, image) -> "Program":
+        """A GameCube executable alone: functions, data objects, sections and small-data bases discovered from its
+        bytes (discover.py), named `fn_`/`lbl_` by address."""
+        from .discover import discover
+        return cls.from_found(platform, image, discover(image))
+
+    @classmethod
+    def from_found(cls, platform: Platform, image, found) -> "Program":
+        functions = [Function(a, s, f"fn_{a:08X}") for a, s in found.functions.items()]
+        objects = [DataObject(a, s, n, section) for a, s, section, n in found.objects]
+        program = cls(platform, image, functions, objects, found.sda)
+        program.labels = [DataObject(a, 0, f"lbl_{a:08X}", found.section_of(a) or "") for a in found.labels]
+        program.sections = list(found.sections)
+        program.cache["discovered"] = found
+        return program
+
+    @classmethod
     def from_project(cls, project, target: str) -> "Program":
-        """A project target's original, its symbols file when it has one (functions and data objects), else the
-        functions zkit's index knows for it (a report, a function list, or the original's own tables)."""
+        """A project target's original, its symbols file when it has one (functions and data objects), else (a
+        GameCube target) what discovery finds in the original alone, else the functions zkit's index knows for it
+        (a report, a function list, or the original's own tables)."""
         from .inspect_dol import _dol
         from .platform import for_target
         config = project.target(target)
         platform, image = for_target(config), _dol(project, target)
         if config.get("symbols") and project.file(config["repository"], config["symbols"]).is_file():
             return cls._build(platform, image, project.file(config["repository"], config["symbols"]))
+        if platform.name == "gamecube":
+            return cls.from_image(platform, image)
         from .index import connect, refresh
         refresh(project)
         rows = connect(project).execute("SELECT address, size, name FROM functions WHERE target=? AND size>0",
