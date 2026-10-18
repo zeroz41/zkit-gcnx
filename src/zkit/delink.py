@@ -10,7 +10,9 @@ The machine decides how code is read (ppc.py: lis/addi pairs, small-data accesse
 pairs, GOT loads, branches) and which data words are pointers. On Switch the module's own dynamic relocations
 say so. A GameCube executable keeps none, so a word is a pointer only on evidence: it is a function's start, a
 place inside the one function a jump table serves, or the start of (or a place inside) a named object, and it
-does not sit in data the symbols call strings or numbers. Units come from a splits.txt (decomp-toolkit's format).
+does not sit in data the symbols call strings or numbers. A REL module keeps them all (rel.py): its tables name
+every reference but the calls makerel applied, which its bytes hold. Units come from a splits.txt (decomp-toolkit's
+format).
 """
 
 from __future__ import annotations
@@ -103,15 +105,18 @@ class Unit:
     ranges: dict[str, list[tuple[int, int]]] = field(default_factory=lambda: collections.defaultdict(list))
 
 
-def read_units(path: Path, base: int = 0) -> list[Unit]:
+def read_units(path: Path, base: int = 0, place: Callable[[str, int], int | None] | None = None) -> list[Unit]:
     """A splits.txt (`unit:` then `\\t.section start:0x.. end:0x..` lines); addresses written with or without the
-    module base."""
+    module base, or section-relative (a REL's) and placed by `place`."""
     from .gc import read_splits
     key = lambda value: value - base if base and value >= base else value
     units: dict[str, Unit] = {}
     for name, section, start, end in read_splits(path):
         unit = units.setdefault(name, Unit(name))
-        unit.ranges[section].append((key(start), key(end)))
+        if place is None:
+            unit.ranges[section].append((key(start), key(end)))
+        elif place(section, start) is not None:
+            unit.ranges[section].append((place(section, start), place(section, end)))
     return list(units.values())
 
 
@@ -124,10 +129,23 @@ class Entry:
     data: str = ""             # what the bytes are (string, float, ...), when the symbols say
 
 
+# The linker's own names for section boundaries, the stack, heap and small-data bases: code that walks a section
+# (a module's _prolog over .ctors) can only name its start through these, never through an object another unit
+# defines there.
+LINKER_LABEL = re.compile(r"^_(?:ctors|dtors|[fe]_?(?:init|text|extab|extabindex|ctors|dtors|rodata|data|sdata2?|"
+                          r"sbss2?|bss|stack)(?:_rom)?|(?:db_)?stack_(?:addr|end)|heap_(?:addr|end)|"
+                          r"(?:ABS_)?SDA2?_BASE_)$")
+
+
 class Symbols:
     """Every name an address can take: functions, data objects and labels, then synthesized labels for the rest."""
 
     def __init__(self, functions: list[Entry], data: list[Entry], text: Callable[[int], str]):
+        self.linker = {e.address: e.name for e in data if not e.size and LINKER_LABEL.match(e.name)}
+        # a global label at the start of a local symbol: the name other units reach it by (`_savegpr_14` at the
+        # local `__save_gpr`)
+        self.aliases = {e.address: e.name for e in data if not e.size and e.scope == "global"
+                        and not e.name.startswith(("lbl_", "@", ".L"))}
         best = {e.address: e for e in functions}
         best_function = set(best)
         for entry in data:  # one name per address: a function, else a sized object, else a label
@@ -158,10 +176,16 @@ class Symbols:
         entry = self.functions[self._function_starts[index]]
         return entry if address < entry.address + entry.size else None
 
-    def resolve(self, address: int) -> tuple[str, int]:
-        """(symbol, addend) for an address: the symbol containing it, else a label at it."""
+    def resolve(self, address: int, kind: int = 0) -> tuple[str, int]:
+        """(symbol, addend) for an address: the symbol containing it, else a label at it. An address half
+        (lis/addi) at a linker boundary label names the label, and the start of a local symbol the global label
+        sharing it."""
+        if kind in (ppc.ADDR16_LO, ppc.ADDR16_HI, ppc.ADDR16_HA) and address in self.linker:
+            return self.linker[address], 0
         entry = self.containing(address)
         if entry is not None:
+            if entry.scope == "local" and entry.address == address and address in self.aliases:
+                return self.aliases[address], 0
             return entry.name, address - entry.address
         return f"lbl_{self.text(address)}", 0
 
@@ -356,6 +380,11 @@ class Image:
     code: Callable[[int, int, Callable[[int], bool]], tuple[list, dict[int, int]]]
     pointers: Callable[[int, int], list[tuple[int, int, str]]]
     text: Callable[[int], str]
+    place: Callable[[str, int], int | None] | None = None   # section-relative splits and symbols (a REL)
+    virtual: Callable[[int], int] | None = None             # the address objdiff shows, when not base + address
+
+    def original(self, address: int) -> int:
+        return self.virtual(address) if self.virtual else self.base + address
 
 
 def _gamecube(project: Project, target: str) -> Image:
@@ -407,7 +436,8 @@ def _image(project: Project, target: str) -> Image:
     if platform.name == "switch":
         return _switch(project, target, platform)
     if platform.name == "gamecube":
-        return _gamecube(project, target)
+        from . import rel
+        return rel.image(project, target) if rel.is_module(project.target(target)) else _gamecube(project, target)
     raise ValueError(f"No delinker for {platform.name} targets")
 
 
@@ -491,7 +521,7 @@ def delink_unit(image: Image, unit: Unit, path: Path) -> dict[str, Any]:
     for section_name, found, blob in pending:
         local = dict(placements)[section_name]
         for offset, kind, target, got in found:
-            name, addend = symbols.resolve(target)
+            name, addend = symbols.resolve(target, kind)
             if got:
                 addend = 0
             references[name] += 1
@@ -507,7 +537,7 @@ def delink_unit(image: Image, unit: Unit, path: Path) -> dict[str, Any]:
             "weak" if entry.scope == "weak" else "global")
         rows[symbol_index(entry.name)].update(section=section_name, value=value, size=entry.size,
                                               kind="func" if is_function else "object", bind=bind,
-                                              address=image.base + entry.address)
+                                              address=image.original(entry.address))
         defined += 1
     unassigned = []
     for name in list(references):  # labels inside this unit are defined here; others belong to a unit or none
@@ -519,7 +549,7 @@ def delink_unit(image: Image, unit: Unit, path: Path) -> dict[str, Any]:
         placed_at = where_in_unit(address)
         if placed_at is not None:
             row.update(section=placed_at[0], value=placed_at[1], kind="object", bind="local",
-                       address=image.base + address)
+                       address=image.original(address))
         else:
             unassigned.append(address)
     write_object(machine, [(n, k, bytes(b) if isinstance(b, bytearray) else b, a) for n, k, b, a in sections], rows,
@@ -539,7 +569,7 @@ def delink(project: Project, target: str, splits: Path, out_dir: Path, objdiff: 
     With `objdiff`, also write objdiff's project file pairing each object with the compiled one of the same unit
     under `compiled` (unit a/b.cpp: compiled/a/b.o)."""
     image = _image(project, target)
-    units = read_units(splits, image.base)
+    units = read_units(splits, image.base, image.place)
     assigned = sorted((start, end) for unit in units for ranges in unit.ranges.values() for start, end in ranges)
     starts = [a[0] for a in assigned]
 

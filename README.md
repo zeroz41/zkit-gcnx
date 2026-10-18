@@ -10,8 +10,10 @@ It runs locally and never uses the network.
 
 ## What it does
 
-- **Reads originals**: GameCube DOLs (also straight from a disc image) and Switch NSO/ELF modules (LZ4 and zstd
-  segments, dynamic symbols and relocations, exception-frame function bounds, PLT stubs).
+- **Reads originals**: GameCube DOLs (also straight from a disc image) and REL modules (relocation tables
+  resolved against the DOL and other modules; written back byte-identical, also from a partially linked ELF as
+  makerel does), and Switch NSO/ELF modules (LZ4 and zstd segments, dynamic symbols and relocations,
+  exception-frame function bounds, PLT stubs).
 - **Delinks**: one relocatable object per unit of a split, as the compiler emitted it, with every reference
   turned back into a relocation. These are the targets objdiff compares your compiled objects with. PowerPC
   code is read along its control flow, so an address is never paired across a path it does not take. On the 3,602
@@ -29,7 +31,7 @@ It runs locally and never uses the network.
 - **Serves agents**: an MCP server and a CLI over the decomp, the original and the port (below).
 
 Being built: function discovery from a bare executable (today the structure tools start from an existing
-`symbols.txt`), relinking to a byte-identical executable with function-level linking, REL modules, library
+`symbols.txt`), relinking to a byte-identical executable with function-level linking, library
 naming, and `zkit new` to start a project from a disc or an NSO.
 
 ## Install

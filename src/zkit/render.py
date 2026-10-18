@@ -936,6 +936,18 @@ def objects_compare(data: dict) -> str:
     return "\n".join(out)
 
 
+def rel_info(data: dict) -> str:
+    out = [f"REL module {data['module_id']}, version {data['version']}: {data['relocations']:,} relocations"
+           + (f", align {data['align']} (.bss {data['bss_align']})" if data["align"] is not None else "")]
+    for section in data["sections"]:
+        kind = "code" if section["code"] else "bss" if section["bss"] else "data"
+        out.append(f"  section {section['index']:>2}  {kind:<4}  offset 0x{section['offset']:X}  size 0x{section['size']:X}")
+    for module, kinds in data["imports"].items():
+        out.append(f"  -> {'the DOL' if module == '0' else 'itself' if int(module) == data['module_id'] else f'module {module}'}: "
+                   + ", ".join(f"{k} {n:,}" for k, n in sorted(kinds.items())))
+    return "\n".join(out)
+
+
 def score(data: dict) -> str:
     f, n, u, c, v, d = (data[k] for k in ("functions", "names", "units", "unit_cuts", "vtables", "data_ownership"))
     out = [f"functions: {f['starts_found']}% of the reference's starts found, {f['starts_correct']}% of the proposed "

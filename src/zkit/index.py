@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 from typing import Iterable, Iterator
 
-from .gc import asm_functions, asm_references, read_symbols
+from .gc import read_symbols
 from .platform import GameCube, Platform, for_target
 from .project import Project
 
@@ -456,78 +456,63 @@ def _load_calls(project: Project, db: sqlite3.Connection, name: str, target: dic
     _set_meta(db, f"calls:{name}", stamp)
 
 
-def unit_asm(project: Project, target: dict, unit: str | None, module_key: bool) -> Path | None:
-    """dtk's asm file for an objdiff unit (`module/path/to/tu`): build/<ver>/asm/... for the DOL,
-    build/<ver>/<module>/asm/... for a REL."""
-    report = _target_file(project, target, "report")
-    if not unit or report is None or "/" not in unit:
-        return None
-    module, _, rest = unit.partition("/")
-    path = report.parent / module / "asm" / f"{rest}.s" if module_key else report.parent / "asm" / f"{rest}.s"
-    return path if path.is_file() else None
-
-
 def _modules_stamp(project: Project, db: sqlite3.Connection, name: str, target: dict) -> str | None:
-    """REL call/xref edges come from dtk's asm, rewritten whenever dtk splits (which rewrites config.json)."""
-    report = _target_file(project, target, "report")
-    if report is None or not db.execute("SELECT 1 FROM functions WHERE target=? AND address>=? LIMIT 1",
-                                        (name, 1 << MODULE_SHIFT)).fetchone():
+    """REL call/xref edges are decoded from the REL files: again when the function bounds or one of those files
+    change (a module new to the report changes the bounds, so a rescan finds its file)."""
+    if not db.execute("SELECT 1 FROM functions WHERE target=? AND address>=? LIMIT 1",
+                      (name, 1 << MODULE_SHIFT)).fetchone():
         return None
-    marker = report.parent / "config.json"
-    return f"{_meta(db, f'bounds:{name}')}:{_stamp(marker) if marker.is_file() else ''}"
+    stamps = []
+    for path in json.loads(_meta(db, f"modfiles:{name}") or "[]"):
+        try:
+            stamps.append(_stamp(Path(path)))
+        except OSError:
+            stamps.append("missing")
+    return f"{_meta(db, f'bounds:{name}')}:{hashlib.sha256('|'.join(stamps).encode()).hexdigest()[:16]}"
 
 
 def _load_module_edges(project: Project, db: sqlite3.Connection, name: str, target: dict) -> None:
-    """Direct calls and symbol references made by REL functions, read from dtk's relocated asm.
+    """Direct calls and DOL references made by REL functions, decoded from the REL files (rel.py): every reference
+    a module makes is in its relocation tables, the calls within one section in its bytes.
 
     REL code reaches the DOL only through relocations, so this is where `who calls this DOL function`
     learns about actors and other module code."""
     stamp = _modules_stamp(project, db, name, target)
     if stamp is None or _meta(db, f"modcalls:{name}") == stamp:
         return
+    from . import rel
     top = 1 << MODULE_SHIFT
-    dol_names: dict[str, int] = {}
-    local: dict[tuple[int, str], int] = {}
-    units: dict[str, list] = {}
-    for address, size, fname, unit in db.execute("SELECT address, size, name, unit FROM functions WHERE target=?",
-                                                 (name,)):
-        if address < top:
-            dol_names.setdefault(fname, address)
-        else:
-            local[(address >> MODULE_SHIFT, fname)] = address
-            units.setdefault(unit, []).append((address, size, fname))
-    symbols = _target_file(project, target, "symbols")
-    if symbols is not None and symbols.is_file():
-        for symbol in read_symbols(symbols):
-            dol_names.setdefault(symbol.name, symbol.address)
-    calls, xrefs = [], []
-    for unit, functions in units.items():
-        path = unit_asm(project, target, unit, True)
+    names = {int(k): v for k, v in json.loads(_meta(db, f"modules:{name}") or "{}").items()}
+    files = rel.module_files(project, name)
+    modules: dict[int, rel.Module] = {}
+    used = []
+    for number, module_name in names.items():
+        path = rel.pick(files.get(number, []), module_name)
         if path is None:
             continue
         try:
-            bodies = asm_functions(path)
-        except OSError:
+            modules[number] = rel.Module(rel.load(path))
+        except (OSError, ValueError):
             continue
-        for address, size, fname in functions:
-            module = address >> MODULE_SHIFT
-            base = module << MODULE_SHIFT
-            for instruction in bodies.get(fname, ()):
-                callee, refs = asm_references(instruction)
-                pc = base | instruction.address
-                if callee:
-                    found = local.get((module, callee), dol_names.get(callee))
-                    if found is not None:
-                        calls.append((name, address, pc, found))
-                for symbol, kind in refs:
-                    found = dol_names.get(symbol)
-                    if found is not None:
-                        xrefs.append((name, address, pc, found, kind))
+        used.append(str(path))
+    calls, xrefs = [], []
+    for address, size in db.execute("SELECT address, size FROM functions WHERE target=? AND address>=?",
+                                    (name, top)).fetchall():
+        module = modules.get(address >> MODULE_SHIFT)
+        if module is None or module.code is None or size < 4:
+            continue
+        try:
+            found, refs = rel.edges(module, module.base[module.code] + (address & 0xFFFFFFFF), size, modules)
+        except ValueError:  # a function the report places outside the module's code
+            continue
+        calls.extend((name, address, site, callee) for site, callee in found)
+        xrefs.extend((name, address, pc, value, kind) for pc, value, kind in refs)
     db.execute("DELETE FROM calls WHERE target=? AND caller>=?", (name, top))
     db.executemany("INSERT INTO calls VALUES(?,?,?,?)", calls)
     db.execute("DELETE FROM xrefs WHERE target=? AND function>=?", (name, top))
     db.executemany("INSERT INTO xrefs VALUES(?,?,?,?,?)", xrefs)
-    _set_meta(db, f"modcalls:{name}", stamp)
+    _set_meta(db, f"modfiles:{name}", json.dumps(sorted(used)))
+    _set_meta(db, f"modcalls:{name}", _modules_stamp(project, db, name, target) or stamp)
 
 
 def _walk(root: str, paths: list[str], exclude: list[re.Pattern]) -> Iterator[tuple[str, os.stat_result]]:
