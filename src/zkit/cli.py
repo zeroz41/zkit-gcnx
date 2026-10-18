@@ -70,6 +70,13 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--native", type=Path, help="optional native port / reimplementation repo to join")
     c.add_argument("--name", help="project id (default: <folder>-<version>)")
     c.add_argument("--dry-run", action="store_true", help="print the project file without writing it")
+    c = add("new", help="Start a decomp from the original alone: a GameCube disc image or DOL, or a Switch NSO/ELF "
+                        "(extracts it locally, registers the project, finds functions and units, writes symbols, "
+                        "splits, class headers and every unit's target object)")
+    c.add_argument("source", type=Path, help="disc image (.iso/.gcm), DOL, NSO or ELF")
+    c.add_argument("folder", type=Path, help="the new repository folder")
+    c.add_argument("--id", help="game id (default: the disc's, or the file name)")
+    c.add_argument("--name", help="project id (default: <folder>-<id>)")
     add("projects", help="List registered projects and which one this folder uses")
     c = add("use", help="Register a hand-written manifest and make it the default project")
     c.add_argument("manifest", type=Path)
@@ -202,6 +209,13 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--out", type=Path, required=True, help="folder for the objects (unit a/b.cpp: OUT/a/b.o)")
     c.add_argument("--objdiff", type=Path, help="also write objdiff's project file here")
     c.add_argument("--compiled", type=Path, help="where the build writes each unit's object (for --objdiff)")
+    c = add("asmfile", help="An assembly file of original functions for a decompiler (m2c): references as symbols, "
+                            "labels, and the data they read (GameCube)")
+    c.add_argument("addresses", nargs="+", help="addresses or names of functions")
+    c.add_argument("--out", type=Path, help="write here instead of printing")
+    c = add("m2c", help="m2c's C for an original function, from zkit's own assembly file (GameCube)")
+    c.add_argument("address", help="address or name of the function")
+    c.add_argument("--language", choices=("c", "c++"), help="default: c++ for a mangled name, else c")
     c = add("refs", help="Where a function or global is defined, declared and used in the source (any spelling)")
     c.add_argument("query", nargs="+")
     c.add_argument("--repo")
@@ -373,6 +387,17 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             steps = connect_agents(args.dry_run, args.refresh_agents, args.plugin_source)
             said += "\n" + "\n".join(steps)
         return {"ok": not any(s.startswith("FAILED:") for s in steps)}, said
+    if args.command == "new":
+        from .new import new
+        result = new(args.source, args.folder, args.id, args.name)
+        if not default_manifest():
+            CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            CONFIG.write_text(result["manifest"] + "\n", encoding="utf-8")
+        return result, (f"new {result['kind']} project {result['game']} in {result['folder']}: "
+                        f"{result['functions']:,} functions, {result['units']:,} units, {result['objects']:,} target "
+                        f"objects" + (f", {result['class_headers']:,} class headers" if "class_headers" in result else "")
+                        + (f"; {result['unassigned_references']:,} referenced addresses are in no unit yet"
+                           if result["unassigned_references"] else "") + f"\nproject file: {result['manifest']}")
     if args.command == "init":
         from .onboard import init
         result = init(args.decomp, args.version, args.native, args.name, write=not args.dry_run)
@@ -615,6 +640,23 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             units.write_splits(data, args.splits.expanduser().resolve())
             data["written"] = str(args.splits)
         return data, render.units_proposal(data, args.limit) + (f"\nwrote {args.splits}" if args.splits else "")
+    if command in ("asmfile", "m2c"):
+        from . import asmfile
+        def resolve(query: str) -> int:
+            exact = bridge.HEX.match(query.strip())
+            found = [int(exact[1], 16)] if exact else bridge.resolve(project, query, target)
+            if not found:
+                raise ValueError(f"No function matches {query}")
+            return found[0]
+        if command == "asmfile":
+            text = asmfile.write(project, target, [resolve(a) for a in args.addresses])
+            if args.out:
+                args.out.write_text(text, encoding="utf-8")
+                return {"written": str(args.out)}, f"wrote {args.out}"
+            return {"text": text}, text.rstrip()
+        data = asmfile.m2c(project, target, resolve(args.address), args.language)
+        return data, f"// {data['function']} ({data['address']}), m2c {data['language']}, asm {data['asm']}\n" + \
+            data["text"].rstrip()
     if command == "delink":
         from . import delink
         config = project.target(target)

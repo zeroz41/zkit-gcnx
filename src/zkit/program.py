@@ -226,15 +226,22 @@ def _named_sections(platform: Platform, image, symbols) -> list[tuple[str, int, 
 
 
 def _gamecube_sda(image, start: int) -> dict[int, int]:
-    """r2 and r13 as __init_registers sets them."""
+    """r2 and r13 as __init_registers sets them, read up to its `blr` (some runtimes clear every register first,
+    so the bases come late in the function)."""
     registers: dict[int, int] = {}
-    for word in image.words(start, 0x40):
+    for index in range(256):
+        try:
+            word = image.words(start + index * 4, 4)[0]
+        except ValueError:
+            break
         op, rd, ra, imm = word >> 26, (word >> 21) & 31, (word >> 16) & 31, word & 0xFFFF
-        if op == 15 and ra == 0:
+        if op == 15 and ra == 0:                       # lis
             registers[rd] = (imm << 16) & 0xFFFFFFFF
-        elif op == 24 and rd in registers:
-            registers[ra] = registers.get(rd, 0) | imm
-        elif op == 14 and ra in registers:
+        elif op == 24 and rd in registers:             # ori (rA is the destination)
+            registers[ra] = registers[rd] | imm
+        elif op == 14 and ra == 0:                     # li (rA 0 means the literal 0): a constant, not a base
+            registers.pop(rd, None)
+        elif op == 14 and ra in registers:             # addi
             registers[rd] = (registers[ra] + (imm - 0x10000 if imm & 0x8000 else imm)) & 0xFFFFFFFF
         elif word == 0x4E800020:
             break
