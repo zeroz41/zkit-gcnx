@@ -65,6 +65,7 @@ extension for its Gekko language), installed with
 | A new decomp from the original | `zkit new game.iso mygame/`, `zkit new main.nso mygame/` |
 | Functions, sections and data objects from a bare DOL, as a symbols.txt | `zkit discover --out symbols.txt` |
 | Target objects for every unit (and objdiff's project file) | `zkit delink --out build/target --objdiff objdiff.json` |
+| The original rebuilt with the project's linker, every exact function from compiled code, checked byte for byte | `zkit link --out build/link` |
 | Units proposed from the original | `zkit units`, `zkit units --splits splits.txt` |
 | What is wrong with the current split | `zkit units --check` |
 | Classes against the current names | `zkit classes` |
@@ -101,8 +102,8 @@ The rules behind the skills: `zkit contract decomp` and `zkit contract port`.
 
 ### Evidence
 
-Run them in your repo. They only read, except `handoff`, `report`, `delink`, `analyze`, `objects --save` and
-`cache --prune`, which write to zkit's own folders or the folder you name.
+Run them in your repo. They only read, except `handoff`, `report`, `delink`, `link`, `analyze`, `objects --save`
+and `cache --prune`, which write to zkit's own folders or the folder you name.
 
 | You want | Command |
 | --- | --- |
