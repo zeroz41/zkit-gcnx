@@ -115,7 +115,7 @@ def digest(words: list[int], relocations: Iterable[tuple[int, int]]) -> str:
     return h.hexdigest()
 
 
-def image_shape(program: Program, function: Function) -> Shape | None:
+def image_shape(program: Program, function: Function, sda: dict[int, int] | None = None) -> Shape | None:
     """The shape of a linked function and where its relocations point."""
     try:
         words = program.platform.words(program.image, function.address, function.size)
@@ -123,10 +123,27 @@ def image_shape(program: Program, function: Function) -> Shape | None:
         return None
     if not words:
         return None
-    found, cleared = ppc.code_relocations(words, function.address, program.sda, program.in_image)
+    found, cleared = ppc.code_relocations(words, function.address, program.sda if sda is None else sda,
+                                          program.in_image)
     masked = [cleared.get(function.address + 4 * i, word) for i, word in enumerate(words)]
     references = [((r.offset - function.address) // 4 * 4, r.kind, r.target) for r in found]
     return Shape(function.address, 4 * len(words), digest(masked, ((o, k) for o, k, _ in references)), references)
+
+
+def small_data(program: Program) -> dict[int, int]:
+    """r2 and r13: the program's own, or, where nothing names `__init_registers` (a fresh analysis), as the
+    first function the entry point calls that sets both sets them."""
+    from .program import _gamecube_sda
+    if program.sda or not hasattr(program.image, "entry"):
+        return program.sda
+    entry = program.image.entry
+    end = next((s.address + s.size for s in program.platform.sections(program.image)
+                if s.address <= entry < s.address + s.size), entry)
+    for _, target in program.platform.calls(program.image, entry, min(0x100, end - entry)):
+        found = _gamecube_sda(program.image, target)
+        if len(found) == 2:
+            return found
+    return {}
 
 
 def text_at(read, address: int) -> str | None:
@@ -358,13 +375,16 @@ def objects_in(paths: Iterable[Path]) -> Iterable[tuple[str, bytes]]:
 
 
 def map_program(platform, image: Path, map_path: Path) -> tuple[Program, list[tuple[int, int, str]]]:
-    """An original named by a CodeWarrior linker map, and the map's units."""
+    """An original named by a CodeWarrior linker map, and the map's units. A map does not mark file-local
+    symbols, but a name it lists twice can only be one."""
     from . import mwmap
     from .gc import Symbol
     split = mwmap.read(map_path)
-    symbols = [Symbol(name, ".text", address, "function", size, "global")
+    count = collections.Counter([n for _, n in split.functions.values()] + [o[1] for o in split.objects.values()])
+    scope = lambda name: "local" if count[name] > 1 else "global"
+    symbols = [Symbol(name, ".text", address, "function", size, scope(name))
                for address, (size, name) in split.functions.items()]
-    symbols += [Symbol(name, section, address, "object", size, "global")
+    symbols += [Symbol(name, section, address, "object", size, scope(name))
                 for address, (size, name, section) in split.objects.items()]
     units = [(start, end, unit) for unit, rows in split.units.items() for _, start, end in rows]
     return Program.from_symbol_list(platform, platform.open(image), symbols), units
@@ -493,8 +513,9 @@ class Matcher:
                            for i, f in enumerate(functions)}
         self.shapes: dict[int, Shape] = {}
         self.groups: dict[str, list[int]] = collections.defaultdict(list)
+        sda = small_data(program)
         for function in functions:
-            shape = image_shape(program, function)
+            shape = image_shape(program, function, sda)
             if shape is not None:
                 self.shapes[function.address] = shape
                 if shape.shape in self.by_shape:
