@@ -380,6 +380,7 @@ class Image:
     code: Callable[[int, int, Callable[[int], bool]], tuple[list, dict[int, int]]]
     pointers: Callable[[int, int], list[tuple[int, int, str]]]
     text: Callable[[int], str]
+    section_of: Callable[[int], str | None] = lambda address: None   # the section holding an address
     place: Callable[[str, int], int | None] | None = None   # section-relative splits and symbols (a REL)
     virtual: Callable[[int], int] | None = None             # the address objdiff shows, when not base + address
 
@@ -404,7 +405,7 @@ def _gamecube(project: Project, target: str) -> Image:
     return Image(PPC, 0, program.read, symbols, program.in_image, code,
                  lambda start, end: data_pointers(program.read, start, end, symbols, program.in_image,
                                                   program.in_code, ">"),
-                 text)
+                 text, program.section_of)
 
 
 def _switch(project: Project, target: str, platform) -> Image:

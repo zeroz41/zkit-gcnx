@@ -30,9 +30,13 @@ It runs locally and never uses the network.
   or a browsable HTML page, with changes tracked by address so renames and folds don't hide regressions.
 - **Serves agents**: an MCP server and a CLI over the decomp, the original and the port (below).
 
-Being built: function discovery from a bare executable (today the structure tools start from an existing
-`symbols.txt`), relinking to a byte-identical executable with function-level linking, library
-naming, and `zkit new` to start a project from a disc or an NSO.
+- **Starts projects**: `zkit new` makes a repository from the original alone: a GameCube disc is extracted (its
+  Yaz0 files and RARC archives unpacked), the project is registered, and the functions, units, symbols, splits,
+  class headers and every unit's target object are written.
+
+Being built: GameCube function discovery from a bare executable (until it lands, GameCube structure tools start
+from an existing `symbols.txt`; Switch modules carry their own function bounds), relinking to a byte-identical
+executable with function-level linking, and library naming.
 
 ## Install
 
@@ -60,6 +64,7 @@ extension for its Gekko language), installed with
 
 | You want | Command |
 | --- | --- |
+| A new decomp from the original | `zkit new game.iso mygame/`, `zkit new main.nso mygame/` |
 | Target objects for every unit (and objdiff's project file) | `zkit delink --out build/target --objdiff objdiff.json` |
 | Units proposed from the original | `zkit units`, `zkit units --splits splits.txt` |
 | What is wrong with the current split | `zkit units --check` |
@@ -105,7 +110,9 @@ Run them in your repo. They only read, except `handoff`, `report`, `delink`, `an
 | Everything about a function | `zkit lookup 0x80012345` or `zkit lookup MyClass::update` |
 | Where the source defines and uses it | `zkit refs 0x80012345` |
 | Original instructions or data | `zkit asm 0x80012345`, `zkit data 0x80345678 --type f32 --count 8` |
+| m2c's C for an original function (GameCube) | `zkit m2c 0x80012345` |
 | Ghidra's C for an original function | `zkit decompile 0x80012345` |
+| An assembly file for a decompiler (GameCube) | `zkit asmfile 0x80012345 --out fn.s` |
 | A compiled function against the original | `zkit compiled 0x80012345` |
 | Check a candidate outside the tree | `zkit try 0x80012345 candidate.cpp` |
 | A unit, exact units that don't link, unclaimed data | `zkit unit game/MyClass`, `zkit unit --blocked`, `zkit unit --gaps` |
