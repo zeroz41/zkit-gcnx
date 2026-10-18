@@ -56,10 +56,15 @@ and which data words are pointers: on Switch the module's own dynamic relocation
 aligned word that lands in the image is one, except inside string data and unaligned code addresses. Each data
 pointer carries its evidence (a function start, a jump-table case, an object, a place inside a function); a
 pointer into the middle of a function is reported, since it means a start the symbols lack or a wrong boundary.
+A REL module (`rel.py`) needs no evidence of that kind: its relocation tables name every reference, and only the
+calls makerel applied inside one section are read from the bytes. `rel.py` also writes RELs, from a parsed one or
+from a partially linked ELF as makerel does.
 
 The gate it is held to: on a large GameCube decomp, every function of every fully matched unit equals the compiled
 object (bytes and relocations; relocations to the same constant under another name count as equal), and every data
-pointer of those units is found.
+pointer of those units is found. For RELs, on Twilight Princess's 757 modules: every function of their fully matched
+units agrees with the compiled object as decomp-toolkit's own objects do, and every REL written back (from itself,
+and from its partially linked ELF) is byte-identical to the original.
 
 ### Units, classes and names
 

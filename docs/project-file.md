@@ -46,12 +46,22 @@ Relative `root` paths are relative to the project file. All other paths are rela
 | `functions` | Switch: an optional CSV of known functions (address, size, name) when there is no symbols file. |
 | `module` | Name of the main module in the report (default `main`). |
 | `rels` | `false` to leave REL modules out. By default every REL in the report is indexed. |
+| `modules` | GameCube: the REL files (or folders of them) the game loads, when they are not on the disc beside `original`. |
+| `host` | A REL target: the DOL target that loads it (its symbols name the module's references into the DOL). |
 | `provisional_name_pattern` | Regex for auto names (default: `fn_`, `lbl_`, `FUN_`, `sub_` + address, ...). |
 | `sda_bases` | `{"r2": "0x...", "r13": "0x..."}` when `__init_registers` can't be decoded. |
 
 **REL modules.** REL functions have no fixed address, so they are written `module+0xOFFSET` (for example
-`mymodule+0x1D0`). Their calls into the DOL and their references to DOL globals come from dtk's relocated
-disassembly (`build/<GAMEID>/<module>/asm/`). DOL lookups therefore list REL callers, and `xrefs` lists REL readers.
+`mymodule+0x1D0`). zkit reads the REL files themselves: every reference a module makes is in its relocation tables,
+and the calls inside one of its sections are in its bytes. Its calls into the DOL, into other modules and within
+itself, and its references to DOL globals come from there, so DOL lookups list REL callers, `xrefs` lists REL
+readers, and `asm` shows a REL function with every relocated field named. The files are every `.rel` on the disc
+beside `original` (its folder, or the one above `sys/`), or what `modules` lists; data a game keeps in files of its
+own named `.rel` is told apart by the header. A REL can also be a target of its own (`original` the `.rel`, `host`
+the DOL target, its own `symbols` and `splits`, whose `Sections:` block names its sections): `delink` then cuts it
+into one object per unit. `zkit rel info FILE` shows what a REL holds; `zkit rel make PLF... --dol ELF --out DIR`
+writes the RELs of partially linked modules, as makerel does (`--like` keeps the original header's name offset and
+section count).
 
 ## Repositories
 

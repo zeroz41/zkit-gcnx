@@ -168,6 +168,15 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("reference", type=Path, help="reference folder, or a .MAP linker map")
     c.add_argument("--report", type=Path, help="objdiff report.json of the reference (its complete units are proven)")
     c.add_argument("--module", help="with --report: only this module's units")
+    c = add("rel", help="REL modules: `info FILE` (header, sections, relocations per module), or `make PLF... --dol "
+                        "ELF --out DIR` (each partially linked module as a REL, as makerel does)")
+    c.add_argument("action", choices=("info", "make"))
+    c.add_argument("files", type=Path, nargs="+", help="info: the REL; make: the modules' partially linked ELFs")
+    c.add_argument("--dol", type=Path, help="make: the linked DOL's ELF the modules call into")
+    c.add_argument("--out", type=Path, help="make: folder for the RELs")
+    c.add_argument("--like", type=Path, action="append", default=[],
+                   help="make: original RELs (files or folders) whose header facts and module ids to keep")
+    c.add_argument("--rel-version", type=int, default=3, help="make: REL version without --like (default 3)")
     c = add("analyze", help="A fresh analysis of the original into a folder: splits.txt (units with their data), "
                             "symbols.txt (recovered tables and destructors named), a header per class, analysis.json")
     c.add_argument("--out", type=Path, required=True)
@@ -329,7 +338,7 @@ def _ready(project, notes: list[str], said: str, plugins_next: bool = True) -> s
     lines = [said, *(f"note: {n}" for n in notes)]
     tool = _objdump(project)
     lines.append(f"disassembler: {tool}" if tool else
-                 "disassembler: decomp-toolkit asm output (no PowerPC objdump found; both are optional)")
+                 "disassembler: none (no PowerPC objdump found: asm shows raw words)")
     from .index import connect
     db = connect(project)
     counts = {t: db.execute("SELECT count(*), sum(address >= 4294967296) FROM functions WHERE target=?", (t,)).fetchone()
@@ -400,6 +409,17 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         text = "\n".join(f"{'*' if r.get('here') else ' '} {r.get('id', '?'):<32} {r['manifest']}"
                          + (" (default)" if r.get("default") else "") for r in rows) or "no projects yet: zkit init <decomp repo>"
         return rows, text + ("\n* = the project for this folder" if any(r.get("here") for r in rows) else "")
+    if args.command == "rel":
+        from . import rel
+        if args.action == "info":
+            data = rel.info(rel.load(args.files[0]))
+            return data, render.rel_info(data)
+        if args.dol is None or args.out is None:
+            raise ValueError("rel make needs --dol (the DOL's linked ELF) and --out (a folder)")
+        rows = rel.make_all(args.dol, args.files, args.out.expanduser().resolve(), args.like, args.rel_version)
+        return rows, "\n".join(f"{r['rel']}: module {r['id']}, {r['bytes']:,} bytes"
+                                + (f", {'identical to' if r['identical'] else 'differs from'} {r['like']}"
+                                   if "like" in r else "") for r in rows)
     if args.command == "score":
         from . import mwmap, score
         reference = mwmap.read(args.reference) if args.reference.is_file() else score.load(args.reference)
