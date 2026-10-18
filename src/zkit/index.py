@@ -254,24 +254,12 @@ def _stamp(path: Path) -> str:
     return f"{stat.st_size}:{stat.st_mtime_ns}"
 
 
-CW_MEMBER = re.compile(r"^(?P<name>[A-Za-z_]\w*?)__(?P<length>\d+)(?P<rest>\w+)$")
-CW_OPERATORS = {"__ct": "{c}", "__dt": "~{c}"}
-
-
 def cw_demangle(symbol: str) -> str | None:
-    """CodeWarrior `method__9TClassFv` -> `TClass::method` (arguments omitted).
-
-    Enough to look a function up by Class::method when no report supplies
-    full demangled names. Nested/template classes are left alone."""
-    match = CW_MEMBER.match(symbol)
-    if not match or match["name"].startswith("_") and match["name"] not in ("__ct", "__dt"):
-        return None
-    length, rest = int(match["length"]), match["rest"]
-    if len(rest) < length or not rest[length:].startswith(("F", "C")):
-        return None
-    cls = rest[:length]
-    name = CW_OPERATORS.get(match["name"], match["name"]).format(c=cls)
-    return f"{cls}::{name}"
+    """CodeWarrior `method__9TClassFv` -> `TClass::method` (arguments omitted): enough to look a function up by
+    Class::method when no report supplies full demangled names."""
+    from .cwnames import parse
+    parsed = parse(symbol)
+    return parsed.head if parsed is not None and parsed.scope else None
 
 
 def provisional_pattern(project: Project, target: str) -> re.Pattern:
