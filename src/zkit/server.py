@@ -210,15 +210,16 @@ def create_server(project: Project) -> FastMCP:
         return out(data, render.unit(data), response_format)
 
     @tool()
-    def zkit_classes(class_name: str | None = None, unit: str | None = None, limit: int = 60, repo: str | None = None,
+    def zkit_classes(class_name: str | None = None, limit: int = 60, repo: str | None = None,
                      response_format: Format = "text") -> str:
-        """Naming: functions whose class name the original vtables contradict (strong when the named class has
-        its own vtable without them) with the class whose vtable holds them, and virtuals with no class in their
-        name that sit in exactly one named class's vtables. class_name/unit filter. Check before naming a method
-        after a class or accepting a provisional Class__sub_ prefix."""
+        """Classes recovered from the original's code (vtables, constructors, destructors, bases, read from the
+        instructions) against the current names: __vt__ symbols that are not tables, classes without a name,
+        constructors/destructors/virtuals filed under another class or named for a role, and the one name each
+        virtual slot should carry across every override. class_name narrows to one class. Check before naming a
+        method, a constructor or a vtable."""
         p = decomp(repo)
-        from . import structure
-        data = structure.classes(p, target(p), class_name, unit, max(1, min(limit, 1000)))
+        from . import classes
+        data = classes.audit_project(p, target(p), class_name, max(1, min(limit, 1000)))
         return out(data, render.classes(data), response_format)
 
     @tool()
