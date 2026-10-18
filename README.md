@@ -2,8 +2,8 @@
 
 zkit helps you decompile GameCube and Switch games and build native ports from them. It works from the original
 game file alone: it finds the functions, splits the program into units, recovers classes and names, and links
-everything back into a byte-identical executable. It also gives AI coding agents the evidence
-they need to work without guessing.
+everything back into a byte-identical executable. It also gives AI coding agents (Claude Code,
+Codex, or any MCP agent) the evidence they need to work without guessing.
 
 It runs locally and only uses the network when you ask it to download compilers (`zkit build --download`).
 
@@ -42,9 +42,20 @@ zkit setup --native ../your-port    # the decomp and its port
 
 ### Connect your agent
 
-`zkit setup` installs the zkit plugin (tools, skills and a session brief) in your agent. To do it yourself, for
-example after `zkit new`, add `zeroz41/gc-switch-tool-zkit` as a plugin marketplace in your agent and install
-`zkit@zkit` from it.
+`zkit setup` installs the zkit plugin (tools, skills and a session brief) for Claude Code and Codex, whichever
+you have. To do it yourself, for example after `zkit new`:
+
+```sh
+# Claude Code
+claude plugin marketplace add zeroz41/gc-switch-tool-zkit
+claude plugin install zkit@zkit
+
+# Codex
+codex plugin marketplace add zeroz41/gc-switch-tool-zkit
+codex plugin add zkit@zkit
+```
+
+Any other agent that speaks MCP can use the tools: point it at `zkit serve`.
 
 Restart your agent in the project folder. `zkit doctor` checks everything and tells you how to fix
 what's missing.
