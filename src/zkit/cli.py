@@ -70,6 +70,13 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--native", type=Path, help="optional native port / reimplementation repo to join")
     c.add_argument("--name", help="project id (default: <folder>-<version>)")
     c.add_argument("--dry-run", action="store_true", help="print the project file without writing it")
+    c = add("new", help="Start a decomp from the original alone: a GameCube disc image or DOL, or a Switch NSO/ELF "
+                        "(extracts it locally, registers the project, finds functions and units, writes symbols, "
+                        "splits, class headers and every unit's target object)")
+    c.add_argument("source", type=Path, help="disc image (.iso/.gcm), DOL, NSO or ELF")
+    c.add_argument("folder", type=Path, help="the new repository folder")
+    c.add_argument("--id", help="game id (default: the disc's, or the file name)")
+    c.add_argument("--name", help="project id (default: <folder>-<id>)")
     add("projects", help="List registered projects and which one this folder uses")
     c = add("use", help="Register a hand-written manifest and make it the default project")
     c.add_argument("manifest", type=Path)
@@ -355,6 +362,17 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             steps = connect_agents(args.dry_run, args.refresh_agents, args.plugin_source)
             said += "\n" + "\n".join(steps)
         return {"ok": not any(s.startswith("FAILED:") for s in steps)}, said
+    if args.command == "new":
+        from .new import new
+        result = new(args.source, args.folder, args.id, args.name)
+        if not default_manifest():
+            CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            CONFIG.write_text(result["manifest"] + "\n", encoding="utf-8")
+        return result, (f"new {result['kind']} project {result['game']} in {result['folder']}: "
+                        f"{result['functions']:,} functions, {result['units']:,} units, {result['objects']:,} target "
+                        f"objects" + (f", {result['class_headers']:,} class headers" if "class_headers" in result else "")
+                        + (f"; {result['unassigned_references']:,} referenced addresses are in no unit yet"
+                           if result["unassigned_references"] else "") + f"\nproject file: {result['manifest']}")
     if args.command == "init":
         from .onboard import init
         result = init(args.decomp, args.version, args.native, args.name, write=not args.dry_run)
