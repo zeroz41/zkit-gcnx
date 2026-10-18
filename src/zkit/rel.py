@@ -513,7 +513,8 @@ _HEADS: dict[tuple[str, int], int | None] = {}
 _SYMBOLS: dict[tuple[str, int], list] = {}
 
 
-def _cached_id(path: Path) -> int | None:
+def cached_id(path: Path) -> int | None:
+    """module_id, read once per process while the file stays the same; None for a file that is not a REL."""
     try:
         key = (str(path), path.stat().st_mtime_ns)
     except OSError:
@@ -563,7 +564,7 @@ def _module_targets(project, host: str | None) -> dict[int, str]:
     out = {}
     for name, config in project.config.get("targets", {}).items():
         if is_module(config) and config.get("host") == host:
-            found = _cached_id(project.file(config["repository"], config["original"]))
+            found = cached_id(project.file(config["repository"], config["original"]))
             if found is not None:
                 out.setdefault(found, name)
     return out
@@ -638,7 +639,7 @@ def module_files(project, target: str) -> dict[int, list[Path]]:
             paths.add(project.file(other["repository"], other["original"]))
     out: dict[int, list[Path]] = {}
     for path in sorted(paths):
-        number = _cached_id(path)
+        number = cached_id(path)
         if number is not None:
             out.setdefault(number, []).append(path)
     return out

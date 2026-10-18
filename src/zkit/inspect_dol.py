@@ -269,10 +269,19 @@ def _objdump_lines(tool: str, code: bytes, vma: int) -> list[tuple[int, str, str
 
 
 def _rel_modules(project: Project, target: str, wanted: set[int]) -> dict:
-    """{module id: rel.Module} for the wanted modules' REL files (found as the index finds them)."""
+    """{module id: rel.Module} for the wanted modules' REL files: the ones the index decoded, else found as it
+    finds them."""
+    import json
     from . import rel
-    from .index import _MODULE_NAMES
-    files = rel.module_files(project, target)
+    from .index import _MODULE_NAMES, _meta
+    known = [Path(p) for p in json.loads(_meta(connect(project), f"modfiles:{target}") or "[]")]
+    files: dict[int, list[Path]] = {}
+    for path in known:
+        number = rel.cached_id(path)
+        if number in wanted:
+            files.setdefault(number, []).append(path)
+    if not wanted <= set(files):
+        files = rel.module_files(project, target)
     out = {}
     for number in wanted:
         path = rel.pick(files.get(number, []), _MODULE_NAMES.get(number))
