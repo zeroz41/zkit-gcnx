@@ -51,6 +51,16 @@ Relative `root` paths are relative to the project file. All other paths are rela
 | `provisional_name_pattern` | Regex for auto names (default: `fn_`, `lbl_`, `FUN_`, `sub_` + address, ...). |
 | `library_categories` | objdiff progress categories whose units are SDK/runtime libraries (default `sdk`, `runtime`, `msl`). `port-plan` marks their functions `platform`; their hand-written assembly counts as its own reference. |
 | `sda_bases` | `{"r2": "0x...", "r13": "0x..."}` when `__init_registers` can't be decoded. |
+| `build` | How `zkit build` compiles the target (defaults per platform): `compiler` (GameCube: a CodeWarrior version folder under `compilers`, e.g. `GC/1.3.2`; Switch: a clang path or name), `cflags`, `extra_cflags`, `includes`, `ldflags`, `compilers`, `linker`, `wrapper` (what runs the Windows compilers outside Windows, default wibo), `objdiff_cli`, `compiler_version` (Switch: a string `clang --version` must contain), and `units`: per-unit overrides by glob. `compiler_download` (`{"url", "sha256", "folder"?, "strip"?}`) pins an archive of the compiler for `zkit build --download` to fetch, check and unpack (default folder `build/compilers/<archive name>`, one leading folder stripped). |
+
+**Downloads.** `zkit build --download` (or `zkit configure --download`) fetches only what is missing, into the
+repository's `build/` folder: the CodeWarrior bundle into `compilers`, `compiler_download`'s archive, and the
+pinned tools: objdiff-cli (`build/tools`), and for GameCube wibo (`build/tools`), GNU binutils for powerpc-eabi
+(`build/binutils`), m2c and decomp-permuter (`build/tools`, source checkouts at a pinned commit); for Switch,
+llvm-objdump and llvm-cxxfilt from a pinned LLVM release (`build/llvm`). A release is refused unless its SHA-256 is
+the pinned one, a checkout unless git resolves it to the pinned commit. A tool set here (`wrapper`, `objdiff_cli`,
+`m2c`, `permuter`, `objdump`) or already on PATH is never fetched. `build/tools/versions.json` records the
+versions fetched; a zkit that pins newer ones fetches them again.
 
 **REL modules.** REL functions have no fixed address, so they are written `module+0xOFFSET` (for example
 `mymodule+0x1D0`). zkit reads the REL files themselves: every reference a module makes is in its relocation tables,

@@ -29,6 +29,9 @@ repair on a 27,000-function decomp. A project may tighten them; it should not lo
    C++ names. Never `extern "C"` at a call site, never a C name on a C++ function.
 7. **Compiler and flags per unit.** Identify them before matching (prologue patterns, a probe on untouched seeds);
    splits and folds inherit them, and a change is kept only when every function already exact stays exact.
+   The tools come pinned from `zkit build --download`, which fetches only what the target's platform uses: never
+   LLVM for a GameCube project, never CodeWarrior, wibo or binutils for a Switch one. Never fetch a tool by hand
+   or for a platform the project does not target.
 8. **A unit owns its data.** When a unit is created it claims the data only its code references: tables, literal
    pools, strings, `.bss`. A symbol only its own unit references is local. Sizes come from types and access
    widths, never from the distance to the next label; alignment padding belongs to the gap, not to a symbol.

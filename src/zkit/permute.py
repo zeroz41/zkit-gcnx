@@ -48,8 +48,10 @@ DEP_ARGS = {"-MF", "-MT", "-MQ"}
 
 
 def find_permuter(project: Project) -> Path | None:
-    """The project file's `permuter`, $PERMUTER_DIR, or a decomp-permuter checkout beside a repository."""
+    """The project file's `permuter`, $PERMUTER_DIR, the checkout `zkit build --download` fetched, or a
+    decomp-permuter checkout beside a repository."""
     candidates = [project.config.get("permuter"), os.environ.get("PERMUTER_DIR")]
+    candidates += [str(project.root(repo) / "build/tools/decomp-permuter") for repo in project.config["repositories"]]
     candidates += [str(project.root(repo).parent / "decomp-permuter") for repo in project.config["repositories"]]
     for candidate in candidates:
         if candidate and (Path(candidate).expanduser() / "permuter.py").is_file():
@@ -398,8 +400,8 @@ def scratch(project: Project, target: str, query: str, seed: Path | None = None,
         raise ValueError("zkit permute is for GameCube targets (CodeWarrior)")
     objdump = _objdump(project)
     if objdump is None:
-        raise ValueError("No PowerPC objdump (powerpc-eabi-objdump): install GNU binutils for powerpc-eabi or set "
-                         "ZKIT_OBJDUMP")
+        raise ValueError("No PowerPC objdump (powerpc-eabi-objdump): `zkit build --download` fetches binutils, or "
+                         "set ZKIT_OBJDUMP")
     refresh(project)
     db = connect(project)
     found = bridge.resolve(project, query, target, limit=2)
@@ -458,8 +460,8 @@ def run(project: Project, target: str, data: dict, jobs: int | None = None, seco
     from .candidate import compare
     permuter = find_permuter(project)
     if permuter is None:
-        raise ValueError("decomp-permuter not found: clone github.com/simonlindholm/decomp-permuter beside the decomp, "
-                         "set $PERMUTER_DIR, or set `permuter` in the project file")
+        raise ValueError("decomp-permuter not found: `zkit build --download` fetches it (or clone it beside the decomp, "
+                         "set $PERMUTER_DIR, or set `permuter` in the project file)")
     folder = Path(data["scratch"])
     for old in folder.glob("output-*"):
         shutil.rmtree(old)

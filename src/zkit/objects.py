@@ -475,7 +475,8 @@ def disassembly(project: Project, target: str, path: Path, function: str, machin
     """The project's disassembler on one function of an object, when one is available."""
     tool = None
     if machine == "aarch64":
-        tool = shutil.which("llvm-objdump")
+        from .fetch import llvm_tool
+        tool = llvm_tool("llvm-objdump")
         args = [tool, "-d", "-r", "--no-show-raw-insn", f"--disassemble-symbols={function}", str(path)] if tool else None
     else:
         from .inspect_dol import _objdump

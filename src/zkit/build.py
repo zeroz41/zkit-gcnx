@@ -10,7 +10,8 @@ file is `build/build.ninja` (build/ is never committed) with objdiff's project f
 
 GameCube compilers are CodeWarrior's, one folder per version (`GC/2.6/mwcceppc.exe`), run through wibo (or wine)
 outside Windows; they are never fetched unless the owner asks (`--download`), and then only the standard GameCube/Wii
-compiler bundle, checked against its SHA-256. Switch units are compiled with the configured clang.
+compiler bundle, checked against its SHA-256, with the pinned tools a target lacks (fetch.py: wibo, objdiff-cli,
+binutils, m2c, decomp-permuter). Switch units are compiled with the configured clang.
 """
 
 from __future__ import annotations
@@ -25,9 +26,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
-import urllib.request
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -173,14 +171,18 @@ def wrapper(root: Path, config: dict[str, Any]) -> tuple[Path | None, bool]:
     """(program that runs Windows compilers here, whether one is needed): none on Windows, else `wrapper`."""
     if os.name == "nt" or config["platform"] != "gamecube":
         return None, False
-    return _tool(root, config.get("wrapper") or "wibo"), True
+    if config.get("wrapper") not in (None, "wibo"):
+        return _tool(root, config["wrapper"]), True
+    from .fetch import managed
+    return managed(root, "wibo") or _tool(root, "wibo"), True
 
 
 def objdiff_cli(root: Path, config: dict[str, Any]) -> Path | None:
     """`objdiff_cli` when set, else build/tools/objdiff-cli in the repository, else objdiff-cli on PATH."""
     if config.get("objdiff_cli"):
         return _tool(root, config["objdiff_cli"])
-    return _tool(root, "build/tools/objdiff-cli") or _tool(root, "objdiff-cli")
+    from .fetch import managed
+    return managed(root, "objdiff-cli") or _tool(root, "objdiff-cli")
 
 
 def has_link() -> bool:
@@ -419,7 +421,9 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
         exe, wanted = compiler(root, config)
         if exe is None:
             notes.append(f"compiler not found: {wanted}" + (" (`zkit build --download` fetches the CodeWarrior "
-                                                            "bundle)" if config["platform"] == "gamecube" else ""))
+                                                            "bundle)" if config["platform"] == "gamecube" else
+                                                            " (set build.compiler, or pin its archive in "
+                                                            "build.compiler_download for `zkit build --download`)"))
         elif config["platform"] == "switch" and config.get("compiler_version") and \
                 config["compiler_version"] not in clang_version(exe):
             raise ValueError(f"{exe} is not {config['compiler_version']!r}: it says {clang_version(exe)!r}")
@@ -431,7 +435,7 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
         if needed and run is None and "wrapper" not in found:
             found["wrapper"] = None
             notes.append(f"{config.get('wrapper') or 'wibo'} not found: it runs the Windows compilers here "
-                         "(https://github.com/decompals/wibo; set build.wrapper)")
+                         "(`zkit build --download` fetches wibo; or set build.wrapper)")
         cc = [_relative(run, root)] if run else [config.get("wrapper") or "wibo"] if needed else []
         cc.append(_relative(exe, root) if exe else str(compiler(root, config)[1]))
         flags = words(config["cflags"]) + [w for folder in includes for w in ("-i", folder)] + config["extra_cflags"]
@@ -501,32 +505,11 @@ def _link(ninja: Ninja, project: Project, name: str, target: dict[str, Any], con
 
 def download_compilers(folder: Path, url: str = COMPILERS_URL, sha256: str = COMPILERS_SHA256) -> dict[str, Any]:
     """Fetch the compiler bundle, refuse it unless its SHA-256 is the pinned one, and unpack it into folder."""
+    from .fetch import download, unzip
     folder.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256()
-    with tempfile.NamedTemporaryFile(dir=folder.parent, suffix=".zip", delete=False) as stream:
-        temporary = Path(stream.name)
-        try:
-            request = urllib.request.Request(url, headers={"User-Agent": "zkit"})
-            with urllib.request.urlopen(request, timeout=120) as response:
-                for block in iter(lambda: response.read(1 << 20), b""):
-                    digest.update(block)
-                    stream.write(block)
-        except BaseException:
-            temporary.unlink(missing_ok=True)
-            raise
+    temporary = download(url, sha256, folder.parent)
     try:
-        if digest.hexdigest() != sha256:
-            raise ValueError(f"{url} has SHA-256 {digest.hexdigest()}, not {sha256}: refusing to unpack it")
-        count = 0
-        with zipfile.ZipFile(temporary) as archive:
-            for member in archive.infolist():
-                destination = (folder / member.filename).resolve()
-                if not destination.is_relative_to(folder.resolve()):
-                    raise ValueError(f"{url}: {member.filename} would land outside {folder}")
-                archive.extract(member, folder)
-                if not member.is_dir():
-                    destination.chmod(0o755)
-                    count += 1
+        count = unzip(temporary, folder, url)
     finally:
         temporary.unlink(missing_ok=True)
     return {"url": url, "sha256": sha256, "folder": str(folder), "files": count}
@@ -550,6 +533,12 @@ def ensure_compilers(project: Project, names: list[str]) -> list[dict[str, Any]]
     return fetched
 
 
+def ensure_downloads(project: Project, names: list[str]) -> list[dict[str, Any]]:
+    """--download: the compiler bundle where a compiler is missing, then every pinned tool a target lacks."""
+    from .fetch import ensure
+    return ensure_compilers(project, names) + ensure(project, names)
+
+
 def run_ninja(root: Path, targets: list[str], jobs: int | None = None, keep_going: int | None = None,
               quiet: bool = False) -> int:
     """ninja -f build/build.ninja from the repository root (output to the terminal, or stderr when quiet)."""
@@ -566,7 +555,7 @@ def build(project: Project, repository: str | None = None, only: str | None = No
           quiet: bool = False) -> dict[str, Any]:
     """Configure, then run ninja; what was built and where each target's report and link stand."""
     names = build_targets(project, repository, only)
-    fetched = ensure_compilers(project, names) if download else []
+    fetched = ensure_downloads(project, names) if download else []
     configured = configure(project, repository, only)
     code = run_ninja(Path(configured["root"]), list(targets), jobs, keep_going, quiet)
     root = Path(configured["root"])
@@ -614,14 +603,23 @@ def health(project: Project, name: str) -> list[tuple[str, str, str, str]]:
              "install ninja (https://ninja-build.org)")]
     found, wanted = compiler(root, config)
     rows.append(("ok" if found else "warn", f"{name}: compiler", str(found or f"{wanted} missing"),
-                 "zkit build --download" if config["platform"] == "gamecube" else "set build.compiler"))
+                 "zkit build --download" if config["platform"] == "gamecube" or config.get("compiler_download")
+                 else "set build.compiler (and build.compiler_download to have `zkit build --download` fetch it)"))
     run, needed = wrapper(root, config)
     if needed:
         rows.append(("ok" if run else "warn", f"{name}: wrapper", str(run or f"{config.get('wrapper')} not found"),
-                     "install wibo (https://github.com/decompals/wibo) or set build.wrapper"))
+                     "zkit build --download   # fetches wibo; or set build.wrapper"))
     tool = objdiff_cli(root, config)
     rows.append(("ok" if tool else "warn", f"{name}: objdiff-cli", str(tool or "not found: no report"),
-                 "put objdiff-cli in build/tools/ or on PATH (https://github.com/encounter/objdiff)"))
+                 "zkit build --download   # fetches objdiff-cli; or put it on PATH"))
+    if config["platform"] == "gamecube":
+        from .asmfile import find_m2c
+        from .permute import find_permuter
+        m2c, permuter = find_m2c(project), find_permuter(project)
+        rows.append(("ok" if m2c else "warn", f"{name}: m2c", " ".join(m2c) if m2c else "not found: no seeds",
+                     "zkit build --download   # fetches m2c"))
+        rows.append(("ok" if permuter else "warn", f"{name}: decomp-permuter", str(permuter or "not found"),
+                     "zkit build --download   # fetches decomp-permuter"))
     return rows
 
 

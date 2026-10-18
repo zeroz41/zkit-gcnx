@@ -224,17 +224,18 @@ def doctor(project: Project) -> dict:
         rows += [_row(*row) for row in build_health(project, name)]
         from .platform import for_target
         if for_target(target).name == "switch":
-            tool = shutil.which("llvm-objdump") or shutil.which("aarch64-linux-gnu-objdump")
+            from .fetch import llvm_tool
+            tool = llvm_tool("llvm-objdump") or shutil.which("aarch64-linux-gnu-objdump")
             rows.append(_row("ok" if tool else "warn", "disassembly", tool or "no AArch64 disassembler",
-                             "install LLVM (llvm-objdump)"))
-            demangler = shutil.which("llvm-cxxfilt") or shutil.which("c++filt")
+                             "zkit build --download   # fetches LLVM; or install llvm-objdump"))
+            demangler = llvm_tool("llvm-cxxfilt") or shutil.which("c++filt")
             rows.append(_row("ok" if demangler else "warn", "demangler", demangler or "none: names stay mangled",
-                             "install LLVM (llvm-cxxfilt) or binutils (c++filt)"))
+                             "zkit build --download   # fetches LLVM; or install llvm-cxxfilt or c++filt"))
         else:
             from .inspect_dol import _objdump
             tool = _objdump(project)
             rows.append(_row("ok" if tool else "warn", "disassembly", tool or "none: asm shows raw words",
-                             "install GNU binutils for powerpc-eabi, or set ZKIT_OBJDUMP to a powerpc-eabi-objdump"))
+                             "zkit build --download   # fetches binutils; or set ZKIT_OBJDUMP to a powerpc-eabi-objdump"))
         from .activity import state_dir
         if not any(r.get("role") == "native" for r in project.config["repositories"].values()):
             continue
