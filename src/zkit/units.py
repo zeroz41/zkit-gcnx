@@ -307,7 +307,8 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
                     *(p for span in held for p in span)})                                       # spans two
     class_of = _function_classes(program)
     units = []
-    taken: collections.Counter = collections.Counter(u["unit"] for u in held.values())
+    reserved = {u["unit"] for u in held.values()}     # a fixed unit keeps its name in every code section
+    taken: collections.Counter = collections.Counter()
     for first, end in zip(edges, edges[1:]):
         if first >= end:
             continue
@@ -316,17 +317,17 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
         classes = collections.Counter(class_of[i] for i in span if i in class_of)
         if (first, end) in held:
             name, how = held[(first, end)]["unit"], held[(first, end)]["how"]
-            taken[name] -= 1                          # its own name, reserved above
-        elif files:
-            name, how = files.most_common(1)[0][0], "file string"
-        elif classes:
-            name, how = classes.most_common(1)[0][0] + ".cpp", "class"
         else:
-            name, how = f"unit_{text(functions[first].address)[2:]}.cpp", "placeholder"
-        taken[name] += 1
-        if taken[name] > 1:                           # one file in several pieces keeps one name per piece
-            stem, dot, ext = name.rpartition(".")
-            name = f"{stem}_{text(functions[first].address)[2:]}.{ext}"
+            if files:
+                name, how = files.most_common(1)[0][0], "file string"
+            elif classes:
+                name, how = classes.most_common(1)[0][0] + ".cpp", "class"
+            else:
+                name, how = f"unit_{text(functions[first].address)[2:]}.cpp", "placeholder"
+            taken[name] += 1
+            if taken[name] > 1 or name in reserved:   # one file in several pieces keeps one name per piece
+                stem, dot, ext = name.rpartition(".")
+                name = f"{stem}_{text(functions[first].address)[2:]}.{ext}"
         last = functions[end - 1]
         units.append({"unit": name, "named_by": how, "first": first, "end": end,
                       "section": sections[first] if sections[first].startswith(".") else ".text",
@@ -337,8 +338,11 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
     for u in units:
         for i in range(u["first"], u["end"]):
             owner[i] = u["unit"]
-    fixed_data = [(start, stop, unit["unit"], section) for unit in fixed or ()
-                  for section, start, stop in unit["ranges"] if section not in CODE_SECTIONS]
+    spans = {(functions[first].address, functions[end - 1].address + functions[end - 1].size)
+             for first, end in held}
+    fixed_data = [(start, stop, unit["unit"], section) for unit in fixed or ()   # code with no functions in it
+                  for section, start, stop in unit["ranges"]                   # (tables, entry labels) is data
+                  if section not in CODE_SECTIONS or not any(a < stop and start < b for a, b in spans)]
     firm = {unit["unit"] for unit in fixed or () if unit["how"] == "source"}
     data = _data_ownership(program, ev, owner, fixed_data, firm)
     by_unit = collections.defaultdict(list)
@@ -347,6 +351,13 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
     for u in units:
         u["data"] = [{"section": s, "start": text(a), "end": text(b), "start_key": a, "end_key": b}
                      for a, b, _, s in sorted(by_unit.get(u["unit"], []))]
+    coded = {u["unit"] for u in units}
+    for unit in fixed or ():                          # a fixed unit with no functions: its ranges only
+        rows = sorted(by_unit.get(unit["unit"], [])) if unit["unit"] not in coded else []
+        if rows:
+            units.append({"unit": unit["unit"], "named_by": unit["how"], "functions": 0, "start": text(rows[0][0]),
+                          "stop": text(rows[0][1]), "data": [{"section": s, "start": text(a), "end": text(b),
+                                                              "start_key": a, "end_key": b} for a, b, _, s in rows]})
     named = collections.Counter(u["named_by"] for u in units)
     return {"units": units, "boundaries": [{"before": text(functions[c.position].address),
                                             "window": [text(functions[c.window[0]].address),
@@ -354,7 +365,7 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
                                             "crossings": c.crossings, "because": c.because} for c in cuts],
             "names": [{"address": text(functions[i].address), "current": functions[i].name, "proposed": n}
                       for i, n in sorted(ev.names.items())],
-            "counts": {"units": len(units), "named_by": dict(named), "boundaries": len(cuts),
+            "counts": {"units": len({u["unit"] for u in units}), "named_by": dict(named), "boundaries": len(cuts),
                        "data_ranges": len(data), "data_bytes": sum(b - a for a, b, _, _ in data),
                        "functions": len(functions)},
             "limits": "Boundaries need evidence: a run with none stays one unit (the coarsest split the evidence "
@@ -602,9 +613,11 @@ def write_splits(data: dict, path: Path) -> Path:
     """The proposal as a splits.txt: one block per unit (a unit with code in two sections, `.init` and `.text`,
     is one block), code then its data."""
     blocks: dict[str, list[tuple[str, int, int]]] = {}
-    for unit in data["units"]:
+    for unit in sorted(data["units"], key=lambda u: u.get("start_key", u["data"][0]["start_key"] if u.get("data")
+                                                              else 0)):
         rows = blocks.setdefault(unit["unit"], [])
-        rows.append((unit.get("section", ".text"), unit["start_key"], unit["end_key"]))
+        if "start_key" in unit:                       # a unit with no functions has its data ranges only
+            rows.append((unit.get("section", ".text"), unit["start_key"], unit["end_key"]))
         rows += [(row["section"], row["start_key"], row["end_key"]) for row in unit.get("data", [])]
     lines = []
     for name, rows in blocks.items():

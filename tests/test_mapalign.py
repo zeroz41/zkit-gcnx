@@ -240,7 +240,7 @@ class SymbolsFileTests(unittest.TestCase):
                             "lbl_80100000 = .sdata:0x80100000; // type:object size:0x8 scope:global hidden\n"
                             "lbl_80100004 = .sdata:0x80100004; // type:object size:0x4 scope:global\n"
                             "_ctors = .ctors:0x80200000; // type:label scope:global\n", encoding="utf-8")
-            mapalign.update_symbols(path, program)
+            mapalign.update_symbols(path, program, {0x80100004})
             lines = path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(lines, [
             "localize__10KartLocaleFv = .text:0x80004000; // type:function size:0x10 scope:global align:16",
@@ -279,3 +279,29 @@ class OwnershipTests(unittest.TestCase):
         owner = {0: "chain.c", 1: "table.c", 2: "other.c", 3: "runtime.cpp"}
         rows = units._initializer_tables(program, owner)
         self.assertEqual([r[2] for r in rows if r[3] == ".dtors"], ["runtime.cpp", "runtime.cpp", "chain.c"])
+
+
+class LayoutTests(unittest.TestCase):
+    def test_two_objects_of_one_name_stay_apart_and_one_objects_sections_join(self):
+        rows = [("Lib.a main.c", 0x80004000, [("ddh_open", 0x20)]), ("Lib.a buffer.c", 0x80004020, [("read", 0x10)]),
+                ("Lib.a main.c", 0x80004030, [("gdev_open", 0x20)]), ("Lib.a sound.cpp", 0x80004050, [("a", 8)]),
+                ("Lib.a sound.cpp", 0x80004058, [("__sinit_sound_cpp", 8)])]
+        lines = ["", ".text section layout", "  Starting        Virtual", "  address  Size   address",
+                 "  -----------------------"]
+        for unit, address, symbols in rows:
+            lines.append(f"  00000000 {sum(s for _, s in symbols):06x} {address:08x}  1 .text \t{unit} ")
+            for name, size in symbols:
+                lines.append(f"  00000000 {size:06x} {address:08x}  4 {name} \t{unit} ")
+                address += size
+        lines += ["", ".data section layout", "  Starting        Virtual", "  address  Size   address",
+                  "  -----------------------", "  00000000 000004 80100000  1 .data \tLib.a main.c ",
+                  "  00000000 000004 80100000  4 gPort \tLib.a main.c ", ""]
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "game.MAP"
+            path.write_text("\n".join(lines), encoding="utf-8")
+            layout = mwmap.layout(path)
+        self.assertEqual([p.unit for p in layout.pieces[".text"]],
+                         ["Lib/main.c", "Lib/buffer.c", "Lib/main.c#2", "Lib/sound.cpp"])
+        self.assertEqual(layout.pieces[".text"][-1].size, 0x10)
+        self.assertEqual(layout.pieces[".data"][0].unit, "Lib/main.c#?")     # whose it is, the map does not say
+        self.assertEqual(mapalign.source_name("Lib/main.c#2", []), "Lib/main.c")
