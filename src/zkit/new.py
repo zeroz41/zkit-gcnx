@@ -3,9 +3,10 @@
 From a GameCube disc image (or a bare DOL) or a Switch module (NSO, or an ELF of one): the original is copied
 into `orig/<id>/` (a disc is extracted, its Yaz0 files and RARC archives unpacked), never committed; the
 project file is written with the original's SHA-1 and the platform's build settings, and registered; then zkit
-finds the functions, proposes the units with their data, writes `config/<id>/symbols.txt` and `splits.txt`, a
-header per recovered class, every unit's target object and the build files (`zkit build`), a README and zkit's
-git hooks. What is left is the decomp itself.
+finds the functions, takes units, names and sizes from a linker map on the disc wherever its build lines up with
+the original (mapalign.py), proposes the other units with their data, writes `config/<id>/symbols.txt` and
+`splits.txt`, a header per recovered class, every unit's target object and the build files (`zkit build`), a
+README and zkit's git hooks. What is left is the decomp itself.
 """
 
 from __future__ import annotations
@@ -137,15 +138,23 @@ def populate(manifest: Path, target: str) -> dict[str, Any]:
     config = project.target(target)
     root = project.root(config["repository"])
     program = Program.from_project(project, target)
+    out: dict[str, Any] = {}
+    fixed = None
+    if program.platform.name == "gamecube":         # a linker map of another build that came on the disc
+        from . import mapalign
+        chosen = mapalign.best(program, mapalign.project_maps(project, target))
+        if chosen is not None:
+            program, fixed = mapalign.apply(program, chosen[1]), mapalign.fixed(chosen[1])
+            out["map"] = {"path": str(chosen[0]), **chosen[1].stats}
     symbols = root / config["symbols"]
     write_symbols(program, symbols)
-    proposal = units.propose(program)
+    proposal = units.propose(program, fixed)
     units.write_splits(proposal, root / config["splits"])
-    out: dict[str, Any] = {"functions": len(program.functions), "data_objects": len(program.objects),
-                           "units": proposal["counts"]["units"]}
+    out.update({"functions": len(program.functions), "data_objects": len(program.objects),
+                "units": proposal["counts"]["units"]})
     paths = build.layout(target, config)
     if program.platform.name == "gamecube":
-        written = analyze.write(program, analyze.analyze(program), symbols, root / paths.dir / "analysis")
+        written = analyze.write(program, analyze.analyze(program, fixed), symbols, root / paths.dir / "analysis")
         out["class_headers"] = written["class_headers"]
     # Written after the splits and symbols, so the build's delink step starts out current.
     result = delink.delink(project, target, root / config["splits"], root / paths.obj)

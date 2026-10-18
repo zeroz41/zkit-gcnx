@@ -213,6 +213,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "copies, data one run of code uses, classes): a fresh proposal, or --check the current splits")
     c.add_argument("--check", action="store_true", help="folds, splits and data claims for the existing splits.txt")
     c.add_argument("--splits", type=Path, help="write the fresh proposal as a splits.txt")
+    c.add_argument("--map", type=Path, nargs="?", const=Path(), metavar="FILE",
+                   help="take units, names and sizes from a CodeWarrior linker map of another build of the same "
+                        "code wherever it lines up (no FILE: the maps that came with the original's disc)")
+    c.add_argument("--write", action="store_true", help="with --map: rewrite the target's splits.txt and symbols.txt")
     c.add_argument("--limit", type=int, default=30)
     c = add("delink", help="Split the original into one relocatable object per unit of a splits.txt (GameCube and "
                            "Switch): the target objects objdiff compares the compiled ones with")
@@ -448,6 +452,9 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         return result, (f"new {result['kind']} project {result['game']} in {result['folder']}: "
                         f"{result['functions']:,} functions, {result['units']:,} units, {result['objects']:,} target "
                         f"objects" + (f", {result['class_headers']:,} class headers" if "class_headers" in result else "")
+                        + (f"; from {result['map']['path']}: {result['map']['units_lined_up']:,} objects line up, "
+                           f"{result['map']['units_bounded']:,} more bounded, {result['map']['functions_named']:,} "
+                           f"functions named" if "map" in result else "")
                         + (f"; {result['unassigned_references']:,} referenced addresses are in no unit yet"
                            if result["unassigned_references"] else "") + f"\nproject file: {result['manifest']}"
                         + "".join(f"\nnote: {note}" for note in result["build"]["notes"])
@@ -698,6 +705,11 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         return data, render.discovered(data)
     if command == "units":
         from . import units
+        if args.map is not None:
+            from . import mapalign
+            data = mapalign.adopt_project(project, target, args.map.expanduser().resolve() if str(args.map) != "."
+                                          else None, args.write)
+            return data, render.map_adoption(data)
         if args.check:
             data = units.check_project(project, target, args.limit)
             return data, render.units_check(data)

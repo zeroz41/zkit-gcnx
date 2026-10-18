@@ -1305,3 +1305,25 @@ def link(data: dict) -> str:
         lines.append(f"first difference at file offset {d['offset']:#x} (address {d['address']:#010x}, unit "
                      f"{d['unit']}, {d['symbol']}): ours {d['ours']}, original {d['original']}")
     return "\n".join(lines)
+
+
+def map_adoption(data: dict[str, Any]) -> str:
+    lines = [f"{data['map']}: {data['units_lined_up']:,} objects line up with the original "
+             f"({data['units_confirmed_by_data']:,} confirmed by their data), {data['units_bounded']:,} more have "
+             f"both code edges; {data['functions_named']:,} functions named, {data['data_pieces_placed']:,} data "
+             f"pieces placed ({data['data_symbols']:,} symbols), {data['data_pieces_unplaced']:,} not placed",
+             f"units: {data['units']:,} ({', '.join(f'{v:,} by {k}' for k, v in data['named_by'].items())})"]
+    for row in data["kept_names"][:20]:
+        lines.append(f"  kept {row['kept']} at {row['address']} (the map: {row['map']})")
+    if len(data["kept_names"]) > 20:
+        lines.append(f"  ... {len(data['kept_names']) - 20} more names kept")
+    if data["units_with_source"]:
+        lines.append(f"{data['units_with_source']:,} units with a source kept as they are"
+                     + (f"; the map would name {data['map_names_in_units_with_source']:,} symbols inside them "
+                        f"(rename in the source and the symbols together)" if data["map_names_in_units_with_source"]
+                        else ""))
+    if data.get("written"):
+        lines.append("rewrote " + " and ".join(data["written"]) + "; run `zkit build` to cut the target objects again")
+    else:
+        lines.append("--write rewrites the target's splits.txt and symbols.txt")
+    return "\n".join(lines)
