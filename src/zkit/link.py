@@ -616,11 +616,19 @@ def compiled_units(project: Project, target: str, units: list[delink.Unit]) -> t
             continue
         row = rows.get(name, {})
         out[unit.name] = {"object": project.file(repository, base),
-                          "complete": bool(row.get("metadata", {}).get("complete")),
+                          "complete": bool(row.get("metadata", {}).get("complete")) or _proven(row.get("measures", {})),
                           "exact": [f["name"] for f in row.get("functions", []) if f.get("fuzzy_match_percent") == 100],
                           "sizes": {f["name"]: int(f.get("size", 0)) for f in row.get("functions", [])},
                           "code": int(row.get("measures", {}).get("total_code", 0))}
     return out, report.get("measures", {})
+
+
+def _proven(measures: dict) -> bool:
+    """The report proves the whole unit: every byte of its code and of its data matches (a unit no decomp has
+    marked complete yet, as in a project `zkit new` started)."""
+    code, data = int(measures.get("total_code", 0) or 0), int(measures.get("total_data", 0) or 0)
+    return code + data > 0 and int(measures.get("matched_code", 0) or 0) == code and \
+        int(measures.get("matched_data", 0) or 0) == data
 
 
 def _placement_align(elf: Elf, section) -> int:
