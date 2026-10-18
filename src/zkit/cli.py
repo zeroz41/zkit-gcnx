@@ -199,6 +199,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "also every exact function of the other units")
     c.add_argument("--splits", type=Path, help="default: the target's splits file")
     c.add_argument("--build", type=Path, help="the build.ninja holding the link command (default: the repository's)")
+    c = add("apply", help="Names from the build back into the symbols file: compiled symbols whose name differs from "
+                          "the target object's at the same place (renames made in the source)")
+    c.add_argument("--write", action="store_true", help="rewrite the symbols file (default: list the renames)")
+    c.add_argument("--limit", type=int, default=40)
     c = add("asmfile", help="An assembly file of original functions for a decompiler (m2c): references as symbols, "
                             "labels, and the data they read (GameCube)")
     c.add_argument("addresses", nargs="+", help="addresses or names of functions")
@@ -628,6 +632,17 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
                          args.splits.expanduser().resolve() if args.splits else None,
                          args.build.expanduser().resolve() if args.build else None)
         return data, render.link(data)
+    if command == "apply":
+        from . import apply
+        data = apply.renames(project, target)
+        lines = [f"{len(data['renames'])} renames in {data['units']} units"
+                 + (f"; {len(data['layouts_differ'])} sections whose layouts differ were left alone"
+                    if data["layouts_differ"] else "")]
+        lines += [f"  0x{r['address']:08X} {r['old']} -> {r['new']} ({r['unit']})" for r in data["renames"][:args.limit]]
+        if args.write and data["renames"]:
+            data["written"] = apply.write(project, target, data["renames"])
+            lines.append(f"rewrote {data['written']} symbols; rebuild so the target objects carry the new names")
+        return data, "\n".join(lines)
     if command in ("asmfile", "m2c"):
         from . import asmfile
         def resolve(query: str) -> int:
