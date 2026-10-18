@@ -738,6 +738,6 @@ def write_headers(project, target: str | None, folder: Path, types_include: str 
         guard = re.sub(r"\W", "_", entry.name).upper() + "_H"
         path = folder / f"{entry.name}.h"
         path.write_text("\n".join([f"#ifndef {guard}", f"#define {guard}", "", *includes, "", entry.text, "",
-                                   f"#endif"]) + "\n", encoding="utf-8")
+                                   "#endif"]) + "\n", encoding="utf-8")
         written.append(str(path))
     return {"target": target, "folder": str(folder), "headers": len(written)}
