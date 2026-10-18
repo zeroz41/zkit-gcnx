@@ -70,6 +70,7 @@ extension for its Gekko language), installed with
 | Classes against the current names | `zkit classes` |
 | A header per class, proven with the compiler | `zkit classes --headers include/classes --prove` |
 | A fresh split, symbols and headers in one folder | `zkit analyze --out fresh/` |
+| Renames made in the source, back into the symbols | `zkit apply`, `zkit apply --write` |
 | How close a split is to a reference | `zkit score fresh/ config/ --report build/report.json` |
 | Progress, and what changed since a baseline | `zkit progress`, `zkit progress --since session --check` |
 | A browsable progress page | `zkit report --out build/progress` |
