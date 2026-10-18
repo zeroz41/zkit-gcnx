@@ -93,7 +93,7 @@ def _name(db, target: str, address: int) -> str:
     return label + (f"+0x{offset:X}" if offset else "")
 
 
-def sda_bases(project: Project, target: str, dol: Dol) -> dict[int, int]:
+def sda_bases(project: Project, target: str, dol) -> dict[int, int]:
     """r2/r13 small-data bases, decoded from the original __init_registers.
 
     Manifest `sda_bases` ({"r2": "0x...", "r13": "0x..."}) overrides this."""
