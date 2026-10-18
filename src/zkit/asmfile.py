@@ -160,8 +160,8 @@ def write(project: Project, target: str, addresses: list[int]) -> str:
 
 def find_m2c(project: Project) -> list[str] | None:
     """How to run m2c: the project file's `m2c` (a command, a path to m2c.py, or an argv list such as a project's own
-    adapter `["python", "tools/m2c_runner.py", "../m2c"]`, run from the decomp root), `m2c` on PATH, or an m2c
-    checkout beside a repository (../m2c/m2c.py)."""
+    adapter `["python", "tools/m2c_runner.py", "../m2c"]`, run from the decomp root), `m2c` on PATH, the checkout
+    `zkit build --download` fetched (build/tools/m2c), or an m2c checkout beside a repository (../m2c/m2c.py)."""
     import shutil
     import sys
     configured = project.config.get("m2c")
@@ -169,6 +169,7 @@ def find_m2c(project: Project) -> list[str] | None:
         return [str(part) for part in configured]
     candidates = [configured] if configured else []
     candidates.append(shutil.which("m2c"))
+    candidates += [str(project.root(repo) / "build/tools/m2c/m2c.py") for repo in project.config["repositories"]]
     candidates += [str(project.root(repo).parent / "m2c" / "m2c.py") for repo in project.config["repositories"]]
     for candidate in candidates:
         if not candidate:
@@ -207,8 +208,9 @@ def m2c(project: Project, target: str, addresses: list[int], language: str | Non
         raise ValueError("m2c reads PowerPC (and MIPS) code, not this target's: use zkit decompile (Ghidra)")
     command = find_m2c(project)
     if command is None:
-        raise ValueError("m2c not found: set `m2c` in the project file (a command, a path to m2c.py, or the argv of "
-                         "the project's own m2c adapter), put it on PATH, or check it out beside the decomp (../m2c)")
+        raise ValueError("m2c not found: `zkit build --download` fetches it (or set `m2c` in the project file: a "
+                         "command, a path to m2c.py, or the argv of the project's own m2c adapter; put it on PATH; or "
+                         "check it out beside the decomp, ../m2c)")
     from .activity import state_dir
     folder = state_dir(project) / "m2c"
     folder.mkdir(parents=True, exist_ok=True)

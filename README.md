@@ -5,7 +5,8 @@ game file alone: it finds the functions, splits the program into units, recovers
 everything back into a byte-identical executable. It also gives AI coding agents (Claude Code,
 Codex, or any MCP agent) the evidence they need to work without guessing.
 
-It runs locally and only uses the network when you ask it to download compilers (`zkit build --download`).
+It runs locally and only uses the network when you ask it to download the compilers and tools it runs
+(`zkit build --download`), each pinned to a version and checked against its hash.
 
 ## Results
 
@@ -20,6 +21,10 @@ Twilight Princess and Animal Crossing come out about the same.
 ## Install
 
 You need [uv](https://docs.astral.sh/uv/getting-started/installation/) and git, and ninja to build projects.
+Everything else a project needs is fetched into its `build/` folder by `zkit build --download`: the CodeWarrior
+compilers, wibo, objdiff-cli, GNU binutils for PowerPC, m2c and decomp-permuter for GameCube; LLVM's disassembler
+and demangler for Switch (and the game's clang, when the project file pins its archive). A tool already on your
+PATH or set in the project file is used instead.
 
 ```sh
 uv tool install git+https://github.com/zeroz41/gc-switch-tool-zkit
@@ -29,7 +34,7 @@ Start a new decomp from your own copy of a game:
 
 ```sh
 zkit new game.iso mygame/
-cd mygame && zkit build
+cd mygame && zkit build --download
 ```
 
 Or use an existing decomp (and its port, if it has one):

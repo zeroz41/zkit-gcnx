@@ -255,16 +255,20 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--jobs", "-j", type=int, help="permuter processes with --run (default: min(16, CPUs-2))")
     c = add("configure", help="Write build/build.ninja, objdiff.json and build/compile_commands.json from the project "
                               "file's build settings (zkit build runs it)")
-    c.add_argument("--download", action="store_true", help="fetch the CodeWarrior bundle (checked against its "
-                                                           "SHA-256) when the configured compiler is missing")
+    c.add_argument("--download", action="store_true", help="fetch what is missing: the CodeWarrior bundle and the "
+                                                           "pinned tools (wibo, objdiff-cli, binutils, m2c, "
+                                                           "decomp-permuter; Switch: LLVM, the project's clang), "
+                                                           "each checked against its SHA-256 or commit")
     c = add("build", help="Build the project: target objects from the original, every unit with a source in src/, "
                           "the objdiff report, and (GameCube) the relinked executable checked against the original")
     c.add_argument("targets", nargs="*", help="ninja targets (default: everything; also objects, compile, report, "
                                               "link, or one object)")
     c.add_argument("-j", "--jobs", type=int)
     c.add_argument("-k", "--keep-going", type=int, metavar="N", help="keep going until N jobs fail (0: never stop)")
-    c.add_argument("--download", action="store_true", help="fetch the CodeWarrior bundle (checked against its "
-                                                           "SHA-256) when the configured compiler is missing")
+    c.add_argument("--download", action="store_true", help="fetch what is missing: the CodeWarrior bundle and the "
+                                                           "pinned tools (wibo, objdiff-cli, binutils, m2c, "
+                                                           "decomp-permuter; Switch: LLVM, the project's clang), "
+                                                           "each checked against its SHA-256 or commit")
     c = add("refs", help="Where a function or global is defined, declared and used in the source (any spelling)")
     c.add_argument("query", nargs="+")
     c.add_argument("--repo")
@@ -771,7 +775,7 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from . import build
         project = project.with_overlay(here, worktree) if here else project
         if command == "configure":
-            fetched = build.ensure_compilers(project, build.build_targets(project, here, args.target)) \
+            fetched = build.ensure_downloads(project, build.build_targets(project, here, args.target)) \
                 if args.download else []
             data = {**build.configure(project, here, args.target), "downloaded": fetched}
         else:

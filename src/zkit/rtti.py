@@ -110,7 +110,8 @@ def _demangle(found: dict[int, ClassInfo]) -> None:
     names = [f"_ZTS{info.mangled}" for info in found.values()]
     if not names:
         return
-    for tool in ("llvm-cxxfilt", "c++filt"):
+    from .fetch import llvm_tool
+    for tool in (llvm_tool("llvm-cxxfilt") or "llvm-cxxfilt", "c++filt"):
         try:
             result = subprocess.run([tool], input="\n".join(names), capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.SubprocessError):

@@ -148,6 +148,10 @@ The contracts (`zkit contract decomp|port`) are the rules agents follow; the ski
 - **Read-only by default.** Only `handoff`, `report`, `delink`, `link`, `analyze`, `objects --save` and
   `cache --prune` write, and only to zkit's own folders or the folder named (`link` runs the project's linker
   there). Builds, banking and emulators stay with each repo's own tools and the user's permission model.
+- **Downloads on request, pinned, per platform.** Only `--download` uses the network. Each tool is pinned to a
+  hash or commit, and a target fetches only the tools its platform runs (GameCube: CodeWarrior, wibo, binutils,
+  m2c, decomp-permuter; Switch: LLVM and the project's own clang; both: objdiff-cli). A new tool is added to the
+  platform that uses it, never to every project.
 - **Compact text first**, JSON on request (`--json`, `response_format=json`), with output budgets so an answer
   never floods an agent's context.
 - **Installed as a normal command.** `uv tool install` puts `zkit` on PATH; the plugins call it by name and the

@@ -198,7 +198,8 @@ def demangle_itanium(names: list[str]) -> list[str | None]:
     """Itanium C++ names demangled in one batch (llvm-cxxfilt or c++filt); None where nothing changes."""
     import shutil
     import subprocess
-    tool = shutil.which("llvm-cxxfilt") or shutil.which("c++filt")
+    from .fetch import llvm_tool
+    tool = llvm_tool("llvm-cxxfilt") or shutil.which("c++filt")
     if tool is None or not names:
         return [None] * len(names)
     result = subprocess.run([tool], input="\n".join(names), capture_output=True, text=True, encoding="utf-8",

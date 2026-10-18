@@ -18,7 +18,9 @@ Most later repair work came from early shortcuts. Get these right before matchin
    `zkit classes --headers include/classes --prove`.
 5. Wire objdiff: `zkit delink --objdiff objdiff.json` writes every unit's target object and the project file, the
    build writes `report.json`, `zkit report` the page.
-6. `zkit init <repo>` writes the project file with strict hygiene and quality gates; `zkit install git-hook
+6. `zkit build --download` fetches the compilers and tools the target's platform needs, pinned and hash-checked,
+   into `build/` (never committed). It never fetches another platform's tools; don't download any by hand.
+7. `zkit init <repo>` writes the project file with strict hygiene and quality gates; `zkit install git-hook
    --write <repo>` enforces commit rules and the slop gate locally.
 
 **A port** (`zkit contract port`):

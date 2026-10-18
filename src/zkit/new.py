@@ -194,11 +194,11 @@ executable is `{original}` (not in git; the project file pins its SHA-1).
     zkit build
 
 writes every unit's target object (cut from the original), compiles every unit that has a source in `src/` with
-CodeWarrior, writes `{report}` (needs objdiff-cli) and relinks the executable to check it against the original
-(when this zkit has `zkit link`). It needs ninja, wibo on Linux and macOS, and the compilers in `build/compilers`
-(`zkit build --download` fetches the usual CodeWarrior bundle and checks its hash). The compiler version and flags
-are the `build` settings of the project file (`zkit projects` shows where it is): set them to what the game was
-built with, per unit where they differ.
+CodeWarrior, writes `{report}` (with objdiff-cli) and relinks the executable to check it against the original
+(when this zkit has `zkit link`). It needs ninja; `zkit build --download` fetches the rest into `build/` (the
+CodeWarrior compilers, wibo, objdiff-cli, binutils, m2c and decomp-permuter), each checked against its pinned hash.
+The compiler version and flags are the `build` settings of the project file (`zkit projects` shows where it is):
+set them to what the game was built with, per unit where they differ.
 """ + _WORK,
     "switch": """# {game}
 
@@ -210,8 +210,10 @@ is `{original}` (not in git; the project file pins its SHA-1).
     zkit build
 
 writes every unit's target object (cut from the original), compiles every unit that has a source in `src/` with
-clang and writes `{report}` (needs objdiff-cli). It needs ninja. The clang to use and its flags are the `build`
-settings of the project file (`zkit projects` shows where it is): set them to the toolchain the game was built
-with, per unit where they differ.
+clang and writes `{report}` (with objdiff-cli). It needs ninja; `zkit build --download` fetches objdiff-cli and
+LLVM's disassembler and demangler into `build/`, each checked against its pinned hash. The clang to use and its
+flags are the `build` settings of the project file (`zkit projects` shows where it is): set them to the toolchain
+the game was built with, per unit where they differ, and pin its archive in `build.compiler_download` so
+`zkit build --download` fetches it too.
 """ + _WORK,
 }

@@ -210,9 +210,10 @@ def _disasm_elf(project: Project, target: str, address: int, size: int | None, m
     from .platform import for_target
     platform = for_target(project.target(target))
     db = connect(project)
-    tool = shutil.which("llvm-objdump") or shutil.which("aarch64-linux-gnu-objdump")
+    from .fetch import llvm_tool
+    tool = llvm_tool("llvm-objdump") or shutil.which("aarch64-linux-gnu-objdump")
     if tool is None:
-        raise ValueError("No AArch64 disassembler: install LLVM (llvm-objdump)")
+        raise ValueError("No AArch64 disassembler: `zkit build --download` fetches LLVM, or install llvm-objdump")
     row = containing(db, target, address)
     start = address if size is not None or row is None else row["address"]
     size = size or (row["size"] if row else 0x40)
