@@ -101,8 +101,8 @@ class UnitTests(unittest.TestCase):
                  unit("c.c", data=(0x1080, 0x10A0), ctors=(0x1104, 0x110C))]
         out = link.link_units(units, sections, read, names(0x1000, 0x1018, 0x10E0))
         by_name = {u.name: dict(u.ranges) for u in out}
-        self.assertEqual(by_name["gap_data_00001040"], {".data": [(0x1040, 0x1064)]})   # data, then padding
-        self.assertEqual(by_name["gap_data_000010A0"], {".data": [(0x10A0, 0x10E4)]})   # a symbol, then padding
+        self.assertEqual(by_name["gap_data_00001040"], {".data": [(0x1040, 0x1080)]})   # data, to the next unit
+        self.assertEqual(by_name["gap_data_000010A0"], {".data": [(0x10A0, 0x10E4)]})   # a symbol, then DOL padding
         self.assertEqual(by_name["c.c"][".ctors"], [(0x1104, 0x1108)])     # the terminator is the linker's
         self.assertEqual(len(out), 5)
         pair = [unit("x.c", data=(0x1000, 0x1004)), unit("y.c", data=(0x1008, 0x1100), ctors=(0x1100, 0x1108))]

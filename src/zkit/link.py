@@ -91,9 +91,10 @@ def link_units(units: list[delink.Unit], sections: list[OutputSection], read,
                symbols: delink.Symbols) -> list[delink.Unit]:
     """The splits' units cut back to what units hold (never the linker's tables), plus a unit `gap_<section>_<addr>`
     for each gap that is not padding an alignment produces (padding: zeros, no symbol there, and an alignment of at
-    most 32 reaches the next start), so that the objects tile every section. A gap unit stops where its data and
-    symbols do when padding can take it from there: the zeros ending a section are the DOL's padding, not data
-    (the linker's table of sections records each one's true size)."""
+    most 32 reaches the next start), so that the objects tile every section. A gap ending a section stops where its
+    data and symbols do when padding can take it from there: those zeros are the DOL's padding, not data (the
+    linker's table of sections records each one's true size); inside a section a gap runs to the next unit, whose
+    compiled object may align less than the gap needs."""
     out = [delink.Unit(u.name) for u in units]
     for section in sections:
         rows = sorted((start, min(end, section.content), unit) for source, unit in zip(units, out)
@@ -109,7 +110,7 @@ def link_units(units: list[delink.Unit], sections: list[OutputSection], read,
                                          bisect.bisect_left(symbols.starts, start)]
                 used = max([cursor + len(data.rstrip(b"\0"))] + [e.address + max(e.size, 1) for e in inside])
                 if used > cursor or section is sections[-1] or _padding(cursor, start) is None:
-                    stop = start if section is sections[-1] else next(
+                    stop = start if unit is not None or section is sections[-1] else next(
                         e for e in range(min(used, start), start + 1) if _padding(e, start) is not None)
                     gap = delink.Unit(f"gap_{section.name.lstrip('.')}_{cursor:08X}")
                     gap.ranges[section.name].append((cursor, stop))
@@ -296,46 +297,65 @@ def _owner_of(units: list[delink.Unit]):
 
 
 def shared_names(cuts: dict[str, delink.Cut], units: list[delink.Unit], symbols: delink.Symbols,
-                 wanted: dict[str, set[str]], defined_elsewhere: set[str]) -> tuple[dict[int, str], dict]:
-    """(global name of every address an object reaches in another unit, {unit: {label: address}} of names a unit
-    must define for others), from the delinked references and the names compiled code asks for (`wanted`: unit ->
-    names). A local symbol others reach turns global, renamed `<name>_<address>` only when its name is taken."""
+                 wanted: dict[str, set[str]], exports: dict[str, set[str]], landing: set[int]) -> tuple[dict[int, str], dict[str, dict[str, int]], set[int]]:
+    """(global name of every address an object reaches in another delinked unit, {unit: {label: address}} of names a
+    unit must define for others, addresses no object can name), from the delinked references and the names
+    compiled code asks for (`wanted`: unit -> names).
+
+    A local symbol others reach turns global as `<name>_<address>` (the spelling decomp sources already use for
+    such names, and unique), unless compiled code asks for it by another spelling. A compiled unit is reached by the
+    names its object exports (`exports`: unit -> names), either spelling; what it keeps local cannot be named, so
+    references to it keep the original's bytes. Addresses the linker names (`landing`) are its own."""
     owner = _owner_of(units)
     by_name = {e.name: e for e in symbols.entries}
     reached: dict[int, str] = {}
-    asked: set[int] = set()   # compiled code names these: they keep their names
+    asked: set[int] = set()
+    unnamed: set[int] = set()
     labels: dict[str, dict[str, int]] = collections.defaultdict(dict)
     for name, cut in cuts.items():
         for found in cut.found.values():
             for _, _, target, _ in found:
+                if target in landing:
+                    continue
                 symbol, addend = symbols.resolve(target)
                 home = owner(target - addend)
-                if home is not None and home.name != name:
-                    reached[target - addend] = symbol
+                if home is None or home.name == name:
+                    continue
+                if home.name in exports:
+                    spelled = f"{symbol}_{target - addend:08X}"
+                    if symbol not in exports[home.name] and spelled in exports[home.name]:
+                        reached[target - addend] = spelled
+                        asked.add(target - addend)
+                    elif symbol not in exports[home.name]:
+                        unnamed.add(target - addend)
+                    continue
+                reached[target - addend] = symbol
     for unit, names in wanted.items():
         for symbol in names:
             entry = by_name.get(symbol)
+            spelled = re.fullmatch(r"(.+)_([0-9A-F]{8})", symbol)
+            if entry is None and spelled and getattr(symbols.by_address.get(int(spelled[2], 16)), "name", None) == \
+                    spelled[1]:
+                entry = symbols.by_address[int(spelled[2], 16)]
+            address = entry.address if entry is not None else \
+                int(symbol[4:], 16) if re.fullmatch(r"lbl_[0-9A-F]{8}", symbol) else None
+            home = owner(address) if address is not None else None
+            if home is None or home.name == unit or home.name in exports:
+                continue
             if entry is not None:
-                if owner(entry.address) is not None and owner(entry.address).name != unit:
-                    reached[entry.address] = symbol
-                    asked.add(entry.address)
-            elif re.fullmatch(r"lbl_[0-9A-F]{8}", symbol):
-                home = owner(int(symbol[4:], 16))
-                if home is not None:
-                    labels[home.name][symbol] = int(symbol[4:], 16)
-    taken = set(defined_elsewhere) | {e.name for e in symbols.entries if not delink.internal_linkage(e.name, e.scope)}
-    counts = collections.Counter(reached.values())
+                reached[address] = symbol
+                asked.add(address)
+            else:
+                labels[home.name][symbol] = address
     names = {}
     for address, symbol in reached.items():
         entry = symbols.by_address.get(address)
         local = entry is not None and entry.name == symbol and delink.internal_linkage(entry.name, entry.scope)
-        clash = local and address not in asked and (symbol in taken or counts[symbol] > 1) and \
-            not symbol.endswith(f"{address:08X}")
-        names[address] = f"{symbol}_{address:08X}" if clash else symbol
-        home = owner(address)
-        if symbol.startswith("lbl_") and entry is None and home is not None:
-            labels[home.name][names[address]] = address
-    return names, labels
+        renamed = local and address not in asked and not symbol.endswith(f"{address:08X}")
+        names[address] = f"{symbol}_{address:08X}" if renamed else symbol
+        if symbol.startswith("lbl_") and entry is None:
+            labels[owner(address).name][names[address]] = address
+    return names, labels, unnamed
 
 
 # Alignment
@@ -537,24 +557,17 @@ def compiled_units(project: Project, target: str, units: list[delink.Unit]) -> d
     return out
 
 
-def _misfit(elf: Elf, unit: delink.Unit, read) -> str | None:
-    """Why a compiled object cannot stand in for its unit's ranges (None: it can)."""
-    held = {s.name: s for s in elf.sections if s.flags & delink.SHF_ALLOC and s.size}
-    for name in held.keys() - unit.ranges.keys():
-        return f"its compiled {name} has no range in the splits"
-    for name, ranges in unit.ranges.items():
-        start, end = ranges[0][0], ranges[-1][1]
-        if len(ranges) > 1:
-            return f"{name} has {len(ranges)} ranges"
-        size = held[name].size if name in held else 0
-        if size > end - start:
-            return f"its compiled {name} is {size:#x} bytes, the range {end - start:#x}"
-        if size < end - start and held.get(name, None) is not None and held[name].type != SHT_NOBITS and \
-                any(read(start + size, end - start - size)):
-            return f"the original's {name} has more data than the compiled object ({size:#x} of {end - start:#x})"
-        if not size and end > start:
-            return f"the compiled object has no {name}"
-    return None
+def _placement_align(elf: Elf, section) -> int:
+    """The alignment mwld places a compiled section at: its own, or its first symbol's from the `.comment` (the
+    linker lays out symbol by symbol)."""
+    comment = elf.section(".comment")
+    data = elf.data(comment) if comment else b""
+    first = min((s for s in elf.symbols if s.section == section.index and s.kind in ("func", "object")),
+                key=lambda s: s.value, default=None)
+    align = section.align
+    if first is not None and first.value == 0 and len(data) >= 0x2C + 8 * (first.index + 1):
+        align = max(align, struct.unpack_from(">I", data, 0x2C + 8 * first.index)[0])
+    return max(align, 1)
 
 
 def link(project: Project, target: str, out: Path, compiled: str = "functions", splits: Path | None = None,
@@ -583,13 +596,9 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
     for unit in units:
         source = sources.get(unit.name)
         if source and source["complete"]:
-            elf = Elf.load(source["object"])
-            reason = _misfit(elf, unit, program.read)
-            if reason is None:
-                kinds[unit.name], elves[unit.name] = "compiled", elf
-                continue
-            problems.append(f"{unit.name}: {reason}; linked from the original")
-        kinds[unit.name] = "combined" if compiled == "functions" and source and source["exact"] else "delinked"
+            kinds[unit.name], elves[unit.name] = "compiled", Elf.load(source["object"])
+        else:
+            kinds[unit.name] = "combined" if compiled == "functions" and source and source["exact"] else "delinked"
     cuts = {u.name: delink.cut_unit(image, u) for u in units if kinds[u.name] != "compiled"}
     wanted = {name: {s.name for s in elf.symbols[1:] if s.section == 0 and s.name} for name, elf in elves.items()}
     for name in (n for n, kind in kinds.items() if kind == "combined"):
@@ -598,25 +607,33 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
         functions = [s for s in elf.symbols if s.kind == "func" and s.name in exact and 0 < s.section < 0xFF00]
         wanted[name] = {elf.symbols[r.symbol].name for f in functions for r in elf.relocations(elf.sections[f.section])
                         if f.value <= r.offset < f.value + f.size and elf.symbols[r.symbol].bind != "local"}
-    elsewhere = {s.name for elf in elves.values() for s in elf.symbols if 0 < s.section < 0xFF00 and s.bind != "local"
-                 and s.kind in ("func", "object", "notype") and s.name}
-    names, labels = shared_names(cuts, units, symbols, wanted, elsewhere)
+    exports = {name: {s.name for s in elf.symbols if 0 < s.section < 0xFF00 and s.bind != "local" and s.name}
+               for name, elf in elves.items()}
+    elsewhere = set().union(*exports.values())
+    linker = LINKER_NAMES | {f"_{edge}_{s.name.lstrip('.')}{rom}" for s in sections for edge in ("f", "e")
+                             for rom in ("", "_rom")}
+    placed = {e.name: e.address for e in [*symbols.entries, *program.labels] if e.name in linker}
+    linker = {name: placed.get(name) for name in linker}
+    names, labels, unnamed = shared_names(cuts, units, symbols, wanted, exports, set(placed.values()))
     sizes, fixed = {}, {}
     for unit in units:
-        for section in unit.ranges:
+        for section, ranges in unit.ranges.items():
             key = (unit.name, section)
             if unit.name in elves:
                 held = elves[unit.name].section(section)
-                sizes[key], fixed[key] = held.size, max(held.align, 1)
+                if held is None:
+                    problems.append(f"{unit.name}: the compiled object has no {section}")
+                # what mwld lays out: up to the object's last symbol (it drops unreferenced ones past the range)
+                extent = max((s.value + s.size for s in elves[unit.name].symbols if held is not None and
+                              s.section == held.index and s.kind in ("func", "object")), default=0)
+                sizes[key] = min(extent if section not in TABLE_SECTIONS else held.size if held else 0,
+                                 ranges[-1][1] - ranges[0][0])
+                fixed[key] = _placement_align(elves[unit.name], held) if held is not None else 1
             else:
                 sizes[key] = next(s[2] if s[1] == SHT_NOBITS else len(s[2]) for s in cuts[unit.name].sections
                                   if s[0] == section)
     align, script, troubles = alignments(units, sections, sizes, fixed)
     problems += troubles
-    linker = LINKER_NAMES | {f"_{edge}_{s.name.lstrip('.')}{rom}" for s in sections for edge in ("f", "e")
-                             for rom in ("", "_rom")}
-    placed = {e.name: e.address for e in [*symbols.entries, *program.labels] if e.name in linker}
-    linker = {name: placed.get(name) for name in linker}
     address_of = {e.name: e.address for e in symbols.entries}
     address_of.update((name, address) for address, name in names.items())
     for defined in labels.values():
@@ -632,7 +649,7 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
             continue
         path = out / "obj" / f"{stem}.o"
         plan = delink.Plan(names, labels.get(unit.name, {}), linker, align.get(unit.name, {}), comment,
-                           frozenset(unit.ranges) - set(TABLE_SECTIONS))
+                           frozenset(unit.ranges) - set(TABLE_SECTIONS), frozenset(unnamed))
         delink.write_unit(image, cuts[unit.name], path, plan)
         if kinds[unit.name] == "combined":
             source = sources[unit.name]
