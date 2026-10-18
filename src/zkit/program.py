@@ -99,20 +99,25 @@ class Program:
     def from_project(cls, project, target: str) -> "Program":
         """A project target's original, its symbols file when it has one (functions and data objects), else (a
         GameCube target) what discovery finds in the original alone, else the functions zkit's index knows for it
-        (a report, a function list, or the original's own tables)."""
+        (a report, a function list, or the original's own tables). A Switch module's own data symbols fill in
+        when the symbols file names no data."""
+        from .gc import Symbol, read_symbols
         from .inspect_dol import _dol
         from .platform import for_target
         config = project.target(target)
         platform, image = for_target(config), _dol(project, target)
         if config.get("symbols") and project.file(config["repository"], config["symbols"]).is_file():
-            return cls._build(platform, image, project.file(config["repository"], config["symbols"]))
-        if platform.name == "gamecube":
+            symbols = read_symbols(project.file(config["repository"], config["symbols"]))
+        elif platform.name == "gamecube":
             return cls.from_image(platform, image)
-        from .index import connect, refresh
-        refresh(project)
-        rows = connect(project).execute("SELECT address, size, name FROM functions WHERE target=? AND size>0",
-                                        (target,)).fetchall()
-        return cls(platform, image, [Function(a, s, n) for a, s, n in rows], [])
+        else:
+            from .index import connect, refresh
+            refresh(project)
+            symbols = [Symbol(n, ".text", a, "function", s, "global") for a, s, n in connect(project).execute(
+                "SELECT address, size, name FROM functions WHERE target=? AND size>0", (target,)).fetchall()]
+        if platform.name == "switch" and not any(s.type == "object" for s in symbols):
+            symbols += _module_objects(project, target)
+        return cls.from_symbol_list(platform, image, symbols)
 
     @classmethod
     def _build(cls, platform: Platform, image, symbols_path: Path) -> "Program":
@@ -217,6 +222,16 @@ class Program:
                 if found is not None:
                     out[found].add(i)
         return out
+
+
+def _module_objects(project, target: str) -> list:
+    """Switch: the sized data symbols the module itself carries (dynamic symbols, RTTI vtables and typeinfos), in
+    the dotted sections a symbols.txt names."""
+    from .bridge import _module_symbols
+    from .gc import Symbol
+    return [Symbol(s.name, f".{s.section}", s.address, "object", s.size, s.scope)
+            for s in _module_symbols(project, target)
+            if s.type != "function" and s.size and s.section in ("rodata", "data", "bss")]
 
 
 def _named_sections(platform: Platform, image, symbols) -> list[tuple[str, int, int]]:

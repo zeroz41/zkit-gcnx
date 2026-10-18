@@ -56,6 +56,22 @@ class NewSwitchProjectTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 new.new(root / "main.elf", game, game_id="test")      # never over an existing project
 
+    def test_a_module_s_exported_data_is_in_its_symbols(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            flags = [flag for flag in FLAGS if flag != "-fvisibility=hidden"]
+            for name, text in SOURCES.items():
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *flags, str(root / name), "-o", str(root / name.replace(".cpp", ".o"))],
+                               check=True, capture_output=True)
+            subprocess.run([LLD, "-shared", "--no-relax", "--unresolved-symbols=ignore-all", "-o",
+                            str(root / "main.elf"), str(root / "a.o"), str(root / "b.o")], check=True,
+                           capture_output=True)
+            result = new.new(root / "main.elf", root / "game", game_id="data")    # its own project: its own index
+            symbols = (root / "game/config/data/symbols.txt").read_text()
+            self.assertGreater(result["data_objects"], 0)
+            self.assertRegex(symbols, r"(?m)^g_counter = \.data:0x[0-9A-F]+; // type:object size:0x4 ")
+
 
 if __name__ == "__main__":
     unittest.main()
