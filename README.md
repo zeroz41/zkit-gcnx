@@ -37,13 +37,16 @@ zkit new game.iso mygame/
 cd mygame && zkit build --download
 ```
 
-Or use an existing decomp (and its port, if it has one):
+Or use an existing decomp. Give `zkit setup` the decomp's folder, and the port's folder with `--native` if
+there is a port. The two folders can be anywhere:
 
 ```sh
-cd path/to/your-decomp
-zkit setup                          # the decomp
-zkit setup --native ../your-port    # the decomp and its port
+zkit setup ~/code/mygame-decomp                                # just the decomp
+zkit setup ~/code/mygame-decomp --native ~/ports/mygame-port   # the decomp and its port
 ```
+
+Run inside the decomp, `zkit setup` uses the current folder. To add a port later, run it again with `--native`;
+your project settings are kept.
 
 ### Connect your agent
 
