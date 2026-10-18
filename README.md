@@ -63,6 +63,7 @@ extension for its Gekko language), installed with
 | You want | Command |
 | --- | --- |
 | A new decomp from the original | `zkit new game.iso mygame/`, `zkit new main.nso mygame/` |
+| Functions, sections and data objects from a bare DOL, as a symbols.txt | `zkit discover --out symbols.txt` |
 | Target objects for every unit (and objdiff's project file) | `zkit delink --out build/target --objdiff objdiff.json` |
 | Units proposed from the original | `zkit units`, `zkit units --splits splits.txt` |
 | What is wrong with the current split | `zkit units --check` |
