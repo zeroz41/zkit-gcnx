@@ -578,34 +578,138 @@ def header_definition(project: Project, repo: str, name: str | None, demangled: 
     return None
 
 
+LIBRARY_CATEGORIES = ("sdk", "runtime", "msl")
+_LIBRARY: dict[str, tuple[str, frozenset]] = {}
+_LIBRARY_PATHS: dict[tuple, Path] = {}
+
+
+def library_units(project: Project, target: str) -> frozenset[str]:
+    """Units the original links from libraries (SDK, C runtime): objdiff.json units whose progress categories are
+    in the target's `library_categories` (default sdk, runtime, msl). A port replaces those with platform code."""
+    config = project.target(target)
+    wanted = sorted(config.get("library_categories", LIBRARY_CATEGORIES))
+    try:
+        where = (str(project.path), target, project.worktree(config["repository"]))
+        if where not in _LIBRARY_PATHS:
+            _LIBRARY_PATHS[where] = project.file(config["repository"], config.get("objdiff", "objdiff.json"))
+        path = _LIBRARY_PATHS[where]
+        stamp = f"{path.stat().st_mtime_ns}:{wanted}"
+    except (OSError, ValueError):
+        return frozenset()
+    if _LIBRARY.get(str(path), ("",))[0] != stamp:
+        try:
+            units = json.loads(path.read_text(encoding="utf-8")).get("units", [])
+        except (OSError, ValueError):
+            units = []
+        _LIBRARY[str(path)] = (stamp, frozenset(
+            u["name"] for u in units if u.get("name")
+            and set((u.get("metadata") or {}).get("progress_categories") or []) & set(wanted)))
+    return _LIBRARY[str(path)][1]
+
+
+_DEFINE = re.compile(r"^\s*#\s*(define|undef)\s+([A-Za-z_]\w*)(?:\s+(.+))?$")
+
+
+def _placeholder_macros(lines: list[str], last: int, body: str, catalog) -> list[str]:
+    """`#define NAME ((Obj_80012345 *)self)`-style macros in effect at the function (defined in the file up to
+    its last line and not #undef'd) whose expansion is address-named or casts, and which the body uses."""
+    from . import quality
+    active: dict[str, str] = {}
+    for text in lines[:last]:
+        match = _DEFINE.match(text) if "#" in text else None
+        if match and match[1] == "define":
+            active[match[2]] = match[3] or ""
+        elif match:
+            active.pop(match[2], None)
+    return [f"{name} = {expansion.strip()[:40]}" for name, expansion in active.items()
+            if re.search(rf"\b{re.escape(name)}\b", body) and any(
+                f["blocks"] and f["group"] in ("names", "types") for f in quality.findings(expansion, catalog))]
+
+
+_READY: dict[tuple, tuple] = {}
+
+
+def _file_stamp(path: Path) -> tuple:
+    try:
+        info = path.stat()
+        return info.st_mtime_ns, info.st_size
+    except OSError:
+        return ()
+
+
 def readiness(project: Project, target: str, row) -> dict[str, Any]:
+    """readiness_of(), remembered per function until its row, the file holding its definition, the manifest's
+    quality patterns or the library units change (a pass over thousands of cited functions reads them once)."""
+    repo = project.target(target)["repository"]
+    key = (str(project.path), target, row["address"])
+    stamp = (row["name"], row["demangled"], row["match"], row["provisional"], row["unit"], row["source"],
+             json.dumps(project.config["repositories"][repo].get("quality", {}), sort_keys=True),
+             project.target(target).get("library_categories"), len(library_units(project, target)))
+    cached = _READY.get(key)
+    if cached and cached[0] == stamp and all(_file_stamp(path) == when for path, when in cached[1]):
+        return cached[2]
+    result = readiness_of(project, target, row)
+    if result["definition"]:  # an unfound definition may appear in any file later: never remembered
+        try:
+            files = {project.file(repo, p) for p in {result["definition"].rsplit(":", 1)[0], row["source"]} if p}
+        except ValueError:
+            return result
+        _READY[key] = (stamp, [(path, _file_stamp(path)) for path in files], result)
+    return result
+
+
+def readiness_of(project: Project, target: str, row) -> dict[str, Any]:
     """Whether an original function's decomp is a behavior reference a port may follow yet.
 
-    Ready means byte-exact, named on evidence, and a definition whose body reads as source: no raw offsets,
-    decompiler temporaries, placeholder callees or hand-mangled calls. Anything less is the decomp being unclear,
-    and a port holds that behavior until the decomp is cleaned."""
+    Ready means byte-exact, named on evidence (its own name and class are not placeholders: no address-named
+    class, vtable-slot name or offset-named accessor), and a definition whose body reads as source: no raw
+    offsets, decompiler temporaries, placeholder callees or data, also behind a `#define` of the same file.
+    Anything less is the decomp being unclear, and a port holds that behavior until the decomp is cleaned.
+    Spelling debt that names its target in full (a hand-mangled call) is listed in `spelling` and does not hold.
+    A library function (see library_units) written as assembly is ready with reference "assembly": that
+    assembly is the original's own source."""
     from . import quality
     info = _status(row)
-    reasons = []
+    reasons, spelling, reference = [], [], None
     if not info.get("exact"):
         reasons.append("not byte-exact")
+    repo = project.target(target)["repository"]
+    catalog = quality.patterns(project, repo)
     if info.get("provisional_name"):
         reasons.append("placeholder name")
-    repo = project.target(target)["repository"]
+    else:
+        shaped = [f"{f['label'].split(' (')[0]} {f['text']}" for f in quality.findings(row["demangled"] or row["name"] or "", catalog)
+                  if f["blocks"] and f["group"] != "linkage"]
+        if shaped:
+            reasons.append("placeholder-shaped name (" + "; ".join(dict.fromkeys(shaped)) + ")")
+    library = bool(row["unit"]) and row["unit"] in library_units(project, target)
     found = source_definition(project, repo, row["source"], row["name"], row["demangled"]) \
         or header_definition(project, repo, row["name"], row["demangled"])
-    debt: list[str] = []
     if found is None:
         if info.get("exact"):
             reasons.append("definition not found in the source")
     else:
-        counts = collections.Counter(f["label"] for f in quality.findings(found["body"],
-                                                                         quality.patterns(project, repo), True))
+        reference = "source"
+        found_debt = quality.findings(found["body"], catalog)
+        blocking = [f for f in found_debt if f["blocks"]]
+        if library and blocking and {f["group"] for f in blocking} == {"asm"}:
+            reference, blocking = "assembly", []
+        counts = collections.Counter(f["label"].split(" (")[0] for f in blocking)
         debt = [f"{label} x{n}" for label, n in counts.most_common(4)]
         if debt:
             reasons.append("source still reads as decompiler output (" + ", ".join(debt) + ")")
-    return {"ready": not reasons, "reasons": reasons, "definition": f"{found.get('path', row['source'])}:{found['line']}"
-            if found else None}
+        spelling = [f"{label} x{n}" for label, n in collections.Counter(
+            f["label"].split(" (")[0] for f in found_debt if not f["blocks"] and f["key"] != "extern_c").most_common(3)]
+        try:
+            lines = _source_text(project.file(repo, found.get("path", row["source"])))[0] \
+                if reference == "source" else []
+        except ValueError:
+            lines = []
+        aliases = _placeholder_macros(lines, found["end"], quality._strip_comments(found["body"]), catalog)
+        if aliases:
+            reasons.append("a #define re-types or aliases names the body uses (" + ", ".join(aliases[:3]) + ")")
+    return {"ready": not reasons, "reasons": reasons, "spelling": spelling, "reference": reference,
+            "library": library, "definition": f"{found.get('path', row['source'])}:{found['line']}" if found else None}
 
 
 def _source_line(project: Project, repo: str, source: str | None, name: str, demangled: str | None) -> int | None:
@@ -994,25 +1098,45 @@ def _is_code(project: Project, path: str) -> bool:
     return any(path.startswith(r) for r in roots)
 
 
+PLAN_DEPTH = 4
+SHARED_CALLERS = 8  # this many original callers: one shared owner in the port, not a copy per feature
+PLAN_LEGEND = {
+    "reuse": "the port already cites it and the decomp is ready: extend that owner instead of writing a copy",
+    "reuse-unverified": "the port cites it but the decomp is not ready (reasons shown): the native semantics are "
+                        "unproven until the decomp is cleaned",
+    "decompile-first": "not byte-exact in the decomp: match it before porting what depends on it (`decompile` "
+                       "reads it meanwhile; that is not proof)",
+    "clean-first": "exact, but the decomp is not ready (reasons shown): clean and name it in the decomp, then port",
+    "shared-port": f"ready, with {SHARED_CALLERS}+ original callers: port once into a shared owner, not per feature",
+    "port": "ready in the decomp and not cited natively yet",
+    "platform": "SDK/runtime library code (the target's library_categories): the port uses its own platform "
+                "code, not a port of this",
+}
+
+
 def port_plan(project: Project, query: str, depth: int = 2, target: str | None = None,
               max_nodes: int = 80) -> dict:
-    """The original call tree under a function, joined with native coverage.
+    """The original call tree under a function, joined with native coverage and decomp readiness.
 
-    Tells an agent what to REUSE (callees the port already cites), what to
-    PORT, and what to DECOMPILE first (callees the decomp has not matched)."""
+    Tells an agent what to REUSE (callees the port already cites), what to PORT, what is decomp work first
+    (DECOMPILE-FIRST / CLEAN-FIRST) and what is PLATFORM code the port replaces."""
     target = default_target(project, target)
     refresh(project)
     db = connect(project)
     queries = split_queries(query)
     if len(queries) > 1:
-        return {"query": query, "batch": [port_plan(project, q, depth, target, max_nodes) for q in queries[:12]]}
+        return {"query": query, "batch": [port_plan(project, q, depth, target, max_nodes) for q in queries[:12]],
+                "legend": PLAN_LEGEND}
+    note = f"depth {depth} is capped at {PLAN_DEPTH}; plan a callee for deeper levels" if depth > PLAN_DEPTH else None
+    depth = max(0, min(depth, PLAN_DEPTH))
     addresses = resolve(project, query, target)
-    if len(addresses) != 1:
-        return lookup(project, query, target, fresh=False)
+    root = containing(db, target, addresses[0]) if len(addresses) == 1 else None
+    if root is None:  # ambiguous, unknown, or data: the lookup answer says which, with candidates or the symbol
+        return lookup(project, query, target, fresh=False) | {
+            "note": "port_plan needs one function; pick a candidate or use a function address"}
     native = role_repos(project, "native")
-    root = containing(db, target, addresses[0])
-    if root is None:
-        return {"query": query, "found": False}
+    from .index import platform as active_platform
+    gamecube = active_platform().name == "gamecube"
     seen, nodes, frontier = {root["address"]}, [], [(root["address"], 0, None)]
     truncated = 0
     while frontier:
@@ -1033,20 +1157,23 @@ def port_plan(project: Project, query: str, depth: int = 2, target: str | None =
                              (target, row["address"])).fetchone()[0]
         info["original_callers"] = callers
         ready = readiness(project, target, row)
-        info["ready"], info["not_ready"] = ready["ready"], ready["reasons"]
-        if info["native_files"]:
-            info["action"] = "reuse" if ready["ready"] else "reuse-unverified"
+        info.update(ready=ready["ready"], not_ready=ready["reasons"], spelling=ready["spelling"],
+                    reference=ready["reference"])
+        if ready["library"]:
+            info["action"] = "platform"
         elif not info["exact"]:
             info["action"] = "decompile-first"
+        elif info["native_files"]:
+            info["action"] = "reuse" if ready["ready"] else "reuse-unverified"
         elif not ready["ready"]:
             info["action"] = "clean-first"
-        elif callers >= 8:
+        elif callers >= SHARED_CALLERS:
             info["action"] = "shared-port"
         else:
             info["action"] = "port"
-        info["indirect_calls"] = _indirect_calls(project, target, row)
+        info["indirect_calls"] = _indirect_calls(project, target, row) if gamecube else None
         nodes.append(info)
-        if level < depth:
+        if level < depth and info["action"] != "platform":
             for (callee,) in db.execute("SELECT callee FROM calls WHERE target=? AND caller=? GROUP BY callee "
                                         "ORDER BY min(site)", (target, row["address"])):
                 child = containing(db, target, callee)
@@ -1055,21 +1182,13 @@ def port_plan(project: Project, query: str, depth: int = 2, target: str | None =
                     frontier.append((child["address"], level + 1, address))
     counts = collections.Counter(n["action"] for n in nodes)
     return {"query": query, "found": True, "root": nodes[0], "nodes": nodes, "summary": dict(counts),
-            "truncated_nodes": truncated,
-            "legend": {"reuse": "the port already cites this and the decomp is clean; extend that owner instead "
-                                "of writing a copy",
-                       "reuse-unverified": "the port implements it but the decomp is not clean yet; the native "
-                                           "semantics are unproven until it is",
-                       "decompile-first": "decomp is not exact yet: match it before porting anything that depends "
-                                          "on it (`decompile` reads it meanwhile; that is not proof)",
-                       "clean-first": "exact, but the decomp still reads as decompiler output or has a placeholder "
-                                      "name: clean and name it in the decomp, then port",
-                       "shared-port": "many original callers: port once into a shared owner, not per feature",
-                       "port": "exact in the decomp and not yet cited natively"},
-            "limits": "Direct calls only; `indirect_calls` counts bctrl sites (vtable/pointer dispatch) whose "
-                      "targets are not in the tree — read them with asm. Check `lookup` on the root for callers. "
-                      "Hold rule: port only nodes marked port, shared-port or reuse; everything else is decomp work "
-                      "first, or an explicitly unsupported boundary."}
+            "truncated_nodes": truncated, "depth": depth, **({"note": note} if note else {}),
+            "legend": PLAN_LEGEND,
+            "limits": "Direct calls only" + ("; `indirect_calls` counts bctrl sites (vtable/pointer dispatch) whose "
+                      "targets are not in the tree: read them with asm" if gamecube else "; vtable/pointer dispatch "
+                      "is not followed: read the callers' asm") + ". `lookup` on the root lists its callers. Hold "
+                      "rule: port only nodes marked port, shared-port or reuse; everything else is decomp work first, "
+                      "platform code, or an explicitly unsupported boundary."}
 
 
 _DOL_CACHE: dict[str, tuple[str, Any]] = {}
@@ -1248,10 +1367,6 @@ def _similar_paths(project: Project, repo: str, wanted: str, limit: int = 4) -> 
 # ----------------------------------------------------------------------------
 # Diff checks: catch "slightly off" integrations before they are committed.
 
-DEFINITION = re.compile(r"^(?!\s*(?:if|for|while|switch|return|else|case|do)\b)\s*(?:[\w:<>,\*&\s]+?)\s+"
-                        r"(?P<name>[A-Za-z_]\w*(?:::[~A-Za-z_]\w*)*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?\{?\s*$")
-
-
 def _git_run(root: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(root), *args],
                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
@@ -1329,14 +1444,78 @@ def _content(root: Path, rel: str, staged: bool) -> str | None:
     return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else None
 
 
+def expand_paths(root: Path, paths: list[str]) -> list[str]:
+    """Repo-relative files for paths given as files or folders (./, absolute or cwd-relative spellings too).
+    A path that does not exist is an error, not an empty answer."""
+    out, missing = [], []
+    for value in paths:
+        rel = _normalize(root, value)
+        path = root / rel
+        if path.is_dir():
+            for directory, folders, names in os.walk(path):
+                folders[:] = sorted(d for d in folders if not d.startswith(".") and d != "build")
+                out.extend((Path(directory) / name).relative_to(root).as_posix() for name in sorted(names))
+        elif path.is_file():
+            out.append(rel)
+        else:
+            missing.append(value)
+    if missing:
+        raise ValueError(f"No such file or folder in {root}: {', '.join(missing)}")
+    return list(dict.fromkeys(out))
+
+
+_DECLARATIONS: dict[str, tuple[tuple, dict[str, list[str]]]] = {}
+
+
+def _declared(header: Path) -> dict[str, list[str]]:
+    """name -> the comment block and line of every `name(` in a header (cached per file stamp)."""
+    from .cxx import comment_start
+    stamp = _file_stamp(header)
+    cached = _DECLARATIONS.get(str(header))
+    if cached and cached[0] == stamp:
+        return cached[1]
+    lines = header.read_text(encoding="utf-8", errors="replace").splitlines() if stamp else []
+    found: dict[str, list[str]] = collections.defaultdict(list)
+    for index, line in enumerate(lines):
+        for name in set(re.findall(r"~?\b([A-Za-z_]\w*)\s*\(", line)):
+            found[name].extend(lines[comment_start(lines, index):index + 1])
+    _DECLARATIONS[str(header)] = (stamp, dict(found))
+    return _DECLARATIONS[str(header)][1]
+
+
+def _companion_declarations(root: Path, rel: str, name: str) -> str:
+    """Comment blocks and lines declaring `name` (Class::method or a free function) in the source's own header
+    (X.cpp -> X.hpp/X.h): a port often cites the original at the declaration instead of the definition."""
+    method = name.rsplit("::", 1)[-1].lstrip("~")
+    stem = root / rel.rsplit(".", 1)[0]
+    return "\n".join(line for suffix in HEADER_SUFFIXES
+                     for line in _declared(Path(f"{stem}{suffix}")).get(method, []))
+
+
+CHECK_HELP = {
+    "hold-until-clean": "a citation claims the behavior follows that original, but its decomp is not ready: match "
+                        "and clean it in the decomp first (`port-plan` lists why), or mark the behavior explicitly "
+                        "unsupported; never port a guess",
+    "hold-existing": "the replaced lines already cited this not-ready original: debt, not new",
+    "citation-missing": "a new exact/equivalent-tier function with no original address: cite the original, or "
+                        "mark it with the repo's citation_exempt marker",
+    "citation-unresolved": "the address is no function or symbol of the target: a typo, a flag constant, or a "
+                           "stale address",
+    "include-boundary": "an include crosses one of the repo's architecture rules (reason shown)",
+    "constant-near-miss": "check `zkit asm` first: folded arithmetic or rounding can be the real cause; do not just "
+                          "copy the value",
+}
+
+
 def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | None = None,
           target: str | None = None, staged: bool = False) -> dict:
     """Lint the working-tree change of one repository against its contract rules.
 
-    Rules come from the repository's manifest `checks` block, so another
-    project configures its own. Only added/changed lines are judged; a violation
-    that the same hunk already had before the edit is reported as debt, not an error."""
-    target = default_target(project, target)
+    Rules come from the repository's manifest `checks` block (and `architecture` rules, `quality` for a
+    decomp), so another project configures its own. Only added/changed lines are judged (all lines of files given
+    as paths); a violation that the same hunk already had before the edit is reported as debt, not an error.
+    Without a target (no original configured) citations are not judged."""
+    target = default_target(project, target) if project.config.get("targets") else None
     refresh(project, [repo])
     db = connect(project)
     root = project.root(repo)
@@ -1349,7 +1528,7 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
         changed = {p: (None if h is None else set().union(*[x[0] for x in h]) if h else set()) for p, h in hunks.items()}
     else:
         hunks = {}
-        changed = {_normalize(root, p): None for p in paths}
+        changed = {rel: None for rel in expand_paths(root, paths)}
     texts = {rel: _content(root, rel, staged) for rel in changed}
     scope = [re.compile(x) for x in rules.get("source_globs", [r"^src/.*\.(cpp|hpp|h|cc)$"])]
     forbidden = [(re.compile(r["pattern"]), r["message"], re.compile(r.get("paths", ".*")))
@@ -1357,8 +1536,23 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
     findings = []
     stats = collections.Counter()
     from .tiers import tier_of
+    native = config.get("role") == "native"
     hold = rules.get("hold_rule", "error")  # citing decomp that is not ready: error, warning or off
     ready_cache: dict[int, dict] = {}
+    found_cache: dict[int, Any] = {}
+
+    def function_at(value: int):
+        if value not in found_cache:
+            found_cache[value] = containing(db, target, value)
+        return found_cache[value]
+
+    def resolves(value: int) -> bool:
+        return function_at(value) is not None or _symbol_lookup(project, target, value) is not None
+
+    def cited_functions(lines: list[str]) -> set[int]:
+        return {row["address"] for text in lines for m in address.finditer(text)
+                for row in [function_at(active_platform().cite_value(m.group(1)))] if row}
+
     decomp_gate = None
     if config.get("role") == "decomp":
         from . import quality
@@ -1385,8 +1579,8 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
                     findings.append({"severity": "info" if old else decomp_gate, "rule": "decomp-debt" if old
                                      else "decomp-debt-added", "ref": f"{rel}:{number}",
                                      "message": ("carried over from the replaced lines: " if old else "adds ")
-                                     + found["label"] + f": {found['text']}"})
-        tier = tier_of(project, repo, rel) if config.get("role") == "native" else "exact"
+                                     + found["label"], "line": found["text"]})
+        tier = tier_of(project, repo, rel) if native else "exact"
         wanted = (lambda n: True) if added is None else (lambda n, a=added: n in a)
         removed_by_line: dict[int, list[str]] = {}
         for lines_added, removed in (hunks.get(rel) or []):
@@ -1403,172 +1597,210 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
                                      "rule": "forbidden-existing" if debt else "forbidden", "ref": f"{rel}:{number}",
                                      "message": ("pre-existing violation on an edited line (debt, not new): "
                                                  if debt else "") + message, "line": line.strip()[:160]})
-        if not any(s.search(rel) for s in scope):
+        if not any(s.search(rel) for s in scope) or target is None:
             continue
         stats["files"] += 1
+        replaced: dict[int, set[int]] = {}  # id(removed lines) -> functions they cited
         for number, line in enumerate(text_lines, 1):
             if not wanted(number):
                 continue
             for match in address.finditer(line):
                 value = active_platform().cite_value(match.group(1))
                 stats["citations"] += 1
-                row = containing(db, target, value)
+                row = function_at(value)
                 if row is None:
                     if _symbol_lookup(project, target, value) is None and rules.get("resolve_citations", True):
                         findings.append({"severity": "warning", "rule": "citation-unresolved",
                                          "ref": f"{rel}:{number}", "address": address_text(value),
-                                         "message": "Address is not a function or symbol in the target; typo, "
-                                                    "flag constant, or stale address?"})
+                                         "message": "not a function or symbol of the target"})
                     continue
                 info = _status(row)
-                if config.get("role") == "native" and hold != "off" and tier in ("exact", "equivalent"):
+                if native and hold != "off":  # every tier: a citation claims behavior follows that original
                     if row["address"] not in ready_cache:
                         ready_cache[row["address"]] = readiness(project, target, row)
                     ready = ready_cache[row["address"]]
                     if not ready["ready"]:
-                        stats["not_ready_citations"] += 1
-                        findings.append({"severity": hold, "rule": "hold-until-clean", "ref": f"{rel}:{number}",
-                                         "address": info["address"], "name": info["name"],
-                                         "message": "the decomp of this function is not ready ("
-                                                    + "; ".join(ready["reasons"]) + "). Match and clean it in the "
-                                                    "decomp first, or leave the behavior explicitly unsupported; "
-                                                    "never port a guess."})
+                        removed = removed_by_line.get(number, [])
+                        if id(removed) not in replaced:
+                            replaced[id(removed)] = cited_functions(removed)
+                        carried = row["address"] in replaced[id(removed)]
+                        stats["hold_existing" if carried else "not_ready_citations"] += 1
+                        findings.append({"severity": "info" if carried else hold,
+                                         "rule": "hold-existing" if carried else "hold-until-clean",
+                                         "ref": f"{rel}:{number}", "address": info["address"],
+                                         "name": info["demangled"] or info["name"],
+                                         "message": "decomp not ready: " + "; ".join(ready["reasons"])})
                 elif not info["exact"]:
                     findings.append({"severity": "info", "rule": "citation-unmatched", "ref": f"{rel}:{number}",
-                                     "address": info["address"], "name": info["name"],
-                                     "message": f"Cited decomp function is {status_word(info)}; its semantics "
-                                                "are unverified."})
+                                     "address": info["address"], "name": info["demangled"] or info["name"],
+                                     "message": f"cited decomp function is {status_word(info)}; its semantics "
+                                                "are unverified"})
                 if match.group(0).lower().startswith("0x") and rules.get("bare_citations"):
                     findings.append({"severity": "warning", "rule": "citation-format", "ref": f"{rel}:{number}",
                                      "message": rules["bare_citations"]})
-        if rules.get("require_citation") and rel.endswith((".cpp", ".cc")):
-            for number, line in enumerate(text_lines, 1):
-                if not wanted(number):
-                    continue
-                definition = DEFINITION.match(line)
-                if not definition or line.startswith((" ", "\t")):
+        if rules.get("require_citation") and rel.endswith((".cpp", ".cc", ".cxx", ".c")):
+            from .cxx import comment_start, definitions
+            exempt = rules.get("citation_exempt")
+            for definition in definitions(texts[rel]):
+                if not any(wanted(n + 1) for n in range(definition.start, definition.open + 1)):
                     continue
                 stats["new_definitions"] += 1
                 if tier not in ("exact", "equivalent"):
                     continue  # liberty/infrastructure code has no original to cite
-                end = number
-                while end < len(text_lines) and not text_lines[end].startswith("}"):
-                    end += 1
-                if end - number < rules.get("citation_min_lines", 6):
+                if definition.end - definition.line < rules.get("citation_min_lines", 6):
                     continue  # trivial accessors/constructors need no citation of their own
-                # The function's own comment block (directly above it) and its body.
-                lo = number - 1
-                while lo > 0 and text_lines[lo - 1].strip().startswith(("//", "/*", "*", "template", "[[")):
-                    lo -= 1
-                nearby = "\n".join(text_lines[lo:min(len(text_lines), end + 1)])
-                exempt = rules.get("citation_exempt", "INTENTIONAL-DIVERGENCE|NATIVE:")
-                if not address.search(nearby) and not re.search(exempt, nearby):
+                nearby = "\n".join(text_lines[comment_start(text_lines, definition.start):definition.end + 1])
+                nearby += "\n" + _companion_declarations(root, rel, definition.name)
+                cited = any(resolves(active_platform().cite_value(m.group(1))) for m in address.finditer(nearby))
+                if not cited and not (exempt and re.search(exempt, nearby)):
                     findings.append({"severity": "warning" if tier == "exact" else "info",
-                                     "rule": "citation-missing", "ref": f"{rel}:{number}",
-                                     "name": definition["name"],
-                                     "message": f"New {tier}-tier function with no original address. Cite the "
-                                                "original, or mark it as a native-only addition."})
-    if config.get("role") == "native" and project.config.get("targets"):
-        from .fidelity import constant_audit
-        scoped = {rel: added for rel, added in changed.items() if any(g.search(rel) for g in scope)}
-        try:
-            audit = constant_audit(project, repo, None, target, only_lines=scoped)["findings"] if scoped else []
-        except (OSError, ValueError) as error:  # e.g. no original DOL on this machine: lint the rest anyway
-            audit = []
-            findings.append({"severity": "info", "rule": "constants-skipped", "ref": repo,
-                             "message": f"Constant audit unavailable: {error}"})
-        for f in audit:
-            if f["tier"] not in ("exact", "equivalent"):
-                continue
-            if f["kind"] == "near":
-                stats["near_constants"] += 1
-                findings.append({"severity": f["severity"], "rule": "constant-near-miss", "ref": f["ref"],
-                                 "message": f"{f['value']} is within 2% of original constant(s) {f['near']} the "
-                                            "cited code loads. Check `zkit asm` first: folded arithmetic (two "
-                                            "adds) or rounding can be the real cause; do not just copy the value."})
-            elif f["kind"] == "folded":
-                stats["folded_constants"] += 1
-                findings.append({"severity": "warning", "rule": "constant-folded", "ref": f["ref"],
-                                 "message": f"{f['value']} equals {f['folded']} of original constants loaded "
-                                            "separately: the original does the operations one by one (float "
-                                            "rounding differs). Keep them as separate operations."})
-            elif f["tier"] == "exact":
-                stats["unsourced_constants"] += 1
-                findings.append({"severity": "info", "rule": "constant-unsourced", "ref": f["ref"],
-                                 "message": f"{f['value']} is not loaded by any cited original: cite the "
-                                            "function/data it comes from, or mark it native."})
+                                     "rule": "citation-missing", "ref": f"{rel}:{definition.line + 1}",
+                                     "name": definition.name,
+                                     "message": f"new {tier}-tier function with no original address"})
+    if native and config.get("architecture", {}).get("rules"):
+        findings += _include_findings(project, repo, changed, hunks, texts, stats)
+    if native and target is not None:
+        findings += _constant_findings(project, repo, changed, scope, target, stats)
     order = {"error": 0, "warning": 1, "info": 2}
-    findings.sort(key=lambda f: (order[f["severity"]], f["ref"]))
+    findings.sort(key=lambda f: (order[f["severity"]], f["rule"], f.get("address", ""), f["ref"]))
     return {"repo": repo, "base": base, "worktree": project.worktree(repo), "stats": dict(stats),
-            "findings": findings, "ok": not any(f["severity"] == "error" for f in findings)}
+            "findings": findings, "ok": not any(f["severity"] == "error" for f in findings),
+            "help": {rule: CHECK_HELP[rule] for rule in dict.fromkeys(f["rule"] for f in findings) if rule in CHECK_HELP}}
+
+
+def _include_findings(project: Project, repo: str, changed: dict, hunks: dict, texts: dict, stats) -> list[dict]:
+    """Architecture include rules on the changed lines; an include the replaced lines already had is debt."""
+    from .architecture import audit
+    files = [rel for rel, text in texts.items() if text is not None]
+    if not files:
+        return []
+    result = audit(project, repo, files)
+    out = []
+    for finding in result["findings"]:
+        rel, _, number = finding["reference"].removeprefix(f"{repo}:").rpartition(":")
+        added = changed.get(rel)
+        if added is not None and int(number) not in added:
+            continue
+        removed = next((r for lines, r in (hunks.get(rel) or []) if int(number) in lines), [])
+        carried = any(finding["include"] in old and "include" in old for old in removed)
+        stats["include_debt" if carried else "include_violations"] += 1
+        out.append({"severity": "info" if carried else "error",
+                    "rule": "include-boundary-existing" if carried else "include-boundary",
+                    "ref": f"{rel}:{number}", "name": finding["rule"],
+                    "message": f"#include {finding['include']}: {finding['reason']}", "line": finding["include"]})
+    return out
+
+
+def _constant_findings(project: Project, repo: str, changed: dict, scope: list, target: str, stats) -> list[dict]:
+    from .fidelity import constant_audit
+    from .index import platform as active_platform
+    scoped = {rel: added for rel, added in changed.items() if any(g.search(rel) for g in scope)}
+    if not scoped:
+        return []
+    if active_platform().name != "gamecube":
+        return [{"severity": "info", "rule": "constants-skipped", "ref": repo,
+                 "message": "the constant audit decodes PowerPC loads; it does not run for this platform"}]
+    try:
+        audit = constant_audit(project, repo, None, target, only_lines=scoped)["findings"]
+    except (OSError, ValueError) as error:  # e.g. no original DOL on this machine: lint the rest anyway
+        return [{"severity": "info", "rule": "constants-skipped", "ref": repo,
+                 "message": f"constant audit unavailable: {error}"}]
+    out = []
+    for f in audit:
+        if f["tier"] not in ("exact", "equivalent"):
+            continue
+        if f["kind"] == "near":
+            stats["near_constants"] += 1
+            out.append({"severity": f["severity"], "rule": "constant-near-miss", "ref": f["ref"],
+                        "message": f"{f['value']} is within 2% of original constant(s) {f['near']} the cited code "
+                                   "loads", "line": f["line"]})
+        elif f["kind"] == "folded":
+            stats["folded_constants"] += 1
+            out.append({"severity": "warning", "rule": "constant-folded", "ref": f["ref"],
+                        "message": f"{f['value']} equals {f['folded']} of constants the cited code loads separately: "
+                                   "if the original computes it at run time, keep the operations (float rounding "
+                                   "differs)", "line": f["line"]})
+        elif f["tier"] == "exact":
+            stats["unsourced_constants"] += 1
+            out.append({"severity": "info", "rule": "constant-unsourced", "ref": f["ref"],
+                        "message": f"{f['value']} is not loaded by any cited original: cite the function/data it "
+                                   "comes from, or mark it native", "line": f["line"]})
+    return out
 
 
 # ----------------------------------------------------------------------------
 # Reuse: find what already exists before writing another copy.
 
-FREE_FUNCTION = re.compile(r"^(?:static\s+|inline\s+|constexpr\s+|\[\[nodiscard\]\]\s+)*"
-                           r"(?:[\w:<>]+[\s\*&]+)(?P<name>[a-z_]\w*)\s*\((?P<args>[^;{}]*)\)\s*(?:noexcept\s*)?\{")
+def variant_terms(project: Project, variants: str | None, terms: str | list[str] | None) -> list[str] | None:
+    """Sibling names for reuse: explicit terms (comma separated), or a manifest `variants` group by name."""
+    if terms:
+        return [t.strip() for t in (terms.split(",") if isinstance(terms, str) else terms) if t.strip()]
+    if not variants:
+        return None
+    groups = project.config.get("variants", {})
+    if variants not in groups:
+        raise ValueError(f"No variant group {variants!r} in the manifest; configured: {', '.join(groups) or 'none'} "
+                         "(or pass terms)")
+    return groups[variants]
 
 
 def reuse(project: Project, repo: str, terms: list[str] | None = None, min_files: int = 3, limit: int = 25) -> dict:
     """Two views of missing sharing in one repository.
 
-    duplicates: the same small helper (name + normalized body) defined in
-      several files, which should be one shared function.
-    enumerations: files that name several sibling variants together (for
-      example enemy families). These are the central dispatch sites a new
-      variant must edit; a growing list means the variant is not data-driven.
+    duplicates: the same small free function (name + body without comments) defined in several files, which
+      should be one shared function; the same body over different parameter types is a template or interface
+      candidate instead.
+    enumerations: files that name several sibling variants together (for example enemy families). These are
+      the central dispatch sites a new variant must edit; a growing list means the variant is not data-driven.
     """
+    from .cxx import definitions
     refresh(project, [repo])
     root = project.root(repo)
     config = project.config["repositories"][repo]
     globs = [re.compile(x) for x in config.get("checks", {}).get("source_globs", [r"^src/.*\.(cpp|hpp|h|cc)$"])]
-    defs: dict[tuple[str, str], list[str]] = collections.defaultdict(list)
+    defs: dict[tuple[str, str], list[tuple[str, str]]] = collections.defaultdict(list)
     by_name: dict[str, set[str]] = collections.defaultdict(set)
     sites = []
     term_res = [(t, re.compile(rf"\b{re.escape(t)}", re.I)) for t in (terms or [])]
+    needed = min(len(term_res), 3)  # files naming this many of the variants (all of them when fewer than 3)
     db = connect(project)
     files = [r[0] for r in db.execute("SELECT path FROM files WHERE repo=?", (repo,))]
-    for rel in files:
+    for rel in sorted(files):
         if not any(g.search(rel) for g in globs):
             continue
-        path = root / rel
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            text = (root / rel).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         if term_res:
             hit = sorted({t for t, r in term_res if r.search(text)})
-            if len(hit) >= max(2, min(len(term_res), 3)):
+            if len(hit) >= needed:
                 sites.append({"path": rel, "variants": hit, "count": len(hit)})
-        lines = text.splitlines()
-        for i, line in enumerate(lines):
-            match = FREE_FUNCTION.match(line)
-            if not match or match["name"] in ("main", "operator"):
+        for definition in definitions(text):
+            if definition.in_class or "::" in definition.name or definition.name in ("main",) \
+                    or definition.name.startswith("operator") or definition.end - definition.line > 40:
                 continue
-            depth, body = 0, []
-            for j in range(i, min(i + 40, len(lines))):
-                depth += lines[j].count("{") - lines[j].count("}")
-                body.append(lines[j])
-                if depth <= 0 and j > i or (depth == 0 and "}" in lines[j]):
-                    break
-            if depth > 0:
-                continue
-            normalized = re.sub(r"\s+", " ", re.sub(r"//.*", "", " ".join(body[1:]))).strip()
-            defs[(match["name"], normalized)].append(f"{rel}:{i + 1}")
-            by_name[match["name"]].add(rel)
-    duplicates = [{"name": name, "copies": len(places), "places": places[:8]}
-                  for (name, _), places in defs.items() if len({p.rsplit(':', 1)[0] for p in places}) >= min_files]
-    duplicates.sort(key=lambda d: -d["copies"])
+            defs[(definition.name, definition.body)].append((f"{rel}:{definition.line + 1}", definition.params))
+            by_name[definition.name].add(rel)
+    duplicates = []
+    for (name, _), places in defs.items():
+        if len({p.rsplit(":", 1)[0] for p, _ in places}) < min_files:
+            continue
+        types = {params for _, params in places}
+        duplicates.append({"name": name, "copies": len(places), "places": [p for p, _ in places][:8],
+                           "kind": "identical" if len(types) == 1 else "same body, different parameter types",
+                           "signatures": sorted(types)[:4]})
+    duplicates.sort(key=lambda d: (-d["copies"], d["name"]))
     same_name = [{"name": n, "files": len(f), "examples": sorted(f)[:5]}
                  for n, f in by_name.items() if len(f) >= min_files + 2]
-    same_name.sort(key=lambda d: -d["files"])
+    same_name.sort(key=lambda d: (-d["files"], d["name"]))
     sites.sort(key=lambda s: (-s["count"], s["path"]))
     return {"repo": repo, "identical_helpers": duplicates[:limit],
             "same_name_helpers": same_name[:limit],
-            "enumeration_sites": {"terms": terms or [], "files": len(sites), "rows": sites[:limit]},
-            "limits": "Textual: identical normalized bodies of free functions up to 40 lines, and files naming "
-                      "several variants. It finds candidates for sharing, not proof that sharing is correct."}
+            "enumeration_sites": {"terms": terms or [], "needed": needed, "files": len(sites), "rows": sites[:limit]},
+            "limits": "Textual: free functions up to 40 lines with the same name and body (comments and spacing "
+                      "ignored), and files naming several variants. Candidates for sharing, not proof that sharing "
+                      "is correct; a family boundary the design documents is a reason to keep copies."}
 
 
 # ----------------------------------------------------------------------------

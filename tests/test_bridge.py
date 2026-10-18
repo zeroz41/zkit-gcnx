@@ -166,7 +166,7 @@ class BridgeTests(unittest.TestCase):
         from zkit.bridge import demand, port_plan
         plan = port_plan(self.project, "0x80003000", depth=1)
         actions = {n["address"]: n["action"] for n in plan["nodes"]}
-        self.assertEqual(actions, {"0x80003000": "reuse", "0x80003010": "reuse-unverified", "0x80003020": "reuse-unverified"})
+        self.assertEqual(actions, {"0x80003000": "reuse", "0x80003010": "reuse-unverified", "0x80003020": "decompile-first"})
         self.assertIn("placeholder name", next(n for n in plan["nodes"] if n["address"] == "0x80003010")["not_ready"])
         rows = {r["address"]: r["need"] for r in demand(self.project)["rows"]}
         self.assertEqual(rows["0x80003020"], ["match", "name"])
@@ -245,7 +245,8 @@ class BridgeTests(unittest.TestCase):
 
 
     def test_native_impact_and_grounding(self):
-        from zkit.native import grounding, impact
+        from zkit.fidelity import grounding
+        from zkit.native import impact
         build = self.native / "build"
         build.mkdir()
         self.write_native("src/actors/Locomotion.hpp", "// 80003010\nfloat step();\n")
@@ -277,8 +278,8 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(data["groups"]["near"], {"unit": ["wolf"]})  # "other" shares the binary, not the code
         self.assertIn("-R '^(loco)$'", data["commands"]["direct/reference"])
         ground = grounding(project, "native", ["src/actors"])
-        self.assertEqual(ground["total"]["exact"], 3)  # Enemy.cpp, Other.cpp, Locomotion.hpp
-        self.assertEqual(ground["weakest_files"][0]["path"], "src/actors/Other.cpp")
+        self.assertEqual((ground["total"]["functions"], ground["total"]["exact"]), (3, 2))  # 80003020 is unmatched
+        self.assertEqual(ground["rows"][0]["path"], "src/actors/Other.cpp")
 
     def test_dol_inside_disc_image(self):
         from zkit.gc import Dol
@@ -312,7 +313,7 @@ class BridgeTests(unittest.TestCase):
         audit = fidelity.constant_audit(self.project, "native", ["src/actors/Tuning.cpp"])
         self.assertEqual({f["kind"]: f["value"] for f in audit["findings"]}, {"near": 1.49, "unsourced": 7.25})
         self.assertEqual(audit["counts"]["verified"], 1)
-        ranked = {r["path"]: r for r in fidelity.suspects(self.project, "native")["rows"]}
+        ranked = {r["path"]: r for r in fidelity.grounding(self.project, "native")["rows"]}
         self.assertTrue(any("decompile-first" in a for a in ranked["src/actors/Other.cpp"]["actions"]))
         self.assertEqual(ranked["src/actors/Tuning.cpp"]["near_constants"], 1)
 

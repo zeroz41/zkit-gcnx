@@ -96,9 +96,10 @@ def brief(data: dict, compact: bool = False) -> str:
                        + " files — EXACT unless listed otherwise (`zkit tiers`)")
         ground = repo.get("grounding")
         if ground:
-            weak = ", ".join(f"{w['folder']} {w['exact_pct']}%" for w in ground["weakest"])
-            out.append(f"- grounding: cited originals {ground['total'].get('exact_pct')}% exact in the decomp; "
-                       f"weakest: {weak} (`zkit grounding`)")
+            weak = ", ".join(f"{w['folder']} {w['ready_pct']}%" for w in ground["weakest"])
+            out.append(f"- grounding: cited originals {ground['total'].get('ready_pct')}% ready references "
+                       f"({ground['total'].get('exact_pct')}% byte-exact) in the decomp; least ready: {weak} "
+                       "(`zkit grounding`)")
         if repo.get("drift"):
             d = repo["drift"]
             out.append(f"- decomp drift: {d['changed']} cited function(s) changed since {d['since']}; re-verify "
@@ -174,8 +175,8 @@ def _brief_compact(data: dict) -> str:
                                                          f" (yield {own})" if own else ""))
         if repo.get("grounding"):
             g = repo["grounding"]
-            out.append(f"- grounding: cited originals {g['total'].get('exact_pct')}% exact; weakest "
-                       + ", ".join(f"{w['folder']} {w['exact_pct']}%" for w in g["weakest"][:3]))
+            out.append(f"- grounding: cited originals {g['total'].get('ready_pct')}% ready, {g['total'].get('exact_pct')}% "
+                       "exact; least ready " + ", ".join(f"{w['folder']} {w['ready_pct']}%" for w in g["weakest"][:3]))
         if repo.get("drift"):
             out.append(f"- decomp drift: {repo['drift']['changed']} cited function(s) to re-verify (`zkit drift`)")
         if repo.get("required_reading"):
@@ -321,25 +322,39 @@ def lookup(data: dict) -> str:
     return "\n".join(out)
 
 
-def port_plan(data: dict) -> str:
+def port_plan(data: dict, legend: bool = True) -> str:
     if data.get("batch") is not None:
-        return "\n\n".join(port_plan(item) for item in data["batch"])
+        parts = [port_plan(item, legend=False) for item in data["batch"]]
+        limits = next((item["limits"] for item in data["batch"] if item.get("limits")), None)
+        return "\n\n".join(parts + [_plan_legend(data["legend"], limits)])
     if not data.get("nodes"):
-        return lookup(data)
+        return lookup(data) + (f"\n{data['note']}" if data.get("note") else "")
     root = dict(data["root"], native_files=None)
-    out = [f"port plan for {_fn(root)} — " + ", ".join(f"{k}:{v}" for k, v in data["summary"].items())]
+    out = [f"port plan for {_fn(root)}, depth {data.get('depth')}: "
+           + ", ".join(f"{k} {v}" for k, v in data["summary"].items())]
+    if data.get("note"):
+        out.append(data["note"])
     for node in data["nodes"]:
         indent = "  " * node["depth"]
         files = f" -> {', '.join(node['native_files'][:3])}" if node["native_files"] else ""
         if node.get("native_docs"):
-            files += f" (docs:{node['native_docs']})"
+            files += f" (+{node['native_docs']} doc/test file(s) cite it)"
         indirect = f", {node['indirect_calls']} bctrl" if node.get("indirect_calls") else ""
+        reference = ", reference: original assembly" if node.get("reference") == "assembly" else ""
         out.append(f"{indent}[{node['action']}] {node['address']} {node.get('demangled') or node['name']} "
-                   f"({status_word(node)}, {node['original_callers']} callers{indirect}){files}")
+                   f"({status_word(node)}, {node['original_callers']} callers{indirect}{reference}){files}")
+        reasons = [r for r in node.get("not_ready") or [] if r != "not byte-exact"]
+        if reasons and node["action"] != "platform":
+            out.append(f"{indent}    not ready: " + "; ".join(reasons)[:300])
     if data.get("truncated_nodes"):
         out.append(f"... {data['truncated_nodes']} more nodes not expanded (lower depth or plan a callee)")
-    out.append("legend: " + "; ".join(f"{k} = {v}" for k, v in data["legend"].items()))
+    if legend:
+        out.append(_plan_legend(data["legend"], data.get("limits")))
     return "\n".join(out)
+
+
+def _plan_legend(legend: dict, limits: str | None = None) -> str:
+    return "legend: " + "; ".join(f"{k} = {v}" for k, v in legend.items()) + (f"\nlimits: {limits}" if limits else "")
 
 
 def demand(data: dict) -> str:
@@ -364,30 +379,53 @@ def search(data: dict) -> str:
                                  "symbol names use `names --regex`)")
 
 
-def check(data: dict) -> str:
+def check(data: dict, groups_shown: int = 40, refs_shown: int = 12) -> str:
+    """Findings grouped by rule, original and message: the reason is printed once, then where it occurs."""
     out = [f"check {data['repo']} vs {data['base']}: " + ", ".join(f"{k}={v}" for k, v in data["stats"].items())
            + (" — OK" if data["ok"] else " — ERRORS")]
-    for f in data["findings"][:60]:
-        detail = f" {f.get('address', '')} {f.get('name', '')}".rstrip()
-        out.append(f"{f['severity']:<7} {f['rule']:<20} {f['ref']}{detail}: {f['message']}")
-    if len(data["findings"]) > 60:
-        out.append(f"... {len(data['findings']) - 60} more (use --json)")
+    groups: dict[tuple, list[dict]] = {}
+    for f in data["findings"]:
+        groups.setdefault((f["severity"], f["rule"], f.get("address", ""), f.get("name", ""), f["message"]), []).append(f)
+    for (severity, rule, address, name, message), items in list(groups.items())[:groups_shown]:
+        detail = f" {address} {name}".rstrip()
+        message = message if len(message) <= 240 else message[:240] + "…"
+        if len(items) == 1 and not items[0].get("line"):
+            out.append(f"{severity:<7} {rule} {items[0]['ref']}{detail}: {message}")
+            continue
+        out.append(f"{severity:<7} {rule}{detail}: {message} ({len(items)}x)")
+        if any(i.get("line") for i in items):
+            out.extend(f"    {i['ref']}  {i.get('line', '')}"[:200] for i in items[:refs_shown])
+        else:
+            out.append("    at " + ", ".join(i["ref"] for i in items[:refs_shown]))
+        if len(items) > refs_shown:
+            out.append(f"    ... {len(items) - refs_shown} more")
+    if len(groups) > groups_shown:
+        rest = {}
+        for severity, rule, *_ in list(groups)[groups_shown:]:
+            rest[f"{severity} {rule}"] = rest.get(f"{severity} {rule}", 0) + 1
+        out.append(f"... {len(groups) - groups_shown} more groups (" + ", ".join(f"{k} x{v}" for k, v in rest.items())
+                   + f"; all {len(data['findings'])} findings with response_format=json, or narrow paths)")
+    for rule, text in (data.get("help") or {}).items():
+        out.append(f"{rule}: {text}")
     return "\n".join(out)
 
 
 def reuse(data: dict) -> str:
     out = [f"reuse audit for {data['repo']}"]
     if data["identical_helpers"]:
-        out.append("identical helper bodies defined in several files (share one):")
+        out.append("helper bodies defined in several files (identical: share one; same body over different "
+                   "parameter types: a template or interface candidate):")
         for d in data["identical_helpers"]:
-            out.append(f"  {d['name']} x{d['copies']}: {', '.join(d['places'][:4])}")
+            kind = "" if d.get("kind", "identical") == "identical" else f" [{d['kind']}: {' | '.join(d['signatures'])}]"
+            out.append(f"  {d['name']} x{d['copies']}{kind}: {', '.join(d['places'][:4])}")
     if data["same_name_helpers"]:
         out.append("same helper name in many files (check for drifted copies):")
         for d in data["same_name_helpers"][:15]:
             out.append(f"  {d['name']} in {d['files']} files: {', '.join(d['examples'][:3])}")
     sites = data["enumeration_sites"]
     if sites["terms"]:
-        out.append(f"files naming several of {sites['terms']} ({sites['files']}) — central sites a new variant edits:")
+        out.append(f"files naming at least {sites.get('needed', 2)} of {sites['terms']} ({sites['files']}) — central "
+                   "sites a new variant edits:")
         for row in sites["rows"]:
             out.append(f"  {row['path']}: {', '.join(row['variants'])}")
     return "\n".join(out)
@@ -472,6 +510,8 @@ def stale(data: dict) -> str:
         newest = r["newer"][0]
         out.append(f"  STALE {r['output']} built {r['built']}: {r['newer_count']} newer, e.g. {newest['file']} "
                    f"(+{newest['minutes_after_build']} min)")
+    if data.get("unknown_programs"):
+        out.append(f"  not a linked program in this build: {', '.join(data['unknown_programs'])}")
     fresh = [r["output"] for r in rows if not r["stale"]]
     if fresh:
         out.append(f"  up to date: {', '.join(fresh[:12])}" + (f" +{len(fresh) - 12}" if len(fresh) > 12 else ""))
@@ -580,46 +620,56 @@ def generic(data: Any) -> str:
     return json.dumps(data, indent=1, ensure_ascii=False)
 
 
-def impact(data: dict) -> str:
+def impact(data: dict, files_shown: int = 10) -> str:
+    """Commands first (they are what gets run), then the selection, then per-file detail."""
+    if data.get("selected") is not None:  # exact names: the test plan
+        return test_plan(data)
     if not data.get("files"):
         return data.get("note", "nothing changed")
     out = [f"impact of {len(data['changed'])} changed file(s) in {data['repo']}:"]
-    for f in data["files"]:
-        t = f["tests"]
-        out.append(f"  {f['file']}: {len({c.rpartition('.')[0] for c in f['consumers']})} direct consumer(s), tests direct {t['direct']} / near {t['near']} "
-                   f"(+{t['broad']} via hub headers)")
-        stems: dict[str, list[str]] = {}
-        for consumer in f["consumers"]:
-            stem, _, ext = consumer.rpartition(".")
-            stems.setdefault(stem, []).append(ext)
-        for stem, exts in list(stems.items())[:10]:
-            out.append(f"      consumer {stem}.{'/'.join(sorted(exts))}")
-        if len(stems) > 10:
-            out.append(f"      ... {len(stems) - 10} more consumers")
-    for tier in ("direct", "near"):
-        for label, names in data["groups"].get(tier, {}).items():
-            total = data["totals"][f"{tier}/{label}"]
-            unknown = total.get("unknown_costs", 0)
-            out.append(f"{tier}/{label}: {len(names)} tests (~{total['serial_seconds']} s recorded"
-                       + (f", {unknown} unmeasured" if unknown else "") + f"): {', '.join(names[:12])}"
-                       + (" ..." if len(names) > 12 else ""))
-    deferred = data["totals"].get("deferred")
-    if deferred:
-        out.append(f"budget {deferred['budget_seconds']:g} s: {deferred['tests']} near test(s) deferred "
-                   f"(~{deferred['serial_seconds']} s recorded" + (f", {deferred['unknown_costs']} unmeasured" if
-                   deferred["unknown_costs"] else "") + "); run them for a shared or risky change")
+    out.extend(f"note: {n}" for n in data.get("notes", []))
+    stale = data.get("stale_programs", [])
+    if stale:
+        first = stale[0]["newer"][0]["file"] if stale[0]["newer"] else "its sources"
+        out.append(f"BUILD FIRST: {len(stale)} program(s) the selection runs are older than their sources ("
+                   + ", ".join(r["program"] for r in stale[:4]) + (" ..." if len(stale) > 4 else "")
+                   + f"; e.g. {stale[0]['program']} < {first}); `zkit_stale` lists them")
+    blocked = data.get("plan_blocked") or {}
+    out.extend(f"BLOCKED {key}: {', '.join(values)}" for key, values in blocked.items())
     if data["commands"]:
-        out.append("run (direct first, then near; deferred last, if at all):")
-        order = lambda k: (0 if k.startswith("direct") else 2 if k == "deferred" else 1, k)
-        for key in sorted(data["commands"], key=order):
-            targets = data.get("build_targets", {}).get(key, [])
-            if targets:
-                out.append(f"  # {key} build targets (optional parallel prebuild): " + ", ".join(targets))
-            out.append(f"  # {key}\n  {data['commands'][key]}")
+        out.append("run (direct first, then near and linked; deferred only for a shared or risky change):")
+        rank = {"direct": 0, "near": 1, "linked": 2, "deferred": 3}
+        for key in sorted(data["commands"], key=lambda k: (rank.get(k.split("/")[0], 4), k)):
+            total = data["totals"].get(key, {})
+            seconds = f", ~{total['serial_seconds']} s recorded" if total.get("serial_seconds") is not None else ""
+            unknown = f", {total['unknown_costs']} unmeasured" if total.get("unknown_costs") else ""
+            out.append(f"  # {key}: {total.get('tests', '?')} tests{seconds}{unknown}")
+            lines = data["commands"][key].split("\n")
+            if key == "deferred" and len(lines) > 2:
+                out.append(f"  ({len(lines)} commands; response_format=json has them in command_argvs.deferred)")
+                continue
+            out.extend("  " + line for line in lines)
+    for step in data.get("prebuilds", []):
+        out.append(f"  # optional prebuild of {len(step['fixture_tests'])} build fixture(s), cwd {step['cwd']}:")
+        out.append(f"  {step['command']}")
+    for tier in ("direct", "near", "linked"):
+        for label, names in data["groups"].get(tier, {}).items():
+            out.append(f"{tier}/{label}: {', '.join(names[:12])}" + (f" ... +{len(names) - 12}" if len(names) > 12 else ""))
+    broad = data["totals"]["broad"]
+    if broad["tests"]:
+        out.append(f"broad ({broad['tests']}, include distance 3+, not selected): {', '.join(broad['names'][:12])}"
+                   + (" ..." if broad["tests"] > 12 else ""))
     if data["untested_files"]:
-        out.append("NO direct/near mapping: " + ", ".join(data["untested_files"])
-                   + " — inspect the owning tests/recipes; library-only coverage may be missed.")
-    out.append(f"broad: {data['totals']['broad']['tests']} tests reach these files only through hub headers.")
+        out.append("NO test compiles or links: " + ", ".join(data["untested_files"][:20])
+                   + " — inspect the owning tests/recipes; a test may still drive it through data or a script.")
+    for f in data["files"][:files_shown]:
+        t = f["tests"]
+        stems = sorted({c.rpartition(".")[0] for c in f["consumers"]})
+        out.append(f"  {f['file']}: tests direct {t['direct']} / near {t['near']} / linked {t['linked']} / broad "
+                   f"{t['broad']}; {len(stems)} direct consumer(s)" + (f": {', '.join(stems[:6])}" if stems else "")
+                   + (" ..." if len(stems) > 6 else ""))
+    if len(data["files"]) > files_shown:
+        out.append(f"  ... {len(data['files']) - files_shown} more files (response_format=json)")
     out.append(f"limits: {data['limits']}")
     return "\n".join(out)
 
@@ -632,7 +682,8 @@ def architecture(data: dict) -> str:
     if len(data['findings']) > 80:
         out.append('More findings available as JSON; narrow paths for a system-level review.')
     out.extend(f"ERROR {e['reference']}: {e['error']}" for e in data['errors'])
-    out.append(f"unresolved/external includes: {len(data['unresolved_includes'])}; macro includes: {data['macro_includes']}")
+    out.append(f"unresolved quoted includes: {len(data['unresolved_includes'])}; system <...> includes: "
+               f"{data.get('system_includes', 0)}; macro includes: {data['macro_includes']}")
     out.append('contracts: ' + ', '.join(data['documents']))
     out.append('limits: ' + data['limits'])
     return '\n'.join(out)
@@ -654,11 +705,16 @@ def coverage(data: dict) -> str:
 
 
 def test_plan(data: dict) -> str:
-    out = [f"test plan for {data['repo']}: {len(data['selected'])} selected checks, "
-           f"{len(data['fixture_tests'])} required setup/cleanup tests (nothing executed)"]
+    found = [n for n in data['selected'] if n not in data['missing']]
+    out = [f"test plan for {data['repo']}: {len(found)} selected checks"
+           + (f" ({len(data['missing'])} not in the catalog)" if data['missing'] else "")
+           + f", {len(data['fixture_tests'])} required setup/cleanup tests (nothing executed)"]
     for key in ('missing', 'disabled', 'unresolved_fixtures'):
         if data[key]:
             out.append(f"BLOCKED {key}: " + ', '.join(data[key]))
+    if data['fixture_tests']:
+        out.append('fixture tests CTest adds: ' + ', '.join(data['fixture_tests'][:20])
+                   + (' ...' if len(data['fixture_tests']) > 20 else ''))
     for key, cost in data['costs'].items():
         out.append(f"{key}: {cost['recorded_seconds']} s recorded; {cost['unknown_costs']} unmeasured")
     for step in data['prebuilds']:
@@ -673,39 +729,48 @@ def test_plan(data: dict) -> str:
 
 def grounding(data: dict) -> str:
     t = data["total"]
-    out = [f"grounding of {data['repo']} {', '.join(data['scope'])}: {t.get('cites', 0)} citations in "
-           f"{data['files_with_cites']} files; cited originals {t.get('exact_pct')}% byte-exact, {t.get('named_pct')}% "
-           f"semantically named, {t.get('unmatched', 0)} unmatched, {t.get('not_function', 0)} not functions",
-           "weakest folders (exact% / named% / cites):"]
+    reasons = ", ".join(f"{r} x{n}" for r, n in t.get("top_reasons", []))
+    out = [f"grounding of {data['repo']} {', '.join(data['scope'])}: {t['functions']} original functions cited "
+           f"({t['cites']} citations in {data['units_with_cites']} units); {t['ready_pct']}% ready references, "
+           f"{t['exact_pct']}% byte-exact, {t['named_pct']}% named on evidence; {t['unmatched']} not byte-exact, "
+           f"{t['not_function']} citations of data/no function"]
+    if reasons:
+        out.append(f"  why not ready: {reasons}")
+    out.extend(f"note: {n}" for n in data.get("notes", []))
+    out.append("least ready folders (ready% / exact% / named% / functions, main reason):")
     for f in data["folders"]:
-        out.append(f"  {f['folder']:<44} {f['exact_pct']!s:>5}% {f['named_pct']!s:>5}%  {f['cites']:<5} {f.get('tier', '')}")
-    out.append("files citing the most unmatched originals (recover these in the decomp first):")
-    for w in data["weakest_files"]:
-        out.append(f"  {w['path']} ({w['unmatched']}): {', '.join(w['examples'][:3])}")
+        reason = f["top_reasons"][0][0] if f["top_reasons"] else ""
+        out.append(f"  {f['folder']:<44} {f['ready_pct']!s:>5}% {f['exact_pct']!s:>5}% {f['named_pct']!s:>5}%  "
+                   f"{f['functions']:<5} {f.get('tier', ''):<11} {reason}")
+    if "rows" in data:
+        out.append(f"units most likely to behave slightly off ({data['units_ranked']} with signals; {data['weights']}):")
+        for r in data["rows"]:
+            flags = ("" if r["tested"] is not False else " UNTESTED") + ("" if r["recipe"] is not False else " no-recipe")
+            out.append(f"{r['score']:>6}  [{r['tier']}] {r['path']} ({r['functions']} cited){flags}")
+            out.extend(f"          - {action}" for action in r["actions"])
+        uncited = data.get("uncited") or {}
+        if uncited.get("units"):
+            out.append(f"exact-tier units citing no original ({uncited['units']}): " + ", ".join(
+                f"{r['path']} ({r['definition_lines']} lines)" for r in uncited["rows"][:10])
+                       + (" ..." if uncited["units"] > 10 else ""))
+        out.append(data["meaning"])
     return "\n".join(out)
 
 
 def consts(data: dict) -> str:
     c = data["counts"]
-    out = [f"constant audit {data['repo']}: {c.get('verified', 0)} verified against the original, {c.get('near', 0)} near-miss, "
-           f"{c.get('unsourced', 0)} unsourced, {c.get('trivial', 0)} trivial skipped; "
+    out = [f"constant audit {data['repo']}: {c.get('verified', 0)} verified against the original, {c.get('folded', 0)} "
+           f"folded, {c.get('near', 0)} near-miss, {c.get('unsourced', 0)} unsourced, {c.get('trivial', 0)} trivial "
+           f"skipped; {c.get('uncited_literals', 0)} literals in functions citing no original and "
            f"{c.get('not_judged_files', 0)} liberty/infrastructure files not judged"]
     for f in data["findings"][:60]:
         near = f" ~ original {f['near']}" if f["near"] else ""
-        tag = f["tier"]
-        out.append(f"{f['severity']:<7} {f['kind']:<9} {f['ref']}  {f['value']}{near}  [{tag}]  {f['line'][:80]}")
+        folded = f" = {f['folded']}" if f.get("folded") else ""
+        out.append(f"{f['severity']:<7} {f['kind']:<9} {f['ref']}  {f['value']}{folded}{near}  [{f['tier']}]  "
+                   f"{f['line'][:80]}")
     if len(data["findings"]) > 60:
-        out.append(f"... {len(data['findings']) - 60} more (--json)")
-    return "\n".join(out)
-
-
-def suspects(data: dict) -> str:
-    out = [f"likely slightly-off behavior in {data['repo']} ({data['files_ranked']} files with signals; {data['weights']}):"]
-    for r in data["rows"]:
-        flags = ("" if r["tested"] is not False else " UNTESTED") + ("" if r["recipe"] is not False else " no-recipe")
-        out.append(f"{r['score']:>5}  [{r['tier']}] {r['path']}{flags}")
-        for action in r["actions"]:
-            out.append(f"         - {action}")
+        out.append(f"... {len(data['findings']) - 60} more (response_format=json, or narrow paths)")
+    out.append(data["meaning"])
     return "\n".join(out)
 
 
@@ -716,22 +781,29 @@ def drift(data: dict) -> str:
     out = [f"decomp drift since {data['baseline']}: {len(data['changes'])} of {data['functions']} cited functions changed"
            + (" (not listed: " + ", ".join(f"{v} {k}" for k, v in quiet.items()) + ")" if quiet else "")]
     for r in data.get("reverify_files", [])[:15]:
-        out.append(f"  re-verify {r['path']}  ({r['functions']} cited function(s) now exact or changed)")
+        out.append(f"  re-verify {r['path']}  ({r['functions']} changed cited function(s))")
     for c in data["changes"][:20]:
-        out.append(f"  {c['address']} {c['name']}: {', '.join(c['changes'])}  <- {', '.join(c['native'][:2])}")
+        state = "" if c.get("ready", True) else "  [not ready: " + "; ".join(c.get("not_ready", []))[:120] + "]"
+        out.append(f"  {c['address']} {c['name']}: {', '.join(c['changes'])}{state}  <- {', '.join(c['native'][:2])}")
     if len(data["changes"]) > 20:
-        out.append(f"  ... {len(data['changes']) - 20} more (--json)")
-    out.append("after re-checking: zkit drift --accept")
+        out.append(f"  ... {len(data['changes']) - 20} more (response_format=json)")
+    out.append(data.get("note", ""))
     return "\n".join(out)
 
 
 def tiers(data: dict) -> str:
-    out = [f"fidelity tiers for {data['repo']}: " + ", ".join(f"{k} {v} files" for k, v in data["counts"].items())]
+    out = [f"fidelity tiers for {data['repo']}: " + ", ".join(f"{k} {v} files" for k, v in data["counts"].items())
+           + f"; default {data.get('default', 'exact')}"]
     for t in data["tiers"]:
         out.append(f"  {t['tier'].upper():<15} {t['meaning']}\n  {'':<15} verify: {t.get('verify', '')}")
     if data["files"]:
         out.append("files:")
-        out.extend(f"  {tier:<15} {path}" for path, tier in data["files"].items())
+        out.extend(f"  {tier:<15} {path}" for path, tier in list(data["files"].items())[:200])
+        if len(data["files"]) > 200:
+            out.append(f"  ... {len(data['files']) - 200} more (response_format=json)")
+        if data.get("outside_code_paths"):
+            out.append(f"  {len(data['outside_code_paths'])} of these are outside the repo's code_paths: the port "
+                       "tools do not judge them as ported code")
     else:
         out.append("folders:")
         for folder, counts in data["folders"].items():

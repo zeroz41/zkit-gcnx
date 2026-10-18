@@ -264,8 +264,8 @@ def brief(project: Project, repo: str | None = None, demand_rows: int = 5) -> di
             entry["tiers"] = summary(project, name)["counts"]
         if role == "native" and project.config.get("targets"):
             try:
-                from .native import grounding
-                ground = grounding(project, name, limit=4)
+                from .fidelity import grounding
+                ground = grounding(project, name, limit=4, detail=False)
                 entry["grounding"] = {"total": ground["total"], "weakest": ground["folders"][:4]}
             except ValueError:
                 pass
