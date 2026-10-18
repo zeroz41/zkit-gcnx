@@ -402,6 +402,19 @@ class BridgeTests(unittest.TestCase):
             (self.decomp / "build/report.bak").rename(self.decomp / "build/report.json")
 
 
+class FirstCommitTests(unittest.TestCase):
+    def test_the_staged_change_of_a_first_commit_is_everything_staged(self):
+        from zkit import bridge
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / "README.md").write_text("a\nb\n")
+            subprocess.run(["git", "-C", str(root), "add", "README.md"], check=True)
+            self.assertEqual(bridge._changed_files(root, staged=True), {"README.md": {1, 2}})
+            with self.assertRaises(ValueError):
+                bridge._resolve_base(root, "main~3")             # only an unborn HEAD stands for the empty tree
+
+
 class DemangleTests(unittest.TestCase):
     def test_codewarrior_members(self):
         from zkit.index import cw_demangle
