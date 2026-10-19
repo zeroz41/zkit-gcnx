@@ -80,6 +80,12 @@ class LinkerTableTests(unittest.TestCase):
             self.assertEqual(delink.section_traits(delink.PPC, ".ctors$10"),
                              delink.section_traits(delink.PPC, ".ctors"))
 
+    def test_an_initializer_array_is_data(self):
+        """`.init_array` holds pointers, not code, though its name starts like `.init`."""
+        kind, flags, size, _ = delink.section_traits(delink.AARCH64, ".init_array")
+        self.assertEqual((kind, flags & delink.SHF_EXECINSTR, size), (14, 0, 8))      # SHT_INIT_ARRAY
+        self.assertTrue(delink.section_traits(delink.PPC, ".init")[1] & delink.SHF_EXECINSTR)
+
 
 class RuntimeMemberTests(unittest.TestCase):
     """The C++ runtime links late but leads .ctors and .dtors: mwld puts the tables of the archive member named
