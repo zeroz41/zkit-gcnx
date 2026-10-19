@@ -17,7 +17,8 @@ NSO_MAGIC = b"NSO0"
 DEFAULT_BASE = 0x7100000000
 R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE = 257, 1025, 1026, 1027
 DT_NULL, DT_PLTRELSZ, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ, DT_STRSZ, DT_JMPREL = 0, 2, 5, 6, 7, 8, 10, 23
-DT_INIT_ARRAY, DT_INIT_ARRAYSZ = 25, 27
+DT_INIT_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAY, DT_FINI_ARRAYSZ = 25, 27, 26, 28
+DT_HASH, DT_GNU_HASH = 4, 0x6FFFFEF5
 DT_RELRSZ, DT_RELR = 35, 36
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
@@ -106,6 +107,7 @@ class Module:
     pointers: dict[int, int] = field(default_factory=dict)          # data offset -> offset it points to (relative)
     init_array: list[int] = field(default_factory=list)
     eh_frame_hdr: tuple[int, int] | None = None
+    tables: dict[str, tuple[int, int]] = field(default_factory=dict)  # the linker's own: name -> (start, end)
 
     @property
     def bss(self) -> tuple[int, int]:
@@ -242,6 +244,7 @@ def _from_elf(raw: bytes) -> Module:
             elif kind == 0x6474E550 and module.eh_frame_hdr is None:  # PT_GNU_EH_FRAME
                 filesz = struct.unpack_from("<Q", raw, phoff + i * phentsize + 32)[0]
                 module.eh_frame_hdr = (vaddr - base, vaddr - base + filesz)
+        _unwind_tables(module)
     return module
 
 
@@ -256,7 +259,29 @@ def _read_mod0(module: Module) -> None:
     dynamic, bss_start, bss_end, eh_start, eh_end, _ = struct.unpack_from("<iiiiii", image, mod0 + 4)
     if eh_end > eh_start:
         module.eh_frame_hdr = (mod0 + eh_start, mod0 + eh_end)
+    module.tables["MOD0"] = (mod0, mod0 + 28)
     _read_dynamic(module, dynamic + mod0)
+    _unwind_tables(module)
+
+
+def _unwind_tables(module: Module) -> None:
+    """`.eh_frame_hdr`, and `.eh_frame` from where the header says it starts to the end of what it holds."""
+    if module.eh_frame_hdr is None:
+        return
+    start, end = module.eh_frame_hdr
+    module.tables[".eh_frame_hdr"] = (start, end)
+    try:
+        frame, _ = _encoded(module, start + 4, module.image[start + 1], start)
+    except (ValueError, struct.error):
+        return
+    position = frame
+    while position + 4 <= len(module.image):         # CIEs and FDEs, each length-prefixed, up to a zero length
+        length = struct.unpack_from("<I", module.image, position)[0]
+        if not length or length == 0xFFFFFFFF:
+            position += 4 if not length else 0
+            break
+        position += 4 + length
+    module.tables[".eh_frame"] = (frame, position)
 
 
 def _read_dynamic(module: Module, dynamic: int) -> None:
@@ -269,10 +294,21 @@ def _read_dynamic(module: Module, dynamic: int) -> None:
         if tag == DT_NULL:
             break
         tags.setdefault(tag, value)
+    module.tables[".dynamic"] = (dynamic, position)
     strtab, symtab = tags.get(DT_STRTAB), tags.get(DT_SYMTAB)
+    for name, start_tag, size_tag in ((".dynstr", DT_STRTAB, DT_STRSZ), (".rela.dyn", DT_RELA, DT_RELASZ),
+                                      (".rela.plt", DT_JMPREL, DT_PLTRELSZ), (".relr.dyn", DT_RELR, DT_RELRSZ),
+                                      (".init_array", DT_INIT_ARRAY, DT_INIT_ARRAYSZ),
+                                      (".fini_array", DT_FINI_ARRAY, DT_FINI_ARRAYSZ)):
+        if tags.get(start_tag) is not None and tags.get(size_tag):
+            module.tables[name] = (tags[start_tag], tags[start_tag] + tags[size_tag])
+    for name, tag in ((".hash", DT_HASH), (".gnu.hash", DT_GNU_HASH)):
+        if tags.get(tag) is not None:                 # where it starts: its size takes reading it
+            module.tables[name] = (tags[tag], tags[tag])
     names: list[tuple[str, int, int]] = []
     if strtab is not None and symtab is not None:
         count = (strtab - symtab) // 24 if strtab > symtab else 0
+        module.tables[".dynsym"] = (symtab, symtab + 24 * count)
         for i in range(count):
             name, info, _, shndx, value, size = struct.unpack_from("<IBBHQQ", image, symtab + i * 24)
             end = image.find(b"\0", strtab + name)

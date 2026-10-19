@@ -52,15 +52,16 @@ class Evidence:
     joins: list[tuple[int, int, str]]                  # (first, last) function index that one unit holds, why
     separations: list[tuple[int, int, str]]            # a boundary lies before a function index in [lo, hi], why
     files: dict[int, str] = field(default_factory=dict)        # function index -> source file it cites
+    cited: list[tuple[int, int, str]] = field(default_factory=list)   # the joins of runs citing one file
     inlines: dict[int, str] = field(default_factory=dict)      # function index -> header it cites (inline)
     names: dict[int, str] = field(default_factory=dict)        # function index -> `Class::method` it cites
     placed: set[int] = field(default_factory=set)              # function indexes whose file is another build's unit
     roots: list[str] = field(default_factory=list)
 
-    def joined(self, count: int) -> list[bool]:
-        """joined[p]: a boundary before function p would split one unit."""
+    def joined(self, count: int, joins: list[tuple[int, int, str]] | None = None) -> list[bool]:
+        """joined[p]: a boundary before function p would split one unit (by `joins`, default all of them)."""
         cover = [0] * (count + 2)
-        for lo, hi, _ in self.joins:
+        for lo, hi, _ in self.joins if joins is None else joins:
             if hi > lo:
                 cover[lo + 1] += 1
                 cover[hi + 1] -= 1
@@ -132,6 +133,14 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
         if index is not None and unit and index not in ev.files:
             ev.files[index] = PIECE.sub("", unit)
             ev.placed.add(index)
+    # One file named two ways: a path relative to an include folder (or another build's unit name) is the one
+    # full path that ends in it.
+    spelled, full = set(ev.files.values()), {}
+    for short in spelled:
+        longer = [name for name in spelled if name.casefold().endswith("/" + short.casefold())]
+        if len(longer) == 1:
+            full[short] = longer[0]
+    ev.files = {index: full.get(name, name) for index, name in ev.files.items()}
     # A unit's code is one run in the link: one function another build put in X between two that agree on Y is
     # no evidence for X there (an inline that build kept from X, code that moved, other code that compiles alike).
     anchors = sorted(ev.files.items())
@@ -145,6 +154,7 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
         if file_a == file_b:
             if b - a <= FILL_FUNCTIONS and starts[b] - starts[a] <= FILL_BYTES:
                 ev.joins.append((a, b, f"both cite {file_a}"))
+                ev.cited.append(ev.joins[-1])
         else:
             ev.separations.append((a + 1, b, f"{file_a} then {file_b}"))
 
@@ -263,6 +273,7 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     ev = ev or evidence(program)
     count = len(program.functions)
     joined = ev.joined(count)
+    cited = ev.joined(count, ev.cited)
     calls = _cover(((min(i, j), max(i, j)) for i, callees in program.calls.items() for j in callees
                     if 0 < abs(i - j) <= SHORT_CALL), count)
     members: dict[str, list[int]] = collections.defaultdict(list)
@@ -280,6 +291,8 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
         if any(lo <= c.position <= hi for c in chosen):
             continue
         candidates = [p for p in range(lo, hi + 1) if not joined[p]]
+        if not candidates:      # data one run uses spans two cited files: it is shared (a template's table, an
+            candidates = [p for p in range(lo, hi + 1) if not cited[p]]   # inline's static), not one unit's
         if not candidates:
             continue
         best = min(candidates, key=cost)

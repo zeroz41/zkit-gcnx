@@ -289,48 +289,42 @@ def _module_symbols(project: Project, target: str) -> list[Symbol]:
 
 
 def _symbol_table(project: Project, target: str) -> tuple[list, list[int]]:
+    """A target's symbols by address: its symbols.txt, and a Switch module's own symbols (exports, RTTI) where the
+    file has none at their address, in the file's dotted sections."""
+    entry = _symbol_entry(project, target)
+    return (entry[0], entry[1]) if entry else ([], [])
+
+
+def _symbol_entry(project: Project, target: str) -> tuple | None:
     config = project.target(target)
+    path = project.file(config["repository"], config["symbols"]) if config.get("symbols") else None
+    path = path if path is not None and path.is_file() else None
+    original = None
     if (config.get("platform") or "").lower() in ("switch", "nx") and config.get("original"):
-        key = f"module:{target}:{config['original']}"
-        cached = _SYMBOLS.get(key)
         original = project.file(config["repository"], config["original"])
-        stamp = f"{original.stat().st_mtime_ns}" if original.is_file() else ""
-        if not cached or cached[0] != stamp:
-            symbols = _module_symbols(project, target) if original.is_file() else []
-            by_name = {}
-            for s in symbols:
-                by_name.setdefault(s.name, s)
-            _SYMBOLS[key] = (stamp, (symbols, [s.address for s in symbols], by_name))
-        symbols, starts, _ = _SYMBOLS[key][1]
-        return symbols, starts
-    if not config.get("symbols"):
-        return [], []
-    path = project.file(config["repository"], config["symbols"])
-    if not path.is_file():
-        return [], []
-    info = path.stat()
-    stamp = f"{info.st_mtime_ns}:{info.st_size}"
-    cached = _SYMBOLS.get(str(path))
+        original = original if original.is_file() else None
+    if path is None and original is None:
+        return None
+    own = f"{path.stat().st_mtime_ns}:{path.stat().st_size}" if path else ""
+    stamp = own + (f":{original.stat().st_mtime_ns}" if original else "")
+    key = f"{target}:{path}:{original}"
+    cached = _SYMBOLS.get(key)
     if not cached or cached[0] != stamp:
-        symbols = _parsed_symbols(project, path, stamp)
+        symbols = _parsed_symbols(project, path, own) if path else []
+        if original is not None:
+            taken = {s.address for s in symbols}
+            symbols = sorted(symbols + [s._replace(section=f".{s.section}") for s in _module_symbols(project, target)
+                                        if s.address not in taken], key=lambda s: (s.address, -s.size))
         by_name = {}
         for s in symbols:
             by_name.setdefault(s.name, s)
-        _SYMBOLS[str(path)] = (stamp, (symbols, [s.address for s in symbols], by_name))
-    symbols, starts, _ = _SYMBOLS[str(path)][1]
-    return symbols, starts
+        _SYMBOLS[key] = (stamp, (symbols, [s.address for s in symbols], by_name))
+    return _SYMBOLS[key][1]
 
 
 def symbol_named(project: Project, target: str, name: str):
-    _symbol_table(project, target)
-    config = project.target(target)
-    if (config.get("platform") or "").lower() in ("switch", "nx") and config.get("original"):
-        cached = _SYMBOLS.get(f"module:{target}:{config['original']}")
-        return cached[1][2].get(name) if cached else None
-    if not config.get("symbols"):
-        return None
-    cached = _SYMBOLS.get(str(project.file(config["repository"], config["symbols"])))
-    return cached[1][2].get(name) if cached else None
+    entry = _symbol_entry(project, target)
+    return entry[2].get(name) if entry else None
 
 
 def resolve(project: Project, query: str, target: str | None = None, limit: int = 8) -> list[int]:

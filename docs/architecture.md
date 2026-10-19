@@ -26,7 +26,7 @@ machine      ppc.py (PowerPC control flow and relocations) · ppcflow.py (regist
              aarch64.py (AArch64 references and relocations) · rtti.py (Itanium RTTI)
                 │
 images       platform.py (GameCube, Switch) · gc.py (DOL, disc images, splits/symbols files) · nx.py (NSO and
-             ELF modules) · elf.py (ELF objects)
+             ELF modules) · nxdata.py (a module's data objects) · elf.py (ELF objects)
                 │
 index        index.py: SQLite + FTS5 in zkit's cache: functions, calls, cites, text lines of every repo
 ```
@@ -37,7 +37,10 @@ index        index.py: SQLite + FTS5 in zkit's cache: functions, calls, cites, t
 0x80000000 images; Switch modules at 0x7100000000), how its code is decoded, how data pointers are recognised and
 which Ghidra language reads it. A GameCube target is a DOL, read directly or from inside a disc image. A Switch
 target is an NSO (LZ4 or zstd segments) or an ELF of one, loaded and relocated: MOD0, the dynamic section, symbols,
-RELA/RELR/JMPREL, init arrays, exception-frame function bounds and PLT stubs.
+RELA/RELR/JMPREL, init arrays, exception-frame function bounds and PLT stubs, and where the linker's own tables
+lie. `nxdata.py` finds a stripped module's data objects: every address its code forms, loads or stores through and
+every address a relocated pointer holds starts one, up to the next, with a string cut at its NUL and a scalar the
+code only reads at one width that wide; the linker's tables are no program object.
 
 ### Machine code
 
@@ -84,7 +87,10 @@ addresses than the original's stays delinked: the report can call a function exa
 
 `units.py` proposes unit boundaries from evidence in the original: CodeWarrior gives every unit its own copy of
 each literal, so two copies of one value separate their users and one copy shared by neighbours joins them; data
-only one run of code uses belongs to it; source paths cited by the code name a unit. `--check` compares an existing
+only one run of code uses belongs to it; source paths cited by the code name a unit, and outrank data: data one
+run uses across two cited files is shared (a template's table, an inline's static), not one unit's. One file cited
+under two spellings (a path relative to an include folder, another build's unit name) is the full path that ends
+in the shorter one. `--check` compares an existing
 split against the same evidence: folds (two units holding one unit's data), splits (one unit holding two copies of
 one literal) and data claims (data in no unit that one unit's code alone uses).
 
