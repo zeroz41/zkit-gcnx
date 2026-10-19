@@ -58,6 +58,18 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual([r["after"] for r in delta["renamed"]], ["TClass::f"])
         self.assertEqual([r["address"] for r in delta["improved"]], ["0x80001020"])
 
+    def test_a_unit_renamed_into_another_folder_stays_in_its_module(self):
+        """objdiff's report drops the module the project gives, so a unit renamed from `game/x` to `lib/y` would
+        seem to move its functions to another module; in a target with one module it does not."""
+        def bare(text_unit):
+            out = report([(text_unit, "f", 0x80001000, 0x20, 0.0)], [(text_unit, ".data", 0x80100000, 0x40, 0.0)])
+            for unit in out["units"]:
+                unit["metadata"].pop("module_name")
+            return out
+        before, after = bare("game/x"), bare("lib/y")
+        self.assertFalse(progress.compare(before, after)["ok"])           # by folder: a function disappeared
+        self.assertTrue(progress.compare(before, after, "main")["ok"], progress.compare(before, after, "main"))
+
     def test_losses_are_named(self):
         after = copy.deepcopy(self.before)
         after["units"][0]["functions"][0]["fuzzy_match_percent"] = 99.0

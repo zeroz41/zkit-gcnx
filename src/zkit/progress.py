@@ -44,13 +44,28 @@ def is_bss(section: str) -> bool:
     return section in BSS_SECTIONS or section.startswith(tuple(s + "." for s in BSS_SECTIONS))
 
 
-def module_of(unit: dict) -> str:
+def module_of(unit: dict, single: str | None = None) -> str:
+    """The module a report unit belongs to: its metadata's, else the target's one module (`single`: objdiff's
+    report drops the module_name the project gives), else the unit's first folder."""
     meta = unit.get("metadata") or {}
     if meta.get("module_name"):
         return str(meta["module_name"])
     if meta.get("module_id") not in (None, 0, "0"):
         return f"module{meta['module_id']}"
-    return str(unit.get("name", "")).split("/", 1)[0] or "main"
+    return single or str(unit.get("name", "")).split("/", 1)[0] or "main"
+
+
+def single_module(project: Project, target: str) -> str | None:
+    """The module every unit of a target's objdiff project names, when they all name one (a Switch `main`, a DOL
+    without RELs): a unit renamed into another folder stays in it."""
+    config = project.target(target)
+    path = project.file(config["repository"], config["objdiff"]) if config.get("objdiff") else None
+    try:
+        units = json.loads(path.read_text(encoding="utf-8")).get("units", []) if path and path.is_file() else []
+    except (OSError, ValueError):
+        return None
+    modules = {(u.get("metadata") or {}).get("module_name") for u in units}
+    return next(iter(modules)) if len(modules) == 1 and None not in modules else None
 
 
 def address_text(address: int) -> str:
@@ -100,12 +115,12 @@ def summary(report: dict) -> dict[str, Any]:
             "modules": [{"name": name, "measures": _with_percents(counts)} for name, counts in sorted(modules.items())]}
 
 
-def _functions(report: dict, linked_only: bool = False) -> dict[tuple[str, int], dict]:
+def _functions(report: dict, linked_only: bool = False, single: str | None = None) -> dict[tuple[str, int], dict]:
     out = {}
     for unit in report.get("units", []):
         if linked_only and not (unit.get("metadata") or {}).get("complete"):
             continue
-        module = module_of(unit)
+        module = module_of(unit, single)
         for function in unit.get("functions") or []:
             address = (function.get("metadata") or {}).get("virtual_address")
             if address is None:
@@ -117,13 +132,13 @@ def _functions(report: dict, linked_only: bool = False) -> dict[tuple[str, int],
     return out
 
 
-def _data_ranges(report: dict, exact_only: bool = False, linked_only: bool = False) -> dict:
+def _data_ranges(report: dict, exact_only: bool = False, linked_only: bool = False, single: str | None = None) -> dict:
     """Original non-code intervals per (module, section), merged so a split or a fold is not a loss."""
     ranges: dict[tuple[str, str], list[tuple[int, int]]] = {}
     for unit in report.get("units", []):
         if linked_only and not (unit.get("metadata") or {}).get("complete"):
             continue
-        module = module_of(unit)
+        module = module_of(unit, single)
         for section in unit.get("sections") or []:
             name, size = str(section.get("name", "")), int(number(section.get("size")))
             if is_code(name) or not size:
@@ -166,12 +181,13 @@ def _lost(old: dict, new: dict) -> list[dict]:
     return [{"module": m, "section": s, "address": address_text(a), "size": b - a} for m, s, a, b in out]
 
 
-def compare(before: dict, after: dict) -> dict[str, Any]:
-    """What changed between two reports, by original address. `failures` lists every loss."""
-    old, new = _functions(before), _functions(after)
+def compare(before: dict, after: dict, single: str | None = None) -> dict[str, Any]:
+    """What changed between two reports, by original address (in the target's one module when `single` names
+    it). `failures` lists every loss."""
+    old, new = _functions(before, single=single), _functions(after, single=single)
     old_exact = {k for k, f in old.items() if number(f.get("fuzzy_match_percent")) == 100}
     new_exact = {k for k, f in new.items() if number(f.get("fuzzy_match_percent")) == 100}
-    old_linked, new_linked = _functions(before, True), _functions(after, True)
+    old_linked, new_linked = _functions(before, True, single), _functions(after, True, single)
 
     def rows(keys, table):
         return [{"module": k[0], "address": address_text(k[1]), "name": table[k]["name"],
@@ -181,9 +197,11 @@ def compare(before: dict, after: dict) -> dict[str, Any]:
     first, last = measures(before.get("measures")), measures(after.get("measures"))
     for key in COUNTERS:
         metrics[key] = {"before": first[key], "after": last[key], "delta": last[key] - first[key]}
-    exact_data_lost = _lost(_data_ranges(before, exact_only=True), _data_ranges(after, exact_only=True))
-    coverage_lost = _lost(_data_ranges(before), _data_ranges(after))
-    linked_data_lost = _lost(_data_ranges(before, linked_only=True), _data_ranges(after, linked_only=True))
+    exact_data_lost = _lost(_data_ranges(before, exact_only=True, single=single),
+                            _data_ranges(after, exact_only=True, single=single))
+    coverage_lost = _lost(_data_ranges(before, single=single), _data_ranges(after, single=single))
+    linked_data_lost = _lost(_data_ranges(before, linked_only=True, single=single),
+                             _data_ranges(after, linked_only=True, single=single))
     failures = []
     if old_exact - new_exact:
         failures.append(f"{len(old_exact - new_exact)} exact function(s) lost their match")
@@ -292,7 +310,7 @@ def baseline(project: Project, target: str, which: str | None = None) -> tuple[d
 def since(project: Project, target: str, which: str | None = None) -> dict[str, Any]:
     meta, before = baseline(project, target, which)
     after = load(report_path(project, target))
-    result = compare(before, after)
+    result = compare(before, after, single_module(project, target))
     result["baseline"] = meta
     result["report_age_h"] = round((time.time() - report_path(project, target).stat().st_mtime) / 3600, 2)
     return result
