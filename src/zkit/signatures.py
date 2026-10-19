@@ -13,14 +13,23 @@ never in a repository.
 
 A target function takes a donor name when, among the donor functions of its shape that agree with what is known
 about the target so far, exactly one name remains and no other function of that shape in the target has as much
-evidence for it. Evidence is the references the target already resolves to the donor's symbols (or texts) and
-the layout: the linker keeps a file's functions in order, so a matched neighbour that is the donor's neighbour
-too places it. A shape shorter than `MINIMUM_WORDS` needs such evidence (copies, setters and thin wrappers repeat
-in every game). A matched function names what it refers to (its callees and its data, at the address each
-reference resolves to, where the donors agree), a named virtual table names its slots from the donors' table of
-its class, and a C function whose code changed is still found by the exact set of texts it uses. Every name is
-then checked: an address two pieces of evidence name differently, and a name two addresses claim, are
-withdrawn, and the matching runs again without them.
+evidence for it. Evidence is the references the target already resolves to the donor's symbols (or texts) and the
+layout: the linker keeps a file's functions in order, so a matched neighbour that is the donor's neighbour too
+places it. A shape shorter than `MINIMUM_WORDS` needs such evidence (copies, setters and thin wrappers repeat in
+every game). A matched function names what it refers to (its callees and its data, at the address each reference
+resolves to, where the donors agree), a named virtual table names its slots from the donors' table of its class, and
+a C function whose code changed is still found by the exact set of texts it uses. A function named any other way
+whose code is its donors' names what it refers to too. Between two functions an original donor places in one order
+(`gaps`), the functions of one shape pair in order (or, more copies on one side, by their references), and what is
+left pairs as changed code: one on each side, or the pair that shares by far the most of what it refers to. A
+function whose code changed still calls what it called: its one unnamed callee is its donors' one unclaimed callee
+(`calls`). Every name is then checked: an address two pieces of evidence name differently, and a name two addresses
+claim, are withdrawn, and the matching runs again without them.
+
+On the Switch a shape clears what `aarch64.code_relocations` relocates (calls and branches out of the function,
+adrp pages and the low halves paired with them, adr and literal loads), and a class table is an Itanium `_ZTV`
+object: offset-to-top and typeinfo, then one pointer per slot, read through the module's relocations. A
+module's import stubs are named by what they import in every build, so a call to one agrees by name.
 """
 
 from __future__ import annotations
@@ -30,6 +39,7 @@ import collections
 import gzip
 import hashlib
 import json
+import math
 import re
 import struct
 import time
@@ -40,10 +50,11 @@ from typing import Iterable
 from . import ppc
 from .program import CODE_SECTIONS, Function, Program
 
-VERSION = 1
+VERSION = 2
 MINIMUM_WORDS = 16       # a shorter shape proves nothing alone: copies and setters repeat in every game
 CONFIRMING = 2           # agreed references a shorter one needs (one is a thin wrapper of a call any game makes)
 MINIMUM_STRINGS = 12     # characters of referenced text a string-set match needs
+SHARED_BITS = 8.5        # what changed code must still share with its donor (-log2 of each reference's frequency)
 TEXT_LIMIT = 256
 
 # The masks an assembler leaves on a relocated instruction, by relocation type.
@@ -70,6 +81,41 @@ def display(name: str) -> str:
     return name.split("\0", 1)[0]
 
 
+TABLES = ("__vt__", "_ZTV")      # a class table: CodeWarrior's, Itanium's
+
+
+def c_name(name: str) -> bool:
+    """Neither a CodeWarrior nor an Itanium C++ name: a C function's, whose parameters its name does not claim."""
+    from .cwnames import parse
+    plain = display(name)
+    return not plain.startswith("_Z") and parse(plain) is None
+
+
+def identity(image) -> str:
+    """The SHA-1 of an opened original: a DOL's bytes, a module's loaded image."""
+    raw = getattr(image, "raw", None)
+    return hashlib.sha1(raw if raw is not None else bytes(image.image)).hexdigest()
+
+
+def itanium_slots(image, address: int, count: int, starts) -> list[tuple[str, int | str | None]] | None:
+    """`count` slots of an Itanium class table (after offset-to-top and typeinfo), read through the module's
+    relocations: ("function", start) for a pointer to a function start, ("import", name) for an imported one,
+    ("other", None) for anything else (a secondary table's header, a pointer elsewhere). None when the table
+    leaves its segment."""
+    out: list[tuple[str, int | str | None]] = []
+    for index in range(count):
+        holder = address + 16 + 8 * index
+        segment = image.section_at(holder)
+        if segment is None or holder + 8 > segment.offset + segment.size:
+            return None
+        if holder in image.imports:
+            out.append(("import", image.imports[holder]))
+            continue
+        pointee = image.pointers.get(holder)
+        out.append(("function", pointee) if pointee in starts else ("other", None))
+    return out
+
+
 # Shapes
 
 @dataclass(frozen=True)
@@ -81,8 +127,9 @@ class Reference:
 
 @dataclass
 class Signature:
-    """One donor function: its key, size and shape, what each relocation names, the unit it was in and the keys
-    of the functions the donor placed before and after it."""
+    """One donor function: its key, size and shape, what each relocation names, the unit it was in, the keys
+    of the functions the donor placed before and after it, and its place in the donor original's layout (an
+    original's functions only; an object's have none)."""
     key: str
     size: int
     shape: str
@@ -91,6 +138,7 @@ class Signature:
     donor: str = ""
     before: str | None = None
     after: str | None = None
+    place: int | None = None
 
     @property
     def name(self) -> str:
@@ -123,8 +171,12 @@ def image_shape(program: Program, function: Function, sda: dict[int, int] | None
         return None
     if not words:
         return None
-    found, cleared = ppc.code_relocations(words, function.address, program.sda if sda is None else sda,
-                                          program.in_image)
+    if program.platform.name == "switch":
+        from . import aarch64
+        found, cleared = aarch64.code_relocations(words, function.address, program.image.pointers)
+    else:
+        found, cleared = ppc.code_relocations(words, function.address, program.sda if sda is None else sda,
+                                              program.in_image)
     masked = [cleared.get(function.address + 4 * i, word) for i, word in enumerate(words)]
     references = [((r.offset - function.address) // 4 * 4, r.kind, r.target) for r in found]
     return Shape(function.address, 4 * len(words), digest(masked, ((o, k) for o, k, _ in references)), references)
@@ -192,6 +244,8 @@ class Donor:
     images: list[str] = field(default_factory=list)                     # sha1 of the originals it was read from
     sources: list[str] = field(default_factory=list)
     built: str = ""
+    layout: list[str | None] = field(default_factory=list)              # an original's shapes, function by function
+    platform: str = ""                                                   # gamecube or switch (empty: unknown)
 
 
 def _units(rows: list[tuple[int, int, str]]):
@@ -228,11 +282,16 @@ def add_program(donor: Donor, program: Program, units: list[tuple[int, int, str]
     def known(address: int, name: str, scope: str | None) -> str | None:
         return None if unnamed(name) else key(name, scope or "global", unit_of(address))
     order, found = [], []
-    for function in program.functions:
+    first = len(donor.layout)
+    # a weak function (an inline or a template instance) is the copy the linker kept from whichever unit came
+    # first: its place says nothing about the unit another build keeps it from
+    weak = getattr(program.image, "weak", set())
+    for index, function in enumerate(program.functions):
         named = known(function.address, function.name, function.scope)
         order.append(named)
-        shape = image_shape(program, function) if named else None
-        if shape is None:
+        shape = image_shape(program, function)
+        donor.layout.append(shape.shape if shape is not None else None)
+        if shape is None or not named:
             continue
         references = []
         for offset, kind, target in shape.references:
@@ -252,12 +311,22 @@ def add_program(donor: Donor, program: Program, units: list[tuple[int, int, str]
                     text = text_at(program.read, target)
                     token = ("s", text) if text is not None else None
             references.append(Reference(offset, kind, token))
-        found.append(Signature(named, shape.size, shape.shape, tuple(references), unit_of(function.address),
-                               donor.name))
+        own = "" if function.address in weak or function.scope == "weak" else unit_of(function.address)
+        found.append(Signature(named, shape.size, shape.shape, tuple(references), own, donor.name,
+                               place=first + index))
     _neighbours(found, order)
     donor.signatures += found
+    switch = program.platform.name == "switch"
     for table in program.objects:
-        if not table.name.startswith("__vt__") or table.size < 12:
+        if switch and table.name.startswith("_ZTV") and table.size >= 24:
+            slots = itanium_slots(program.image, table.address, (table.size - 16) // 8, starts)
+            if slots is None:
+                continue
+            donor.tables[key(table.name, table.scope, unit_of(table.address))] = [
+                known(v, starts[v].name, starts[v].scope) if kind == "function" else v if kind == "import" else None
+                for kind, v in slots]
+            continue
+        if switch or not table.name.startswith("__vt__") or table.size < 12:
             continue
         try:
             words = struct.unpack(f">{table.size // 4}I", program.read(table.address, table.size // 4 * 4))
@@ -265,7 +334,8 @@ def add_program(donor: Donor, program: Program, units: list[tuple[int, int, str]
             continue
         donor.tables[key(table.name, table.scope, unit_of(table.address))] = [
             known(w, starts[w].name, starts[w].scope) if w in starts else None for w in words[2:]]
-    donor.images.append(hashlib.sha1(program.image.raw).hexdigest())
+    donor.images.append(identity(program.image))
+    donor.platform = program.platform.name
 
 
 def add_object(donor: Donor, elf, unit: str = "") -> None:
@@ -392,17 +462,19 @@ def map_program(platform, image: Path, map_path: Path) -> tuple[Program, list[tu
 
 def build(name: str, image: Path | None = None, symbols: Path | None = None, map_path: Path | None = None,
           splits: Path | None = None, objects: Iterable[Path] = ()) -> Donor:
-    """A donor: an original with its symbols.txt (and splits.txt, which places file-local names) or with a
-    CodeWarrior map, and/or compiled objects and libraries."""
+    """A donor: an original (a DOL or disc image, or a Switch NSO or ELF) with its symbols.txt (and splits.txt,
+    which places file-local names) or with a CodeWarrior map, and/or compiled objects and libraries."""
     from .elf import Elf
     from .gc import read_splits
-    from .platform import GameCube
+    from .platform import GameCube, Switch
     donor = Donor(name, built=time.strftime("%Y-%m-%dT%H:%M:%S"))
     if image is not None:
+        with image.open("rb") as stream:
+            platform = Switch() if stream.read(4) in (b"NSO0", b"\x7fELF") else GameCube()
         if map_path is not None:
-            program, units = map_program(GameCube(), image, map_path)
+            program, units = map_program(platform, image, map_path)
         elif symbols is not None:
-            program = Program.from_symbols(GameCube(), image, symbols)
+            program = Program.from_symbols(platform, image, symbols)
             units = [(start, end, unit) for unit, _, start, end in read_splits(splits)] if splits else []
         else:
             raise ValueError("An original needs its names: a symbols.txt or a linker map")
@@ -415,6 +487,7 @@ def build(name: str, image: Path | None = None, symbols: Path | None = None, map
             continue
         if elf.machine == "ppc" and elf.type == 1:
             add_object(donor, elf, unit)
+            donor.platform = "gamecube"
     donor.sources += [str(p) for p in objects]
     if not donor.signatures:
         raise ValueError(f"No named functions found for {name}")
@@ -434,10 +507,11 @@ def save(donor: Donor) -> Path:
     path = _path(donor.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [[s.shape, s.key, s.size, s.unit, s.before, s.after,
-             [[r.offset, r.kind, list(r.token) if r.token else None] for r in s.references]]
+             [[r.offset, r.kind, list(r.token) if r.token else None] for r in s.references], s.place]
             for s in donor.signatures]
     data = {"version": VERSION, "name": donor.name, "built": donor.built, "sources": donor.sources,
-            "images": donor.images, "tables": donor.tables, "sizes": donor.sizes, "functions": rows}
+            "images": donor.images, "tables": donor.tables, "sizes": donor.sizes, "layout": donor.layout,
+            "platform": donor.platform, "functions": rows}
     temporary = path.with_name(path.name + ".partial")
     with gzip.open(temporary, "wt", encoding="utf-8") as stream:
         json.dump(data, stream, separators=(",", ":"))
@@ -455,10 +529,10 @@ def load(name: str) -> Donor:
     if data.get("version") != VERSION:
         raise ValueError(f"Signatures {name!r} were built by another zkit version; build them again")
     signatures = [Signature(k, size, shape, tuple(Reference(o, kind, tuple(t) if t else None) for o, kind, t in refs),
-                            unit, data["name"], before, after)
-                  for shape, k, size, unit, before, after, refs in data["functions"]]
+                            unit, data["name"], before, after, place)
+                  for shape, k, size, unit, before, after, refs, place in data["functions"]]
     return Donor(data["name"], signatures, data["tables"], data["sizes"], data["images"], data["sources"],
-                 data["built"])
+                 data["built"], data["layout"], data["platform"])
 
 
 def listed() -> list[str]:
@@ -562,7 +636,9 @@ class Matcher:
             self.plain[shape] = (referring, plain, before, after)
             self.keys[shape] = {s.key for s in self.by_shape[shape]}
         # what a group's decision depends on: the addresses its references and neighbours name, and its keys
+        # (and per target function of a group, the addresses whose names its options depend on: `watchers`)
         self.dependents: dict[int, set[str]] = collections.defaultdict(set)
+        self.watchers: dict[int, set[tuple[str, int]]] = collections.defaultdict(set)
         self.key_groups: dict[str, set[str]] = collections.defaultdict(set)
         for shape, addresses in self.groups.items():
             for signature in self.by_shape[shape]:
@@ -571,13 +647,34 @@ class Matcher:
                 for neighbour in self.neighbours[address]:
                     if neighbour is not None:
                         self.dependents[neighbour].add(shape)
+                        self.watchers[neighbour].add((shape, address))
                 for offset, _, target in self.shapes[address].references:
                     for addend in {r.token[2] for s in self.by_shape[shape] for r in s.references
                                    if r.offset == offset and r.token and r.token[0] == "n"}:
                         self.dependents[target - addend].add(shape)
+                        self.watchers[target - addend].add((shape, address))
         self._texts: dict[int, str | None] = {}
         self._text_sets: tuple | None = None
         self._vtables = None
+        # each donor original's layout, and its named functions by place
+        self.layouts = {donor.name: donor.layout for donor in donors if donor.layout}
+        self.placed = {(s.donor, s.place): s for entries in self.by_key.values() for s in entries
+                       if s.place is not None}
+        self._weights: dict[tuple, float] | None = None
+
+    def uses(self, signature: Signature) -> set[tuple]:
+        """What a donor function refers to by name or by text: ("n", key) and ("s", text) of four characters or
+        more."""
+        return {("n", r.token[1]) if r.token[0] == "n" else ("s", r.token[1]) for r in signature.references
+                if r.token and (r.token[0] == "n" or len(r.token[1]) >= 4)}
+
+    def weight(self, use: tuple) -> float:
+        """Bits a shared reference is worth: -log2 of the share of donor functions that make it."""
+        if self._weights is None:
+            counts = collections.Counter(u for entries in self.by_key.values() for s in entries for u in self.uses(s))
+            total = sum(len(entries) for entries in self.by_key.values())
+            self._weights = {u: math.log2(total / (1 + n)) for u, n in counts.items()}
+        return self._weights.get(use, 0.0)
 
     def text(self, address: int) -> str | None:
         if address not in self._texts:
@@ -588,10 +685,9 @@ class Matcher:
         """{texts: donor C keys} for donor functions using enough text, and {texts: target functions} for the
         target functions using exactly such a set."""
         if self._text_sets is None:
-            from .cwnames import parse
             donor_sets: dict[tuple, set[str]] = collections.defaultdict(set)
             for named, entries in self.by_key.items():
-                if parse(display(named)) is not None:
+                if not c_name(named):
                     continue
                 for signature in entries:
                     texts = tuple(sorted({r.token[1] for r in signature.references if r.token and r.token[0] == "s"}))
@@ -609,6 +705,44 @@ class Matcher:
         if self._vtables is None:
             from . import vtables
             self._vtables = vtables.find(self.program) if self.tables else {}
+        return self._vtables
+
+    def slot_classes(self) -> dict[tuple[int, str], set[str]]:
+        """{(slot, key): the donor `_ZTV` classes whose table names that key in that slot}."""
+        if getattr(self, "_slot_classes", None) is None:
+            self._slot_classes = collections.defaultdict(set)
+            for cls, rows in self.tables.items():
+                if cls.startswith("_ZTV"):
+                    for row in rows:
+                        for i, k in enumerate(row):
+                            if k is not None:
+                                self._slot_classes[(i, k)].add(cls)
+        return self._slot_classes
+
+    def itanium_tables(self) -> dict[int, list[tuple[str, int | str | None]]]:
+        """Switch: every primary class table the code forms the address point of (offset-to-top and typeinfo
+        zero, a function or an import in the first slot), by the table's start, with its slots up to the first
+        word that is neither."""
+        if self._vtables is None:
+            self._vtables = {}
+            image, formed = self.program.image, set()
+            if self.tables:
+                for rows in self.program.refs.values():
+                    formed.update(address for _, address, kind in rows if kind == "addr")
+            for point in sorted(formed):
+                start = point - 16
+                if start < 0 or image.section_at(start) is None or point % 8 or image.section_at(point) is None:
+                    continue
+                if start in image.pointers or point - 8 in image.pointers or image.u64(start) or image.u64(point - 8):
+                    continue
+                slots = []
+                while True:
+                    slot = itanium_slots(image, start + 8 * len(slots), 1, self.extent)
+                    if slot is None or slot[0][0] == "other":
+                        break
+                    slots += slot
+                if slots:
+                    self._vtables[start] = slots
         return self._vtables
 
     def run(self, strings: bool = True, rounds: int = 8) -> list[Proposal]:
@@ -638,6 +772,8 @@ class _State:
         self.contradicted: set[int] = set()            # addresses two pieces of evidence name differently
         self.named_tables: set[int] = set()
         self.dirty: set[str] = set(matcher.groups)     # groups to decide again
+        self.later: list[tuple[int, list[Signature]]] = []  # functions named otherwise whose code is the donors'
+        self.cached: dict[tuple[str, int], dict] = {}  # (shape, address) -> its options, until a name they use
         self.changed = False
 
     # evidence
@@ -682,6 +818,8 @@ class _State:
             return False
         self.known[address], self.owner[named] = named, address
         self.dirty |= self.m.dependents.get(address, set()) | self.m.key_groups.get(named, set())
+        for watcher in self.m.watchers.get(address, ()):
+            self.cached.pop(watcher, None)
         entries = entries or self.m.by_key.get(named, ())
         sizes = {s.size for s in entries} if kind == "function" else self.m.sizes.get(named, set())
         units = {s.unit for s in entries if s.unit}
@@ -707,12 +845,24 @@ class _State:
         if len(self.votes[address]) == 1:
             kind = "function" if address in self.m.extent else "label" if self.m.program.in_code(address) else \
                 "object"
-            self.name(address, named, kind, evidence, source)
+            if self.name(address, named, kind, evidence, source) and kind == "function":
+                shape = self.m.shapes.get(address)
+                same = [s for s in self.m.by_key.get(named, ()) if shape is not None and s.shape == shape.shape]
+                if same:                                     # its code is the donors' too: it names what it uses
+                    self.later.append((address, same))
 
     def accept(self, address: int, named: str, agreed: tuple[int, int], entries: list[Signature]) -> None:
         evidence = "shape" + ("+references" if agreed[0] else "") + ("+layout" if agreed[1] else "")
-        if not self.name(address, named, "function", evidence, None, entries, sum(agreed)):
-            return
+        if self.name(address, named, "function", evidence, None, entries, sum(agreed)):
+            self.refer(address, entries)
+
+    def drain(self) -> None:
+        """What the functions named by a reference or a slot, with the donors' code, refer to."""
+        while self.later:
+            self.refer(*self.later.pop())
+
+    def refer(self, address: int, entries: list[Signature]) -> None:
+        """A named function with its donors' shape names what each of its references names in all of them."""
         for index, (_, _, target) in enumerate(self.m.shapes[address].references):
             tokens = {t for e in entries if (t := e.references[index].token) is not None}  # unnamed there: silent
             token = next(iter(tokens), None)
@@ -763,7 +913,9 @@ class _State:
             open_ = [a for a in self.m.groups[shape] if a not in self.known and a not in self.banned_addresses]
             viable: dict[int, dict[str, tuple[tuple[int, int], list[Signature]]]] = {}
             for address in open_:
-                options = self.options(shape, address)
+                options = self.cached.get((shape, address))
+                if options is None:
+                    options = self.cached[(shape, address)] = self.options(shape, address)
                 (named, (agreed, _)), = options.items() if len(options) == 1 else [(None, ((0, 0), []))]
                 if named in self.owner and sum(agreed):
                     self.clashes.add(named)                  # the evidence points at a name already elsewhere
@@ -811,6 +963,197 @@ class _State:
                 if len(fits) == 1:
                     self.vote(address, fits.pop(), address, "table")
 
+    def itanium(self) -> None:
+        """Switch: a named `_ZTV` table names its slots from the donors' table of that class, read for the
+        donors' length (all donors agreeing on it), and only when the target's words fit it: a function where a
+        donor names one, the same import where a donor has an import. An unnamed primary table takes the one
+        donor class whose table agrees with every slot already named and has no other slot in their place."""
+        imported = set(self.m.program.image.imports.values())
+        for named, address in list(self.owner.items()):
+            if not named.startswith("_ZTV") or address in self.named_tables:
+                continue
+            self.named_tables.add(address)
+            donors = self.m.tables.get(named, [])
+            if not donors or len({len(slots) for slots in donors}) != 1:
+                continue
+            slots = itanium_slots(self.m.program.image, address, len(donors[0]), self.m.extent)
+            if slots is None:
+                continue
+            votes = []
+            for index, (kind, target) in enumerate(slots):
+                keys = {row[index] for row in donors}
+                k = next(iter(keys))
+                if len(keys) != 1 or k is None:
+                    continue
+                if kind == "import" and k == target:
+                    continue
+                if kind != "function" or k in imported:
+                    break                                   # the target's table is laid out otherwise
+                votes.append((target, k))
+            else:
+                for target, k in votes:
+                    self.vote(target, k, address, "slot")
+        for address, slots in self.m.itanium_tables().items():
+            if address in self.known or address in self.banned_addresses:
+                continue
+            known = [(i, self.known[v]) for i, (kind, v) in enumerate(slots) if kind == "function" and v in self.known]
+            if not known:
+                continue
+            candidates = set().union(*(self.m.slot_classes().get(item, ()) for item in known))
+            fits = {cls for cls in candidates if all(
+                len(row) >= len(slots) and (len(row) == len(slots) or row[len(slots)] is None)
+                and all(row[i] in (None, k) for i, k in known) for row in self.m.tables[cls])}
+            if len(fits) == 1:
+                self.vote(address, fits.pop(), address, "table")
+
+    def gaps(self) -> None:
+        """Between two target functions named from one donor original's, in its order: functions of one shape take the
+        donor's functions of that shape between the donor's two, in order where both sides have as many, else by their
+        references (`agreeing`). Both builds link in one order and the linker only dropped what it did not need, so the
+        code between two placed functions is the code between them in the donor, less what was dropped (and plus what
+        was added). A gap whose matches would cross is left alone. What is left on both sides then pairs as changed code
+        (`changed_code`)."""
+        functions, index = self.m.program.functions, self.m.program.function_index
+        rows = sorted((a, a + max(max(self.m.sizes.get(k, {1})), 1), k) for a, k in self.known.items()
+                      if a not in index)
+        extents = ([r[0] for r in rows], rows)          # the data named so far, by its donors' size
+        anchors: dict[str, list[tuple[int, int]]] = collections.defaultdict(list)
+        for address, named in self.known.items():
+            if address not in index:
+                continue
+            places = collections.defaultdict(list)
+            for signature in self.m.by_key.get(named, ()):
+                if signature.place is not None:
+                    places[signature.donor].append(signature.place)
+            for donor, found in places.items():
+                if len(found) == 1:
+                    anchors[donor].append((index[address], found[0]))
+        for donor, rows in anchors.items():
+            layout = self.m.layouts.get(donor)
+            if not layout:
+                continue
+            rows.sort()
+            for (i, a), (j, b) in zip(rows, rows[1:]):
+                if j - i < 2 or b - a < 2:
+                    continue
+                between = [functions[k].address for k in range(i + 1, j)]
+                ours: dict[str, list[int]] = collections.defaultdict(list)   # shape -> open functions, in order
+                for t in between:
+                    if t in self.m.shapes and t not in self.known and t not in self.banned_addresses:
+                        ours[self.m.shapes[t].shape].append(t)
+                theirs: dict[str, list[Signature | None]] = collections.defaultdict(list)   # unnamed: None
+                for q in range(a + 1, b):
+                    if layout[q] in ours:
+                        signature = self.m.placed.get((donor, q))
+                        if signature is None or signature.key not in self.owner:
+                            theirs[layout[q]].append(signature)
+                matches = []
+                for shape, targets in ours.items():
+                    candidates = theirs.get(shape, [])
+                    if len(candidates) == len(targets):          # as many on both sides: in order
+                        matches += [(t, s) for t, s in zip(targets, candidates) if s is not None]
+                    elif candidates:
+                        matches += self.agreeing(targets, [s for s in candidates if s is not None])
+                matches.sort(key=lambda m: m[0])
+                if any(m[1].place > n[1].place for m, n in zip(matches, matches[1:])):
+                    continue
+                for t, signature in matches:
+                    if signature.key in self.owner or signature.key in self.banned_keys:
+                        continue
+                    agreed = self.support(signature, self.m.shapes[t])
+                    if agreed is not None:
+                        self.accept(t, signature.key, (agreed[0], max(agreed[1], 1)), [signature])
+                rest = [t for t in between if t not in self.known and t not in self.banned_addresses]
+                left = [s for q in range(a + 1, b) if (s := self.m.placed.get((donor, q))) is not None
+                        and s.key not in self.owner and s.key not in self.banned_keys]
+                for t, signature, evidence in self.changed_code(rest, left, extents):
+                    self.name(t, signature.key, "function", evidence, None, [signature])
+
+    def agreeing(self, targets: list[int], candidates: list[Signature]) -> list[tuple[int, Signature]]:
+        """Copies of one shape, more on one side than the other: a target copy takes the one donor copy whose
+        references agree with it (at least one agreeing, none disagreeing) when no other target copy agrees
+        with that one."""
+        agree = {t: [s for s in candidates if (r := self.support(s, self.m.shapes[t])) is not None and r[0] > 0]
+                 for t in targets}
+        takers = collections.Counter(id(s) for found in agree.values() for s in found)
+        return [(t, found[0]) for t, found in agree.items() if len(found) == 1 and takers[id(found[0])] == 1]
+
+    def changed_code(self, rest: list[int], left: list[Signature], extents) -> list[tuple[int, Signature, str]]:
+        """Inside one gap, the target functions left (in address order) against the donor functions left:
+        one of each, or two of each in order, of plausible sizes (and two not sharing more the other way
+        round), are functions whose code changed (layout); otherwise a target function takes the donor
+        function it shares the most with by what both refer to (named functions and data, texts), at least
+        `SHARED_BITS` and over twice what any other pairing of either gets (layout+references). Pairings that
+        would cross are none. (On Xenoblade 2's 3.0.1 against 1.0.0, in order was right for every gap of two
+        and wrong for one in seven of four or more.)"""
+        if not rest or not left:
+            return []
+        if len(rest) == 1 and len(left) == 1:
+            return [(rest[0], left[0], "layout")] if self.plausible(rest[0], left[0].key) else []
+        theirs = {id(s): self.m.uses(s) for s in left}
+        score = {}
+        for t in rest:
+            ours = self.target_uses(t, extents)
+            for s in left:
+                score[(t, id(s))] = sum(self.m.weight(u) for u in ours & theirs[id(s)])
+        if len(rest) == len(left) == 2 and all(self.plausible(t, s.key) for t, s in zip(rest, left)):
+            (t0, t1), (s0, s1) = rest, left
+            if score[(t0, id(s1))] + score[(t1, id(s0))] <= score[(t0, id(s0))] + score[(t1, id(s1))]:
+                return [(t0, s0, "layout"), (t1, s1, "layout")]
+        chosen = []
+        for t in rest:
+            ranked = sorted(left, key=lambda s: -score[(t, id(s))])
+            best, top = ranked[0], score[(t, id(ranked[0]))]
+            if top < SHARED_BITS or len(ranked) > 1 and 2 * score[(t, id(ranked[1]))] > top:
+                continue
+            if any(2 * score[(u, id(best))] > top for u in rest if u != t) or not self.plausible(t, best.key):
+                continue
+            chosen.append((t, best, "layout+references"))
+        if any(x[1].place > y[1].place for x, y in zip(chosen, chosen[1:])):
+            return []
+        return chosen
+
+    def target_uses(self, address: int, extents) -> set[tuple]:
+        """What a target function refers to, by the names known so far (a function's start, the data object
+        holding an address, by its donors' size) and by text."""
+        starts, rows = extents
+        out = set()
+        for _, _, target in self.m.shapes[address].references:
+            named = self.known.get(target)
+            if named is None:
+                i = bisect.bisect_right(starts, target) - 1
+                if i >= 0 and target < rows[i][1]:
+                    named = rows[i][2]
+            if named is not None:
+                out.add(("n", named))
+            elif (text := self.m.text(target)) is not None and len(text) >= 4:
+                out.add(("s", text))
+        return out
+
+    def calls(self) -> None:
+        """A named function whose code changed still calls what its donors' code calls: when one function it
+        calls is unnamed and one function its donors call is unclaimed, they are one function (of a plausible
+        size), unless another caller says otherwise."""
+        from . import aarch64
+        kinds = {ppc.REL24, aarch64.CALL26, aarch64.JUMP26}
+        found: dict[int, dict[str, int]] = collections.defaultdict(dict)
+        for address, named in list(self.known.items()):
+            shape, entries = self.m.shapes.get(address), self.m.by_key.get(named, ())
+            if shape is None or not entries or any(e.shape == shape.shape for e in entries):
+                continue
+            ours = {t for _, kind, t in shape.references if kind in kinds and t in self.m.extent
+                    and t not in self.known and t not in self.banned_addresses}
+            theirs = {frozenset(r.token[1] for r in e.references if r.kind in kinds and r.token and r.token[0] == "n"
+                                and r.token[1] in self.m.by_key and r.token[1] not in self.owner
+                                and r.token[1] not in self.banned_keys) for e in entries}
+            if len(ours) == 1 and len(theirs) == 1 and len(next(iter(theirs))) == 1:
+                found[next(iter(ours))][next(iter(next(iter(theirs))))] = address
+        for target, keys in found.items():
+            if len(keys) == 1:
+                (named, source), = keys.items()
+                if self.plausible(target, named):
+                    self.name(target, named, "function", "call", source)
+
     def strings(self) -> None:
         """Functions whose shape matched nothing, by the exact set of texts they refer to, where one donor name
         and one target function have that set. Only C names: the code changed, and a C++ name's parameters
@@ -827,9 +1170,19 @@ class _State:
         while True:
             self.changed = False
             self.shapes()
-            self.tables()
+            self.drain()
+            if self.m.program.platform.name == "switch":
+                self.itanium()
+            else:
+                self.tables()
+            self.drain()
             if not self.changed and strings:
                 self.strings()
+            if not self.changed:
+                self.gaps()
+                self.drain()
+            if not self.changed:
+                self.calls()
             if not self.changed:
                 return
 
@@ -842,8 +1195,9 @@ def propose(program: Program, donors: list[Donor], strings: bool = True) -> list
     """Names for a target's functions and data from donors' signatures, read blind: the target's own names are
     never evidence (compare them with the proposals afterwards). A donor read from this very original is left
     out."""
-    image = hashlib.sha1(program.image.raw).hexdigest() if hasattr(program.image, "raw") else None
-    return Matcher(program, [d for d in donors if image is None or image not in d.images]).run(strings)
+    image = identity(program.image) if hasattr(program.image, "raw") or hasattr(program.image, "image") else None
+    return Matcher(program, [d for d in donors if (image is None or image not in d.images)
+                             and d.platform in ("", program.platform.name)]).run(strings)
 
 
 def renamed(program: Program, proposals: list[Proposal]) -> Program:
@@ -882,6 +1236,9 @@ def build_project(project, target: str, name: str, complete: bool = False) -> Do
         donor.sources.append(f"{project.config['id']}:{target}")
         return donor
     from .elf import Elf
+    if (config.get("platform") or "gamecube").lower() in ("switch", "nx"):
+        raise ValueError("Signatures from compiled objects read PowerPC objects only; build a Switch donor from its "
+                         "original (without --complete)")
     if not config.get("report"):
         raise ValueError(f"Target {target} has no objdiff report to say which units are complete")
     proven = complete_units(project.file(config["repository"], config["report"]), config.get("module"))
@@ -893,6 +1250,7 @@ def build_project(project, target: str, name: str, complete: bool = False) -> Do
                                                          for p in proven):
             continue
         add_object(donor, Elf.load(path), source)
+    donor.platform = "gamecube"
     donor.sources.append(f"{project.config['id']}:{target} complete units")
     return donor
 

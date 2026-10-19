@@ -198,9 +198,11 @@ def build_parser() -> argparse.ArgumentParser:
                                "libraries, or this project), list or remove them, or match this target against them")
     c.add_argument("action", choices=["build", "list", "remove", "match"])
     c.add_argument("name", nargs="?", help="the donor (build, remove)")
-    c.add_argument("--image", type=Path, help="build: an original executable (.dol or disc image)")
+    c.add_argument("--image", type=Path, help="build: an original executable (.dol or disc image, "
+                                              "or a Switch NSO or ELF)")
     c.add_argument("--symbols", type=Path, help="build: its symbols.txt")
-    c.add_argument("--splits", type=Path, help="build: its splits.txt (places file-local names)")
+    c.add_argument("--splits", type=Path, help="build: its splits.txt (places file-local names, and "
+                                               "gives `zkit analyze` its units)")
     c.add_argument("--map", type=Path, help="build: its CodeWarrior linker map instead of a symbols.txt")
     c.add_argument("--objects", type=Path, action="append", default=[], help="build: objects, libraries or "
                                                                               "folders of them (repeatable)")

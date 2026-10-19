@@ -5,6 +5,9 @@ that fact holds:
 - **file strings** (every platform): code citing one source path (`__FILE__` in asserts and logs) belongs to that
   file's unit; functions between two of the same file belong to it too; a function only one unit calls, placed
   beside it, is that unit's static helper. A header path is an inline compiled into its user, never an anchor.
+- **another build** (the signatures of a build of the same code with units): a function matched there is in the
+  unit that build put it in, where it cites no file itself, and counts like a file string. The linker keeps one
+  order, so its units come out as runs here too.
 - **separation** (compilers that give every unit its own literals: CodeWarrior): two copies of one constant are
   in two units, so a boundary lies between the functions using them.
 - **join**: data only a tight run of functions uses belongs to one unit, so no boundary falls inside that run.
@@ -51,6 +54,7 @@ class Evidence:
     files: dict[int, str] = field(default_factory=dict)        # function index -> source file it cites
     inlines: dict[int, str] = field(default_factory=dict)      # function index -> header it cites (inline)
     names: dict[int, str] = field(default_factory=dict)        # function index -> `Class::method` it cites
+    placed: set[int] = field(default_factory=set)              # function indexes whose file is another build's unit
     roots: list[str] = field(default_factory=list)
 
     def joined(self, count: int) -> list[bool]:
@@ -67,7 +71,7 @@ class Evidence:
         return out
 
 
-def evidence(program: Program) -> Evidence:
+def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence:
     users = program.users()
     local = {o: sorted(fs) for o, fs in users.items() if fs and max(fs) - min(fs) <= TIGHT}
     per_unit = program.platform.literals_per_unit
@@ -90,12 +94,18 @@ def evidence(program: Program) -> Evidence:
                     separations.append((local[a][-1] + 1, local[b][0],
                                         f"two copies of one constant: {text(a.address)} and {text(b.address)}"))
     ev = Evidence(local, joins, separations)
-    _file_evidence(program, ev)
+    _file_evidence(program, ev, placed)
     return ev
 
 
-def _file_evidence(program: Program, ev: Evidence) -> None:
-    """Source paths and `Class::method` names the code cites; file runs become joins, file changes separations."""
+PIECE = re.compile(r"_[0-9A-Fa-f]{8,16}(?=\.\w+$)")   # `file_<address>.cpp`: a later piece of one file
+
+
+def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None = None) -> None:
+    """Source paths and `Class::method` names the code cites, and the unit another build of the same code put
+    a function in (`placed`, by address: the signatures' donor unit) where it cites no file itself; file runs
+    become joins, file changes separations. A donor's piece of a file (`file_<its address>.cpp`) counts as the
+    file, so the pieces here take this build's addresses."""
     strings = program.strings()
     files = {a: s for a, s in strings.items() if SOURCE.search(s) and ("/" in s or "\\" in s or BARE_SOURCE.match(s))}
     signatures = {a: m["name"] for a, s in strings.items() if (m := SIGNATURE.match(s))}
@@ -117,6 +127,18 @@ def _file_evidence(program: Program, ev: Evidence) -> None:
     for index, candidates in named.items():
         if len(candidates) == 1:                       # several: an inlined callee's string, not this function's
             ev.names[index] = next(iter(candidates))
+    for address, unit in (placed or {}).items():
+        index = program.function_index.get(address)
+        if index is not None and unit and index not in ev.files:
+            ev.files[index] = PIECE.sub("", unit)
+            ev.placed.add(index)
+    # A unit's code is one run in the link: one function another build put in X between two that agree on Y is
+    # no evidence for X there (an inline that build kept from X, code that moved, other code that compiles alike).
+    anchors = sorted(ev.files.items())
+    for (_, before), (index, unit), (_, after) in zip(anchors, anchors[1:], anchors[2:]):
+        if index in ev.placed and before == after != unit:
+            del ev.files[index]
+            ev.placed.discard(index)
     anchors = sorted(ev.files.items())
     starts = [f.address for f in program.functions]
     for (a, file_a), (b, file_b) in zip(anchors, anchors[1:]):
@@ -297,11 +319,13 @@ def check_project(project, target: str | None = None, limit: int = 60) -> dict[s
     return {"target": target, **check(Program.from_project(project, target), rows, limit)}
 
 
-def propose(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
+            placed: dict[int, str] | None = None) -> dict[str, Any]:
     """Units for every function from the evidence: boundaries, a name per unit, and the data each unit owns.
     `fixed` units ({unit, how, ranges: [(section, start, end)]}, from a linker map: mapalign.py) are taken as
-    they are, code and data; the evidence decides the rest around them."""
-    ev = evidence(program)
+    they are, code and data; the evidence decides the rest around them. `placed` ({function address: unit},
+    from another build's units) counts like a source file a function cites."""
+    ev = evidence(program, placed)
     cuts = boundaries(program, ev)
     text = program.platform.text
     functions = program.functions
@@ -332,7 +356,9 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
             name, how = held[(first, end)]["unit"], held[(first, end)]["how"]
         else:
             if files:
-                name, how = files.most_common(1)[0][0], "file string"
+                name = files.most_common(1)[0][0]
+                how = "file string" if any(ev.files.get(i) == name and i not in ev.placed for i in span) \
+                    else "another build"
             elif classes:
                 name, how = classes.most_common(1)[0][0] + ".cpp", "class"
             else:

@@ -2,6 +2,7 @@ import support  # noqa: F401  (isolates config, cache and state)
 import contextlib
 import io
 import json
+import shutil
 import struct
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from zkit import cli, delink, ppc, signatures
 from zkit.elf import Elf
-from zkit.platform import GameCube
+from zkit.platform import GameCube, Switch
 from zkit.program import Program
 
 TEXT, DATA = 0x80003100, 0x80100000
@@ -314,6 +315,141 @@ class SignatureTests(unittest.TestCase):
         data = json.loads(run("--project", str(manifest), "--json", "names", "--signatures"))
         self.assertIn("LibWork", {row["name"] for row in data["rows"]})
         self.assertIn("removed", run("signatures", "remove", "cli-lib"))
+
+
+SWITCH_DONOR = """int g_counter = 3;
+struct Base { virtual ~Base(); virtual int get() const; virtual int put(int v); int value; };
+struct Child : Base { int get() const override; int put(int v) override; };
+__attribute__((noinline)) int callee(int x) { return x * 5 + g_counter; }
+int inner(int x);
+int caller(int *v, int n) { int t = 0; for (int i = 0; i < n; i++) t += callee(v[i]) * (i ^ 0x55) + v[i] * 7;
+  return t * 3 + n; }
+Base::~Base() {}
+int Base::get() const { return value + g_counter; }
+int Base::put(int v) { value = v * 3 + g_counter; return value; }
+int Child::get() const { return value * 2 + g_counter * 9; }
+int Child::put(int v) { value = inner(v) - 1; return value; }
+Base *make(bool child) { return child ? new Child() : new Base(); }
+int first(int *v, int n) { int t = 1; for (int i = 0; i < n; i++) t = t * 31 + (v[i] >> 2) - i; return t ^ 0x1234; }
+int dropped1(int x) { return x * 11 + 1; }
+int seven() { return 7; }
+int tweak(int x) { return x * 13 + 2; }
+int last(int *v, int n) { int t = 9; for (int i = 0; i < n; i++) t = t * 17 - (v[i] << 3) + i; return t ^ 0x4321; }
+int twin() { return 7; }
+__attribute__((noinline)) int inner(int x) { return x * 21 + 4; }
+__attribute__((noinline, visibility("default"))) inline int shared(int x) { return x * 41 + 9; }
+int user(int x) { return shared(x) + 1; }
+"""
+# 3.0 of the same file: four functions changed, one added, one the linker no longer keeps
+SWITCH_TARGET = SWITCH_DONOR
+for old, new in (("x * 5 + g_counter", "x * 6 - g_counter"), ("x * 21 + 4", "x * 22 - 5"), ("x * 13 + 2", "x * 14 - 3"),
+                 ("value = inner(v) - 1; return value; }",
+                  "value = inner(v) + 1; return value; }\nint added(int x) { return x * 77 - 1; }"),
+                 ("int dropped1(int x) { return x * 11 + 1; }\n", "")):
+    SWITCH_TARGET = SWITCH_TARGET.replace(old, new)
+
+
+@unittest.skipUnless(shutil.which("clang++") and shutil.which("ld.lld"), "needs clang++ and ld.lld")
+class SwitchSignatureTests(unittest.TestCase):
+    """A later build of a Switch module, its names stripped, named from an earlier one with symbols: by shape,
+    by a changed callee's caller, by a changed virtual's slot in the table a matched constructor installs, by
+    the place between two matched functions of a short one whose neighbours the linker dropped and of a changed
+    one, and its data."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def module(self, stem: str, source: str, hide: bool) -> tuple[Path, Path, dict[str, int]]:
+        """A linked module and a symbols.txt of it (placeholders where `hide`); the address of every name."""
+        import subprocess
+        (self.root / f"{stem}.cpp").write_text(source, encoding="utf-8")
+        subprocess.run(["clang++", "--target=aarch64-none-elf", "-fPIC", "-fvisibility=hidden", "-O2",
+                        "-fno-exceptions", "-fno-rtti", "-ffreestanding", "-c", str(self.root / f"{stem}.cpp"),
+                        "-o", str(self.root / f"{stem}.o")], check=True, capture_output=True)
+        elf = self.root / f"{stem}.elf"
+        subprocess.run(["ld.lld", "-shared", "--no-relax", "--unresolved-symbols=ignore-all", "-o", str(elf),
+                        str(self.root / f"{stem}.o")], check=True, capture_output=True)
+        linked = Elf.load(elf)
+        lines, where = [], {}
+        for symbol in linked.symbols:
+            if symbol.kind not in ("func", "object") or not 0 < symbol.section < 0xFF00 or not symbol.size:
+                continue
+            section = linked.sections[symbol.section].name
+            kind = "function" if symbol.kind == "func" else "object"
+            where[symbol.name] = symbol.value
+            name = (f"fn_{symbol.value:08X}" if kind == "function" else f"lbl_{symbol.value:08X}") if hide \
+                else symbol.name
+            lines.append(f"{name} = {section}:0x{symbol.value:08X}; // type:{kind} size:0x{symbol.size:X} "
+                         f"scope:global")
+        symbols = self.root / f"{stem}.symbols.txt"
+        symbols.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return elf, symbols, where
+
+    def test_names_from_an_earlier_build(self):
+        elf, symbols, _ = self.module("donor", SWITCH_DONOR, hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        self.assertIn("_ZTV5Child", donor.tables)
+        self.assertEqual(len(donor.layout), len([s for s in donor.signatures]))
+        elf, symbols, at = self.module("target", SWITCH_TARGET, hide=True)
+        program = Program.from_symbols(Switch(), elf, symbols)
+        found = {p.address: p for p in signatures.propose(program, [donor])}
+        evidence = lambda name: (found[at[name]].name, found[at[name]].evidence) if at[name] in found else None
+        self.assertEqual(evidence("_Z6callerPii"), ("_Z6callerPii", "shape"))
+        self.assertEqual(evidence("_Z6calleei"), ("_Z6calleei", "reference"))         # its code changed
+        self.assertEqual(evidence("_ZTV5Child")[0], "_ZTV5Child")                      # make() installs it
+        self.assertEqual(found[at["_ZTV5Child"]].kind, "object")
+        self.assertEqual(evidence("_ZN5Child3putEi"), ("_ZN5Child3putEi", "slot"))     # changed, never called
+        self.assertEqual(evidence("g_counter")[0], "g_counter")
+        self.assertEqual(found[at["_Z5sevenv"]].name, "_Z5sevenv")                     # between first and last
+        self.assertIn("layout", found[at["_Z5sevenv"]].evidence)
+        self.assertEqual(evidence("_Z5tweaki"), ("_Z5tweaki", "layout"))   # changed, alone between two placed
+        self.assertEqual(evidence("_Z5inneri"), ("_Z5inneri", "call"))     # changed, the one a changed one calls
+        self.assertNotIn("_Z8dropped1i", {p.name for p in found.values()})
+        self.assertNotIn(at["_Z5addedi"], found)                                   # new code: no name to take
+
+    def test_analyze_names_the_module_and_adds_its_data(self):
+        """With the donor cached, a fresh analysis of the stripped build renames its functions and adds the data
+        the donor names that its symbols lack, each with the donor's size."""
+        from zkit import analyze
+        elf, symbols, _ = self.module("donor", SWITCH_DONOR, hide=False)
+        signatures.save(signatures.build("earlier", elf, symbols))
+        elf, symbols, at = self.module("target", SWITCH_TARGET, hide=True)
+        symbols.write_text("".join(line + "\n" for line in symbols.read_text().splitlines() if "type:function" in line))
+        program = Program.from_symbols(Switch(), elf, symbols)
+        written = analyze.write(program, analyze.analyze(program), symbols, self.root / "analysis")
+        text = (self.root / "analysis" / "symbols.txt").read_text()
+        signatures.remove("earlier")
+        self.assertGreater(written["signature_names"], 10)
+        self.assertRegex(text, rf"(?m)^_Z6callerPii = \.text:0x{at['_Z6callerPii']:08X}; // type:function ")
+        self.assertRegex(text, rf"(?m)^_ZTV5Child = \.\w+:0x{at['_ZTV5Child']:08X}; // type:object size:0x30 ")
+        self.assertRegex(text, rf"(?m)^g_counter = \.data:0x{at['g_counter']:08X}; // type:object size:0x4 ")
+        addresses = [int(line.split(":0x")[1][:8], 16) for line in text.splitlines()]
+        self.assertEqual(addresses, sorted(addresses))
+        splits = (self.root / "analysis" / "splits.txt").read_text()
+        self.assertRegex(splits, rf"\.data +start:0x[0-9A-F]+ end:0x{at['g_counter'] + 4:08X}\n")  # its unit's
+
+    def test_a_weak_function_has_no_unit(self):
+        """An inline function is the copy the linker kept from whichever unit came first, so the donor's unit
+        is not evidence for it; its neighbours keep theirs."""
+        elf, symbols, at = self.module("donor", SWITCH_DONOR, hide=False)
+        splits = self.root / "donor.splits.txt"
+        splits.write_text(f"lib.cpp:\n\t.text start:0x{min(at.values()):08X} end:0x{max(at.values()) + 0x100:08X}\n")
+        donor = signatures.build("earlier", elf, symbols, splits=splits)
+        units = {s.key: s.unit for s in donor.signatures}
+        self.assertEqual((units["_Z6sharedi"], units["_Z4useri"]), ("", "lib.cpp"))
+
+    def test_cache_keeps_the_layout(self):
+        elf, symbols, _ = self.module("donor", SWITCH_DONOR, hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        signatures.save(donor)
+        loaded = signatures.load("earlier")
+        self.assertEqual(loaded.layout, donor.layout)
+        self.assertEqual([s.place for s in loaded.signatures], [s.place for s in donor.signatures])
+        self.assertTrue(signatures.remove("earlier"))
 
 
 if __name__ == "__main__":
