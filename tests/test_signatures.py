@@ -479,6 +479,41 @@ class SwitchSignatureTests(unittest.TestCase):
         self.assertNotIn(at["_Z5addedPii"], found)
         self.assertNotIn("_Z7droppedPii", {name for name, _ in found.values()})
 
+    def test_a_source_path_from_another_drive(self):
+        """An update built on another machine cites its source files from another drive: the code that cites
+        them is still the same code."""
+        source = ("void report(const char *file, int line);\n"
+                  "int check(int *v, int n) { int t = 0; for (int i = 0; i < n; i++) { t = t * 7 + v[i];\n"
+                  "  if (t < 0) report(\"@:/proj/src/check.cpp\", 12); } return t ^ n; }\n")
+        elf, symbols, _ = self.module("donor", source.replace("@", "C"), hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        elf, symbols, at = self.module("target", source.replace("@", "D"), hide=True)
+        found = {p.address: (p.name, p.evidence)
+                 for p in signatures.propose(Program.from_symbols(Switch(), elf, symbols), [donor])}
+        self.assertEqual(found.get(at["_Z5checkPii"]), ("_Z5checkPii", "shape+references"))
+        self.assertEqual(signatures.evidence_text("C:\\proj\\a.cpp"), "\\proj\\a.cpp")
+
+    def test_code_that_reads_like_its_twin(self):
+        """A field added before two others moves both: the update's `sumA` reads the offset the first build's
+        `sumB` read, so its code is exactly that `sumB`'s. Code that differs from a sibling in one immediate is
+        named by its shape only with its neighbours agreeing; here its place names both."""
+        source = ("int g_k = 3;\nstruct S { int pad; @ int a, b, c; };\n"
+                  "int first(int *v, int n) { int t = 1; for (int i = 0; i < n; i++) t = t * 31 + (v[i] >> 2) - i;\n"
+                  "  for (int i = n - 1; i >= 0; i--) t ^= v[i] * (i + 3); return t ^ 0x1234; }\n"
+                  "int sumA(S *s, int n) { int t = 0; for (int i = 0; i < n; i++) t = (t + s->a * (i + g_k)) ^ (t >> 3);\n"
+                  "  for (int i = 0; i < n; i += 3) t += (s->a << 2) - i * g_k; return t * 7; }\n"
+                  "int sumB(S *s, int n) { int t = 0; for (int i = 0; i < n; i++) t = (t + s->b * (i + g_k)) ^ (t >> 3);\n"
+                  "  for (int i = 0; i < n; i += 3) t += (s->b << 2) - i * g_k; return t * 7; }\n"
+                  "int last(int *v, int n) { int t = 9; for (int i = 0; i < n; i++) t = t * 17 - (v[i] << 3) + i;\n"
+                  "  for (int i = 0; i < n; i++) t += v[i] * v[i]; return t ^ 0x4321; }\n")
+        elf, symbols, _ = self.module("donor", source.replace("@", ""), hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        elf, symbols, at = self.module("target", source.replace("@", "int added;"), hide=True)
+        found = {p.address: (p.name, p.evidence)
+                 for p in signatures.propose(Program.from_symbols(Switch(), elf, symbols), [donor])}
+        self.assertEqual(found.get(at["_Z4sumAP1Si"]), ("_Z4sumAP1Si", "layout"))
+        self.assertEqual(found.get(at["_Z4sumBP1Si"]), ("_Z4sumBP1Si", "layout"))
+
     def test_aligned_slots(self):
         same = signatures.aligned(list("abcdef"), list("abcdef"))
         self.assertEqual(same, [(i, i) for i in range(6)])

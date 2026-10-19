@@ -19,10 +19,12 @@ places it. A shape shorter than `MINIMUM_WORDS` needs such evidence (copies, set
 every game). A matched function names what it refers to (its callees and its data, at the address each reference
 resolves to, where the donors agree), a named virtual table names its slots from the donors' table of its class
 (slot to slot by the code in them, `aligned`), and a C function whose code changed is still found by the exact set
-of texts it uses. A function named any other way whose code is its donors' names what it refers to too. Between two
-functions an original donor places in one order (`gaps`), the functions of one shape pair in order (or, more copies
-on one side, by their references), and what is left pairs as changed code: one on each side, the pair that shares
-by far the most of what it refers to, or, aligned in order, the pair whose code is by far the most alike. A
+of texts it uses. A function named any other way whose code is its donors' names what it refers to too. Texts
+compare without a drive letter (`evidence_text`). Code that differs from a donor sibling's only in immediates
+(`Matcher.families`) needs its neighbours to agree. Between two functions an original donor places in one order
+(`gaps`), the functions of one shape, or of one such family, pair in order (or, more copies of one shape on one
+side, by their references), and what is left pairs as changed code: one on each side, the pair that shares by far
+the most of what it refers to, or, aligned in order, the pair whose code is by far the most alike. A
 function whose code changed still calls what it called: its one unnamed callee is its donors' one unclaimed callee
 (`calls`). Every name is then checked: an address two pieces of evidence name differently, and a name two addresses
 claim, are withdrawn, and the matching runs again without them.
@@ -59,6 +61,25 @@ SHARED_BITS = 8.5        # what changed code must still share with its donor (-l
 SIMILAR = 0.5            # how alike changed code must be to pair by likeness (`_State.similar`)
 SIMILAR_MARGIN = 0.05    # by how much it must beat every other pairing of either function in its gap
 SIMILAR_PAIRS = 40000    # the largest gap (target functions times donor functions) compared that way
+# AArch64 instructions that hold an immediate: (mask, value) of the class, then the immediate's bits
+AARCH64_IMMEDIATES = ((0x3B000000, 0x39000000, 0x003FFC00),    # load/store, unsigned scaled offset
+                      (0x3A000000, 0x28000000, 0x003F8000),    # load/store pair
+                      (0x3B200000, 0x38000000, 0x001FF000),    # load/store, unscaled or indexed offset
+                      (0x1F000000, 0x11000000, 0x007FFC00),    # add/sub (and cmp) immediate
+                      (0x1F800000, 0x12800000, 0x007FFFE0),    # move wide
+                      (0x1F800000, 0x12000000, 0x007FFC00),    # logical immediate
+                      (0x1F800000, 0x13000000, 0x007FFC00))    # bitfield (shifts by a constant)
+POWERPC_REGISTER_FORMS = {4, 16, 18, 19, 30, 31, 59, 63}         # no 16-bit immediate in the low half
+
+
+def skeleton(word: int, switch: bool) -> int:
+    """An instruction without its immediate (an offset, a constant, a shift)."""
+    if switch:
+        for mask, value, immediate in AARCH64_IMMEDIATES:
+            if word & mask == value:
+                return word & ~immediate
+        return word
+    return word if word >> 26 in POWERPC_REGISTER_FORMS else word & 0xFFFF0000
 TEXT_LIMIT = 256
 
 # The masks an assembler leaves on a relocated instruction, by relocation type.
@@ -231,6 +252,15 @@ def small_data(program: Program) -> dict[int, int]:
         if len(found) == 2:
             return found
     return {}
+
+
+DRIVE = re.compile(r"^[A-Za-z]:(?=[/\\])")
+
+
+def evidence_text(text: str | None) -> str | None:
+    """A text as evidence: a source path without its drive letter, which is the build machine's (one build's
+    `D:/...` is another's `C:/...` for the same file)."""
+    return DRIVE.sub("", text) if text else text
 
 
 def text_at(read, address: int) -> str | None:
@@ -612,12 +642,14 @@ def _canonical(donors: list[Donor]) -> dict[str, str]:
     return {name: found[0] for name, found in local.items() if len(found) == 1 and name in keys}
 
 
-def _renamed_signature(signature: Signature, same: dict[str, str]) -> Signature:
+def _canonical_signature(signature: Signature, same: dict[str, str]) -> Signature:
+    """A donor signature with the keys `same` renames renamed and its texts as evidence (`evidence_text`)."""
     from dataclasses import replace
     get = lambda k: same.get(k, k) if k else k
+    token = lambda t: ("n", get(t[1]), t[2]) if t[0] == "n" else ("s", evidence_text(t[1]))
     return replace(signature, key=get(signature.key), before=get(signature.before), after=get(signature.after),
-                   references=tuple(Reference(r.offset, r.kind, ("n", get(r.token[1]), r.token[2]))
-                                    if r.token and r.token[0] == "n" else r for r in signature.references))
+                   references=tuple(Reference(r.offset, r.kind, token(r.token)) if r.token else r
+                                    for r in signature.references))
 
 
 class Matcher:
@@ -632,8 +664,8 @@ class Matcher:
         same = _canonical(donors)
         for donor in donors:
             for signature in donor.signatures:
-                if same:
-                    signature = _renamed_signature(signature, same)
+                if same or any(r.token and r.token[0] == "s" and DRIVE.match(r.token[1]) for r in signature.references):
+                    signature = _canonical_signature(signature, same)
                 self.by_shape[signature.shape].append(signature)
                 self.by_key[signature.key].append(signature)
             for name, slots in donor.tables.items():
@@ -692,6 +724,8 @@ class Matcher:
                         self.watchers[target - addend].add((shape, address))
         self._texts: dict[int, str | None] = {}
         self._code: dict[int, tuple[int, ...]] = {}
+        self._family: dict[int, tuple] | None = None
+        self._families: set[tuple] = set()
         self._text_sets: tuple | None = None
         self._vtables = None
         # each donor original's layout, and its named functions by place
@@ -722,9 +756,46 @@ class Matcher:
             found = self._code[id(item)] = struct.unpack(f"<{len(raw) // 4}I", raw)
         return found
 
+    def families(self) -> dict[int, tuple]:
+        """{id of a donor signature: its family} for donor functions that refer to the same things as another and
+        differ from it only in immediates (a field offset, a virtual's slot, a constant): which of them a target
+        with that code is rests on the immediates, and an update that moves a field or a slot moves them."""
+        if self._family is None:
+            self._family = {}
+            switch = self.program.platform.name == "switch"
+            buckets: dict[tuple, list[Signature]] = collections.defaultdict(list)
+            for entries in self.by_key.values():
+                for s in entries:
+                    if s.code:
+                        buckets[(s.size, s.references)].append(s)
+            for rows in buckets.values():
+                if len({s.shape for s in rows}) < 2:
+                    continue
+                skeletons: dict[tuple, list[Signature]] = collections.defaultdict(list)
+                for s in rows:
+                    skeletons[tuple(skeleton(w, switch) for w in self.code(s))].append(s)
+                for words, found in skeletons.items():
+                    if len({s.shape for s in found}) > 1:
+                        self._family.update((id(s), ("family", hash(words))) for s in found)
+            self._families = set(self._family.values())
+        return self._family
+
+    def twinned(self, signature: Signature) -> bool:
+        return id(signature) in self.families()
+
+    def group(self, address: int | None = None, signature: Signature | None = None, shape: str | None = None):
+        """What a function pairs by in a gap: its shape, or its family (`families`), whose members pair in order
+        like copies of one shape."""
+        families = self.families()
+        if signature is not None:
+            return families.get(id(signature), shape if shape is not None else signature.shape)
+        switch = self.program.platform.name == "switch"
+        key = ("family", hash(tuple(skeleton(w, switch) for w in self.code(self.shapes[address]))))
+        return key if key in self._families else self.shapes[address].shape
+
     def text(self, address: int) -> str | None:
         if address not in self._texts:
-            self._texts[address] = text_at(self.program.read, address)
+            self._texts[address] = evidence_text(text_at(self.program.read, address))
         return self._texts[address]
 
     def texts(self) -> tuple[dict[tuple, set[str]], dict[tuple, list[int]]]:
@@ -981,6 +1052,8 @@ class _State:
                     continue
                 if self.m.shapes[address].size // 4 < MINIMUM_WORDS and agreed[0] < CONFIRMING and not agreed[1]:
                     continue
+                if not agreed[1] and any(self.m.twinned(e) for e in entries):
+                    continue
                 self.accept(address, named, agreed, entries)
 
     def slot_code(self, kind: str, value) -> object:
@@ -1091,22 +1164,22 @@ class _State:
                 if j - i < 2 or b - a < 2:
                     continue
                 between = [functions[k].address for k in range(i + 1, j)]
-                ours: dict[str, list[int]] = collections.defaultdict(list)   # shape -> open functions, in order
+                ours: dict[object, list[int]] = collections.defaultdict(list)   # group -> open functions, in order
                 for t in between:
                     if t in self.m.shapes and t not in self.known and t not in self.banned_addresses:
-                        ours[self.m.shapes[t].shape].append(t)
-                theirs: dict[str, list[Signature | None]] = collections.defaultdict(list)   # unnamed: None
+                        ours[self.m.group(t)].append(t)
+                theirs: dict[object, list[Signature | None]] = collections.defaultdict(list)   # unnamed: None
                 for q in range(a + 1, b):
-                    if layout[q] in ours:
-                        signature = self.m.placed.get((donor, q))
-                        if signature is None or signature.key not in self.owner:
-                            theirs[layout[q]].append(signature)
+                    signature = self.m.placed.get((donor, q))
+                    group = self.m.group(signature=signature, shape=layout[q]) if signature else layout[q]
+                    if group in ours and (signature is None or signature.key not in self.owner):
+                        theirs[group].append(signature)
                 matches = []
-                for shape, targets in ours.items():
-                    candidates = theirs.get(shape, [])
+                for group, targets in ours.items():
+                    candidates = theirs.get(group, [])
                     if len(candidates) == len(targets):          # as many on both sides: in order
                         matches += [(t, s) for t, s in zip(targets, candidates) if s is not None]
-                    elif candidates:
+                    elif candidates and not isinstance(group, tuple):
                         matches += self.agreeing(targets, [s for s in candidates if s is not None])
                 matches.sort(key=lambda m: m[0])
                 if any(m[1].place > n[1].place for m, n in zip(matches, matches[1:])):
@@ -1115,8 +1188,13 @@ class _State:
                     if signature.key in self.owner or signature.key in self.banned_keys:
                         continue
                     agreed = self.support(signature, self.m.shapes[t])
-                    if agreed is not None:
+                    if agreed is None:
+                        continue
+                    if signature.shape == self.m.shapes[t].shape:
                         self.accept(t, signature.key, (agreed[0], max(agreed[1], 1)), [signature])
+                    else:                                        # a sibling in a family whose immediates moved
+                        self.name(t, signature.key, "function", "layout" + ("+references" if agreed[0] else ""),
+                                  None, [signature])
                 rest = [t for t in between if t not in self.known and t not in self.banned_addresses]
                 left = [s for q in range(a + 1, b) if (s := self.m.placed.get((donor, q))) is not None
                         and s.key not in self.owner and s.key not in self.banned_keys]

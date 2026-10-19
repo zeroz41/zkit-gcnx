@@ -110,15 +110,18 @@ target function takes a donor name by its shape, by what matched functions refer
 tables (CodeWarrior's, or Itanium's `_ZTV` read through a module's relocations), each only where the evidence
 admits one name, and a name two pieces of evidence dispute is withdrawn. A table's slots pair with the donor's by
 the code in them, never by index: an update that adds or removes a virtual moves every slot after it, and the
-table can keep its length. A donor read from an original keeps its layout and its functions' masked words, so
-between two named functions the code in between is the donor's code in between, less what the linker dropped:
-copies of one shape pair in order, changed code one to one, by the callees, data and texts it shares, or by how
-alike it is (aligned in order, at least sixteen words, clearly ahead of every other pairing in the gap), and a
-changed function's one unnamed callee is its donor's one unclaimed callee. `analyze.py` writes the names and the
+table can keep its length. Texts compare without a drive letter, which is the build machine's. Code that differs
+from a donor sibling's only in immediates (a field offset, a virtual's slot, a constant) names nothing by its
+shape alone, since an update that moves a field moves them. A donor read from an original keeps its layout and its
+functions' masked words, so between two named functions the code in between is the donor's code in between, less
+what the linker dropped: copies of one shape, and siblings of one family, pair in order, changed code one to one,
+by the callees, data and texts it shares, or by how alike it is (aligned in order, at least sixteen words, clearly
+ahead of every other pairing in the gap), and a changed function's one unnamed callee is its donor's one
+unclaimed callee. `analyze.py` writes the names and the
 data they bring with the donor's sizes, and gives each named function's donor unit to `units.py` as evidence like
 a cited file (never a weak function's: the linker keeps an inline from whichever unit comes first). Without a
 symbols file a Switch module is read from its own tables, so a fresh analysis never inherits names. On Xenoblade
-2, 3.0.1's stripped `main` takes names for 29,360 of its 35,906 functions from 1.0.0's exports.
+2, 3.0.1's stripped `main` takes names for 29,334 of its 35,906 functions from 1.0.0's exports.
 
 `vtables.py` finds class tables as data whose words have CodeWarrior's table shape (RTTI and offset words, then
 one function pointer per slot) and that the code stores into an object, or that holds a destructor; a dispatch
