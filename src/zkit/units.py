@@ -52,7 +52,8 @@ class Evidence:
     joins: list[tuple[int, int, str]]                  # (first, last) function index that one unit holds, why
     separations: list[tuple[int, int, str]]            # a boundary lies before a function index in [lo, hi], why
     files: dict[int, str] = field(default_factory=dict)        # function index -> source file it cites
-    cited: list[tuple[int, int, str]] = field(default_factory=list)   # the joins of runs citing one file
+    cited: list[tuple[int, int, str]] = field(default_factory=list)   # joins of runs whose code cites one file
+    direct: set[tuple[int, int, str]] = field(default_factory=set)    # separations the code itself states
     inlines: dict[int, str] = field(default_factory=dict)      # function index -> header it cites (inline)
     names: dict[int, str] = field(default_factory=dict)        # function index -> `Class::method` it cites
     placed: set[int] = field(default_factory=set)              # function indexes whose file is another build's unit
@@ -96,7 +97,26 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
                                         f"two copies of one constant: {text(a.address)} and {text(b.address)}"))
     ev = Evidence(local, joins, separations)
     _file_evidence(program, ev, placed)
+    _initializer_ends(program, ev)
     return ev
+
+
+def _initializer_ends(program: Program, ev: Evidence) -> None:
+    """An ELF's static initializers: clang compiles a unit's own one (no guard to test) after its other code, so a
+    unit ends right after it. One that tests a guard first initializes a template's static member, kept from
+    whichever unit came first, and ends nothing."""
+    if program.platform.name != "switch":
+        return
+    from .aarch64 import guarded
+    for address in getattr(program.image, "init_array", ()):
+        index = program.function_index.get(address)
+        if index is None or index + 1 >= len(program.functions):
+            continue
+        function = program.functions[index]
+        if not guarded(program.platform.words(program.image, address, min(function.size, 64))):
+            ev.separations.append((index + 1, index + 1,
+                                   f"{program.platform.text(address)} is its unit's static initializer"))
+            ev.direct.add(ev.separations[-1])
 
 
 PIECE = re.compile(r"_[0-9A-Fa-f]{8,16}(?=\.\w+$)")   # `file_<address>.cpp`: a later piece of one file
@@ -154,9 +174,12 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
         if file_a == file_b:
             if b - a <= FILL_FUNCTIONS and starts[b] - starts[a] <= FILL_BYTES:
                 ev.joins.append((a, b, f"both cite {file_a}"))
-                ev.cited.append(ev.joins[-1])
+                if a not in ev.placed and b not in ev.placed:   # the code's own citations, not another build's
+                    ev.cited.append(ev.joins[-1])
         else:
             ev.separations.append((a + 1, b, f"{file_a} then {file_b}"))
+            if a not in ev.placed and b not in ev.placed:
+                ev.direct.add(ev.separations[-1])
 
 
 def _roots(paths: list[str]) -> list[str]:
@@ -287,17 +310,39 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
             crossings[p] = _crossings(program, ev, p)
         return crossings[p], classes[p], calls[p], p
     chosen: list[Boundary] = []
-    for lo, hi, because in _minimal(ev.separations):
+    for lo, hi, because in _minimal(_stated(ev)):
         if any(lo <= c.position <= hi for c in chosen):
             continue
         candidates = [p for p in range(lo, hi + 1) if not joined[p]]
-        if not candidates:      # data one run uses spans two cited files: it is shared (a template's table, an
-            candidates = [p for p in range(lo, hi + 1) if not cited[p]]   # inline's static), not one unit's
+        if not candidates and (lo, hi, because) in ev.direct:   # data one run uses across what the code itself
+            candidates = [p for p in range(lo, hi + 1) if not cited[p]]   # separates is shared (a template's
+                                                                           # table, an inline's static)
         if not candidates:
             continue
         best = min(candidates, key=cost)
         chosen.append(Boundary(best, (candidates[0], candidates[-1]), crossings[best], because))
     return sorted(chosen, key=lambda c: c.position)
+
+
+def _stated(ev: Evidence) -> list[tuple[int, int, str]]:
+    """The separations, less those only another build's units give where the code itself states a boundary
+    (another cited file, a static initializer) between the same two functions citing their files: that build's
+    units are evidence where the code says nothing, not against it."""
+    cited = sorted(i for i in ev.files if i not in ev.placed)
+    direct = sorted(lo for lo, _, _ in ev.direct)
+    out = []
+    for row in ev.separations:
+        lo, hi, _ = row
+        if row not in ev.direct:
+            left = bisect.bisect_left(cited, lo)
+            after = cited[left - 1] if left else -1                      # the last citation before the window
+            right = bisect.bisect_left(cited, hi)
+            before = cited[right] if right < len(cited) else len(ev.files) + (1 << 30)   # the first after it
+            first = bisect.bisect_right(direct, after)
+            if first < len(direct) and direct[first] <= before:
+                continue
+        out.append(row)
+    return out
 
 
 def _cover(spans, count: int) -> list[int]:
@@ -359,23 +404,30 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
     units = []
     reserved = {u["unit"] for u in held.values()}     # a fixed unit keeps its name in every code section
     taken: collections.Counter = collections.Counter()
+    named: list[tuple[int, int, str, str]] = []
     for first, end in zip(edges, edges[1:]):
         if first >= end:
             continue
         span = range(first, end)
-        files = collections.Counter(ev.files[i] for i in span if i in ev.files)
-        classes = collections.Counter(class_of[i] for i in span if i in class_of)
+        files = collections.Counter(ev.files[i] for i in span if i in ev.files and i not in ev.placed) or \
+            collections.Counter(ev.files[i] for i in span if i in ev.files)    # its own citations first
         if (first, end) in held:
             name, how = held[(first, end)]["unit"], held[(first, end)]["how"]
+        elif files:
+            name = files.most_common(1)[0][0]
+            how = "file string" if any(ev.files.get(i) == name and i not in ev.placed for i in span) \
+                else "another build"
         else:
-            if files:
-                name = files.most_common(1)[0][0]
-                how = "file string" if any(ev.files.get(i) == name and i not in ev.placed for i in span) \
-                    else "another build"
-            elif classes:
-                name, how = classes.most_common(1)[0][0] + ".cpp", "class"
-            else:
-                name, how = f"unit_{text(functions[first].address)[2:]}.cpp", "placeholder"
+            name, how = _unnamed(program, class_of, first, end)
+        named.append((first, end, name, how))
+    # A file's code is one run: a unit only another build names after the file its neighbour's own code cites is
+    # another file, which that build had not told apart.
+    for k, (first, end, name, how) in enumerate(named):
+        if how == "another build" and any(0 <= j < len(named) and named[j][2] == name and
+                                          named[j][3] == "file string" for j in (k - 1, k + 1)):
+            named[k] = (first, end, *_unnamed(program, class_of, first, end))
+    for first, end, name, how in named:
+        if (first, end) not in held:
             taken[name] += 1
             if taken[name] > 1 or name in reserved:   # one file in several pieces keeps one name per piece
                 stem, dot, ext = name.rpartition(".")
@@ -425,8 +477,19 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
                       "may go; compiling decides the exact place."}
 
 
+def _unnamed(program: Program, class_of: dict[int, str], first: int, end: int) -> tuple[str, str]:
+    """A name for a unit no file names: the class most of its functions belong to, else its address."""
+    classes = collections.Counter(class_of[i] for i in range(first, end) if i in class_of)
+    if classes:
+        return classes.most_common(1)[0][0] + ".cpp", "class"
+    return f"unit_{program.platform.text(program.functions[first].address)[2:]}.cpp", "placeholder"
+
+
 def _function_classes(program: Program) -> dict[int, str]:
-    """Function index -> the recovered class it belongs to (CodeWarrior tables; nothing elsewhere yet)."""
+    """Function index -> the class it belongs to: the recovered class of a CodeWarrior table, or the class an
+    Itanium name qualifies (`_itanium_classes`)."""
+    if program.platform.name == "switch":
+        return _itanium_classes(program)
     if program.platform.name != "gamecube":
         return {}
     from .classes import recover
@@ -446,7 +509,52 @@ def _function_classes(program: Program) -> dict[int, str]:
     return out
 
 
+def _itanium_classes(program: Program) -> dict[int, str]:
+    """Function index -> the class its Itanium name qualifies it with, where some function is that class's
+    constructor or destructor (a namespace has neither) and the class is no template's instance (the linker keeps
+    one of those from whichever unit comes first). The class is spelled as a path: `fw::Camera` is `fw/Camera`."""
+    from .platform import demangle_itanium
+    named = [(i, f.name) for i, f in enumerate(program.functions) if f.name.startswith("_Z")]
+    owners: dict[int, str] = {}
+    classes: set[str] = set()
+    for (index, _), text in zip(named, demangle_itanium([n for _, n in named])):
+        parts = _qualified(text) if text else None
+        if not parts or len(parts) < 2:
+            continue
+        owner, method = "::".join(parts[:-1]), parts[-1]
+        if "<" in owner:
+            continue
+        owners[index] = owner
+        if method.lstrip("~") == parts[-2]:
+            classes.add(owner)
+    return {index: owner.replace("::", "/") for index, owner in owners.items() if owner in classes}
+
+
+def _qualified(text: str) -> list[str] | None:
+    """The `::` parts of a demangled function's name, up to its parameters (None for a thunk, a guard variable, a
+    table, or an operator whose name holds a bracket)."""
+    if text.startswith("{") or " thunk to " in text or " for " in text:
+        return None
+    depth, parts, start = 0, [], 0
+    for at, c in enumerate(text):
+        if c == "<":
+            depth += 1
+        elif c == ">":
+            depth -= 1
+        elif depth == 0 and c == "(":
+            parts.append(text[start:at])
+            return [p for p in parts if p]
+        elif depth == 0 and text.startswith("::", at):
+            parts.append(text[start:at])
+            start = at + 2
+    return None
+
+
 TABLES = (".ctors", ".dtors")      # pointer tables: one entry per unit's static initializer (finalizer)
+ARRAYS = (".init_array", ".fini_array")   # an ELF's: one pointer per unit's initializer (finalizer)
+# what an ELF linker makes itself: no unit's data, whatever code refers to it (the runtime's start-up code does)
+LINKER_SECTIONS = (".dynamic", ".dynsym", ".dynstr", ".hash", ".gnu.hash", ".rela.dyn", ".rela.plt", ".relr.dyn",
+                   ".eh_frame", ".eh_frame_hdr", ".got", ".got.plt", ".plt")
 LEADING = 4                        # .dtors entries the runtime's own can lead with
 
 
@@ -465,10 +573,10 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     source); one that stands is kept as given, and no claim crosses it or adds to its unit in its section."""
     from .link import LINKER_OBJECTS
     claims: list[tuple[int, int, str, str]] = []
-    for o, fs in ev.local.items():
+    for o, fs in program.users().items():              # however far apart its users are: they are one unit's
         homes = {owner.get(i) for i in fs} - {None}
-        if o.name in LINKER_OBJECTS or o.section in TABLES:   # the linker's, or a table entry (below)
-            continue
+        if o.name in LINKER_OBJECTS or o.section in TABLES + ARRAYS + LINKER_SECTIONS:   # the linker's, or a
+            continue                                                                    # table entry (below)
         if len(homes) == 1 and not program.in_code(o.address):      # data in code is in its unit's code range
             claims.append((o.address, o.address + max(o.size, 1), next(iter(homes)), o.section))
     if program.platform.name == "gamecube":
@@ -491,6 +599,7 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     out: list[tuple[int, int, str, str]] = []
     if program.platform.name == "gamecube":
         claims += _initializer_tables(program, owner)
+    claims += _initializer_arrays(program, owner)
     by_section: dict[tuple[str, int], list] = collections.defaultdict(list)
     for claim in claims:
         by_section[(claim[3], _instance(program, claim[0]))].append(claim)
@@ -587,6 +696,20 @@ def _initializer_tables(program: Program, owner: dict[int, str]) -> list[tuple[i
     return [(at, at + 4, unit, section) for section, rows in entries.items() for at, unit in rows if unit is not None]
 
 
+def _initializer_arrays(program: Program, owner: dict[int, str]) -> list[tuple[int, int, str, str]]:
+    """`.init_array` and `.fini_array` entries, each the unit's whose function it points to (its static
+    initializer or finalizer), read through the module's relocations."""
+    pointers = getattr(program.image, "pointers", {})
+    out = []
+    for o in program.objects:
+        if o.section in ARRAYS:
+            for at in range(o.address, o.address + o.size - 7, 8):
+                unit = owner.get(program.function_index.get(pointers.get(at), -1))
+                if unit is not None:
+                    out.append((at, at + 8, unit, o.section))
+    return out
+
+
 def _exception_tables(program: Program, owner: dict[int, str]) -> list[tuple[int, int, str, str]]:
     """CodeWarrior writes a function's exception tables into its own object: each `extabindex` entry (function,
     size, `extab` record) and the record it points to belong to the function's unit."""
@@ -621,8 +744,11 @@ def _whole_symbols(program: Program, rows: list[tuple[int, int, str, str]]) -> l
 
 
 def _word_bounds(program: Program, start: int, stop: int) -> tuple[int, int]:
-    """A unit's data range on word boundaries: no object's section starts off one (none of 4,001 in a CodeWarrior
-    link map), so the objects up to the next word-aligned one are this unit's, and so is a start back to one."""
+    """A unit's data range on word boundaries where the platform aligns each object's sections to one (none of
+    4,001 starts off a word in a CodeWarrior link map), so the objects up to the next word-aligned one are this
+    unit's, and so is a start back to one. Elsewhere the range stays as claimed (`Platform.unit_alignment`)."""
+    if program.platform.unit_alignment < 4:
+        return start, stop
     starts = program._object_starts
     if start % 4:
         index = bisect.bisect_right(starts, start) - 1

@@ -302,9 +302,21 @@ def _read_dynamic(module: Module, dynamic: int) -> None:
                                       (".fini_array", DT_FINI_ARRAY, DT_FINI_ARRAYSZ)):
         if tags.get(start_tag) is not None and tags.get(size_tag):
             module.tables[name] = (tags[start_tag], tags[start_tag] + tags[size_tag])
-    for name, tag in ((".hash", DT_HASH), (".gnu.hash", DT_GNU_HASH)):
-        if tags.get(tag) is not None:                 # where it starts: its size takes reading it
-            module.tables[name] = (tags[tag], tags[tag])
+    if tags.get(DT_HASH) is not None:                 # nbucket, nchain, then the buckets and chains
+        start = tags[DT_HASH]
+        buckets, chains = struct.unpack_from("<II", image, start)
+        module.tables[".hash"] = (start, start + 8 + 4 * (buckets + chains))
+    if tags.get(DT_GNU_HASH) is not None:             # header, bloom words, buckets, then chains to their last
+        start = tags[DT_GNU_HASH]
+        buckets, first, blooms, _ = struct.unpack_from("<IIII", image, start)
+        chain = start + 16 + 8 * blooms + 4 * buckets
+        top = max(struct.unpack_from(f"<{buckets}I", image, chain - 4 * buckets), default=0)
+        if top >= first:
+            position = chain + 4 * (top - first)
+            while position + 4 <= len(image) and not struct.unpack_from("<I", image, position)[0] & 1:
+                position += 4
+            chain = position + 4
+        module.tables[".gnu.hash"] = (start, chain)
     names: list[tuple[str, int, int]] = []
     if strtab is not None and symtab is not None:
         count = (strtab - symtab) // 24 if strtab > symtab else 0

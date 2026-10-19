@@ -14,8 +14,10 @@ from test_link import section, unit, words
 class _Objects:
     """Just the data objects of a program, for the unit bounds rules."""
 
-    def __init__(self, objects):
+    def __init__(self, objects, platform=None):
+        from zkit.platform import GameCube
         from zkit.program import Program
+        self.platform = platform or GameCube()
         self.objects = sorted(objects, key=lambda o: o.address)
         self._object_starts = [o.address for o in self.objects]
         self.object_at = Program.object_at.__get__(self)
@@ -34,6 +36,23 @@ class UnitBoundsTests(unittest.TestCase):
         self.assertEqual(units._word_bounds(shorts, 0x108, 0x10C), (0x108, 0x10C))
         last = _Objects([DataObject(0x200, 4, "x", ".rodata"), DataObject(0x204, 3, "y", ".rodata")])
         self.assertEqual(units._word_bounds(last, 0x204, 0x207), (0x204, 0x207))   # a section's end stays its own
+        from zkit.platform import Switch
+        strings = _Objects([DataObject(0x300, 3, "s", ".rodata"), DataObject(0x303, 5, "t", ".rodata"),
+                            DataObject(0x308, 4, "u", ".rodata")], Switch())
+        self.assertEqual(units._word_bounds(strings, 0x300, 0x303), (0x300, 0x303))  # clang: strings start anywhere
+
+    def test_another_build_gives_way_to_what_the_code_states(self):
+        """Functions 0-1 cite a.cpp, 9 cites b.cpp; another build put 4 in b.cpp, but the static initializer at 6
+        ends a.cpp: that build's boundary before 4 is not taken, and the initializer's after 6 is."""
+        ev = units.Evidence({}, [], [])
+        ev.files = {0: "a.cpp", 1: "a.cpp", 4: "b.cpp", 9: "b.cpp"}
+        ev.placed = {4}
+        placed, stated = (2, 4, "a.cpp then b.cpp"), (7, 7, "6 is its unit's static initializer")
+        ev.separations = [placed, stated]
+        ev.direct = {stated}
+        self.assertEqual(units._stated(ev), [stated])
+        ev.separations, ev.direct = [placed], set()                 # where the code says nothing, it stands
+        self.assertEqual(units._stated(ev), [placed])
 
     def test_claims_against_link_order_are_dropped(self):
         rows = [(0x10, 0x14, "a", ".data"), (0x14, 0x18, "c", ".data"), (0x18, 0x1C, "b", ".data"),

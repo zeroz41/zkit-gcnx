@@ -22,12 +22,16 @@ const char *g_names[] = {"alpha", "beta", "gamma"};
 int g_count;
 const char *pick(int i) { if (i < 0) report("C:/proj/src/game/a.cpp", 4); g_count++; return g_names[i % 3]; }
 void rename(int i, const char *name) { g_names[i % 3] = name; }
+int seed(int v);
+int g_seeded = seed(1);
 int touchA(int v) { if (v > 99) report("C:/proj/src/game/a.cpp", 5); return shared() += v; }
 """,
     "b.cpp": """void report(const char *file, int line);
 inline int &shared() { static int s_shared; return s_shared; }
 int touchB(int v) { if (v < -99) report("C:/proj/src/game/b.cpp", 3); return shared() -= v * 3; }
 int other(int v) { if (v == 7) report("b.cpp", 4); return v * 11 + 2; }
+int seed(int v);
+int g_later = seed(2);
 """,
 }
 
@@ -65,6 +69,9 @@ class ModuleDataTests(unittest.TestCase):
         strings = {self.module.read(a, size): a for a, (size, section) in found.items() if section == ".rodata"}
         self.assertIn(b"alpha\0", strings)                                      # a string ends at its NUL
         self.assertIn(b"C:/proj/src/game/a.cpp\0", strings)
+        tables = {section: (a, a + size) for a, size, section, _ in nxdata.linker_tables(self.module)}
+        self.assertTrue({".eh_frame_hdr", ".eh_frame", ".dynsym", ".dynstr", ".dynamic", ".rela.dyn"} <= set(tables))
+        self.assertFalse([a for a in found for start, end in tables.values() if start <= a < end])  # none of ours
 
     def test_units_follow_the_files_the_code_cites(self):
         """The inline's static joins the first file's code to the second's, but each file cites itself: two
@@ -73,6 +80,8 @@ class ModuleDataTests(unittest.TestCase):
         symbols = [Symbol(f"fn_{a:08X}", ".text", a, "function", s, "global") for a, s in functions]
         symbols += [Symbol(f"lbl_{a:08X}", section, a, "object", size, "global")
                      for a, size, section in nxdata.objects(self.module, functions)]
+        symbols += [Symbol(name or f"lbl_{a:08X}", section, a, "object", size, "global")
+                    for a, size, section, name in nxdata.linker_tables(self.module)]
         program = Program.from_symbol_list(Switch(), self.module, symbols)
         proposal = units.propose(program)
         owner = {}
@@ -83,6 +92,11 @@ class ModuleDataTests(unittest.TestCase):
         self.assertEqual(owner[self.at["_Z6touchAi"].value], "game/a.cpp")
         self.assertEqual(owner[self.at["_Z6touchBi"].value], "game/b.cpp")
         self.assertEqual(owner[self.at["_Z5otheri"].value], "game/b.cpp")
+        arrays = sorted((row["start_key"], unit["unit"]) for unit in proposal["units"] for row in unit["data"]
+                        if row["section"] == ".init_array")
+        self.assertEqual([unit for _, unit in arrays], ["game/a.cpp", "game/b.cpp"])   # each file's initializer
+        self.assertFalse([row for unit in proposal["units"] for row in unit["data"]
+                          if row["section"] in (".dynamic", ".eh_frame", ".dynsym")])  # the linker's, nobody's
 
 
 if __name__ == "__main__":
