@@ -21,7 +21,7 @@ dependencies = [
 ghidra = ["pyghidra>=2.1"]  # `decompile`; also needs Ghidra and its Gekko/Broadway language (see `zkit doctor`)
 
 [project.urls]
-Homepage = "https://github.com/zeroz41/gc-switch-tool-zkit"
+Homepage = "https://github.com/zeroz41/zkit-gcnx"
 
 [project.scripts]
 zkit = "zkit.cli:main"

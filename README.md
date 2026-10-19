@@ -26,7 +26,7 @@ download is pinned and checked against its hash.
 You need [uv](https://docs.astral.sh/uv/getting-started/installation/), git and ninja. Then:
 
 ```sh
-uv tool install git+https://github.com/zeroz41/gc-switch-tool-zkit
+uv tool install git+https://github.com/zeroz41/zkit-gcnx
 ```
 
 The compilers and tools a project needs are fetched into that project's `build/` folder by
@@ -36,11 +36,11 @@ To let your agent use zkit, install the plugin (tools, skills and a session brie
 
 ```sh
 # Claude Code
-claude plugin marketplace add zeroz41/gc-switch-tool-zkit
+claude plugin marketplace add zeroz41/zkit-gcnx
 claude plugin install zkit@zkit
 
 # Codex
-codex plugin marketplace add zeroz41/gc-switch-tool-zkit
+codex plugin marketplace add zeroz41/zkit-gcnx
 codex plugin add zkit@zkit
 ```
 

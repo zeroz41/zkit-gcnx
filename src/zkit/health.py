@@ -106,7 +106,7 @@ def installation() -> dict:
 
 from . import REPOSITORY
 
-INSTALL = f"uv tool install --force git+https://github.com/{REPOSITORY}   (or from a clone: uv tool install --force ./zkit)"
+INSTALL = f"uv tool install --force git+https://github.com/{REPOSITORY}   (or from a clone: uv tool install --force <checkout>)"
 
 
 def _attribution() -> dict:
