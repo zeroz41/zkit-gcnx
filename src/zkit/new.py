@@ -198,7 +198,7 @@ own copy of the game.
 ## Building
 
 Place the original executable at `{original}` (SHA-1 `{sha1}`) and install Ninja, then build with
-[zkit](https://github.com/zeroz41/gc-switch-tool-zkit):
+[zkit](https://github.com/zeroz41/zkit-gcnx):
 
     zkit build --download
     zkit build
