@@ -17,11 +17,12 @@ evidence for it. Evidence is the references the target already resolves to the d
 layout: the linker keeps a file's functions in order, so a matched neighbour that is the donor's neighbour too
 places it. A shape shorter than `MINIMUM_WORDS` needs such evidence (copies, setters and thin wrappers repeat in
 every game). A matched function names what it refers to (its callees and its data, at the address each reference
-resolves to, where the donors agree), a named virtual table names its slots from the donors' table of its class, and
-a C function whose code changed is still found by the exact set of texts it uses. A function named any other way
-whose code is its donors' names what it refers to too. Between two functions an original donor places in one order
-(`gaps`), the functions of one shape pair in order (or, more copies on one side, by their references), and what is
-left pairs as changed code: one on each side, or the pair that shares by far the most of what it refers to. A
+resolves to, where the donors agree), a named virtual table names its slots from the donors' table of its class
+(slot to slot by the code in them, `aligned`), and a C function whose code changed is still found by the exact set
+of texts it uses. A function named any other way whose code is its donors' names what it refers to too. Between two
+functions an original donor places in one order (`gaps`), the functions of one shape pair in order (or, more copies
+on one side, by their references), and what is left pairs as changed code: one on each side, the pair that shares
+by far the most of what it refers to, or, aligned in order, the pair whose code is by far the most alike. A
 function whose code changed still calls what it called: its one unnamed callee is its donors' one unclaimed callee
 (`calls`). Every name is then checked: an address two pieces of evidence name differently, and a name two addresses
 claim, are withdrawn, and the matching runs again without them.
@@ -50,11 +51,14 @@ from typing import Iterable
 from . import ppc
 from .program import CODE_SECTIONS, Function, Program
 
-VERSION = 2
+VERSION = 3
 MINIMUM_WORDS = 16       # a shorter shape proves nothing alone: copies and setters repeat in every game
 CONFIRMING = 2           # agreed references a shorter one needs (one is a thin wrapper of a call any game makes)
 MINIMUM_STRINGS = 12     # characters of referenced text a string-set match needs
 SHARED_BITS = 8.5        # what changed code must still share with its donor (-log2 of each reference's frequency)
+SIMILAR = 0.5            # how alike changed code must be to pair by likeness (`_State.similar`)
+SIMILAR_MARGIN = 0.05    # by how much it must beat every other pairing of either function in its gap
+SIMILAR_PAIRS = 40000    # the largest gap (target functions times donor functions) compared that way
 TEXT_LIMIT = 256
 
 # The masks an assembler leaves on a relocated instruction, by relocation type.
@@ -95,6 +99,34 @@ def identity(image) -> str:
     """The SHA-1 of an opened original: a DOL's bytes, a module's loaded image."""
     raw = getattr(image, "raw", None)
     return hashlib.sha1(raw if raw is not None else bytes(image.image)).hexdigest()
+
+
+def aligned(ours: list, theirs: list) -> list[tuple[int, int]]:
+    """(target slot, donor slot) pairs of two tables of one class, by the code in each slot (elements compared
+    with ==, None equal to nothing). An update that adds or removes a virtual moves every slot after it, so a slot's
+    index names nothing by itself. Code that is the same in both tables and occurs once in each anchors them; between
+    two anchors (or the tables' ends), as many slots on both sides pair in order where their code is the same, or
+    differs in single slots between same ones (changed in place). Two changed slots side by side, or a different
+    count, could be a slot added next to one removed: they pair with nothing."""
+    import difflib
+    a = [x if x is not None else ("?", 0, i) for i, x in enumerate(ours)]
+    b = [x if x is not None else ("?", 1, j) for j, x in enumerate(theirs)]
+    once_a, once_b = collections.Counter(a), collections.Counter(b)
+    anchors = [(-1, -1)]
+    for i, j, size in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+        anchors += [(i + k, j + k) for k in range(size) if once_a[a[i + k]] == 1 and once_b[b[j + k]] == 1]
+    anchors.append((len(a), len(b)))
+    pairs = []
+    for (i0, j0), (i1, j1) in zip(anchors, anchors[1:]):
+        if i0 >= 0:
+            pairs.append((i0, j0))
+        if i1 - i0 != j1 - j0:
+            continue
+        span = [(i0 + k, j0 + k) for k in range(1, i1 - i0)]
+        changed = [a[i] != b[j] for i, j in span]
+        if not any(x and y for x, y in zip(changed, changed[1:])):
+            pairs += span
+    return pairs
 
 
 def itanium_slots(image, address: int, count: int, starts) -> list[tuple[str, int | str | None]] | None:
@@ -139,6 +171,7 @@ class Signature:
     before: str | None = None
     after: str | None = None
     place: int | None = None
+    code: str = ""               # an original's function: its masked words (hex), to compare changed code
 
     @property
     def name(self) -> str:
@@ -147,11 +180,12 @@ class Signature:
 
 @dataclass
 class Shape:
-    """One target function: its shape and the address each relocation resolves to."""
+    """One target function: its shape, the address each relocation resolves to and its masked words."""
     address: int
     size: int
     shape: str
     references: list[tuple[int, int, int]]     # (instruction offset, kind, target address)
+    code: bytes = b""
 
 
 def digest(words: list[int], relocations: Iterable[tuple[int, int]]) -> str:
@@ -179,7 +213,8 @@ def image_shape(program: Program, function: Function, sda: dict[int, int] | None
                                               program.in_image)
     masked = [cleared.get(function.address + 4 * i, word) for i, word in enumerate(words)]
     references = [((r.offset - function.address) // 4 * 4, r.kind, r.target) for r in found]
-    return Shape(function.address, 4 * len(words), digest(masked, ((o, k) for o, k, _ in references)), references)
+    return Shape(function.address, 4 * len(words), digest(masked, ((o, k) for o, k, _ in references)), references,
+                 struct.pack(f"<{len(masked)}I", *masked))
 
 
 def small_data(program: Program) -> dict[int, int]:
@@ -313,9 +348,11 @@ def add_program(donor: Donor, program: Program, units: list[tuple[int, int, str]
             references.append(Reference(offset, kind, token))
         own = "" if function.address in weak or function.scope == "weak" else unit_of(function.address)
         found.append(Signature(named, shape.size, shape.shape, tuple(references), own, donor.name,
-                               place=first + index))
+                               place=first + index, code=shape.code.hex()))
     _neighbours(found, order)
     donor.signatures += found
+    # a table's slots: a function's key ("" when the donor does not name it), an import's name, None for any other
+    # word (a pure virtual, a secondary table's header)
     switch = program.platform.name == "switch"
     for table in program.objects:
         if switch and table.name.startswith("_ZTV") and table.size >= 24:
@@ -323,8 +360,8 @@ def add_program(donor: Donor, program: Program, units: list[tuple[int, int, str]
             if slots is None:
                 continue
             donor.tables[key(table.name, table.scope, unit_of(table.address))] = [
-                known(v, starts[v].name, starts[v].scope) if kind == "function" else v if kind == "import" else None
-                for kind, v in slots]
+                known(v, starts[v].name, starts[v].scope) or "" if kind == "function" else v if kind == "import"
+                else None for kind, v in slots]
             continue
         if switch or not table.name.startswith("__vt__") or table.size < 12:
             continue
@@ -333,7 +370,7 @@ def add_program(donor: Donor, program: Program, units: list[tuple[int, int, str]
         except ValueError:
             continue
         donor.tables[key(table.name, table.scope, unit_of(table.address))] = [
-            known(w, starts[w].name, starts[w].scope) if w in starts else None for w in words[2:]]
+            known(w, starts[w].name, starts[w].scope) or "" if w in starts else None for w in words[2:]]
     donor.images.append(identity(program.image))
     donor.platform = program.platform.name
 
@@ -507,7 +544,7 @@ def save(donor: Donor) -> Path:
     path = _path(donor.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [[s.shape, s.key, s.size, s.unit, s.before, s.after,
-             [[r.offset, r.kind, list(r.token) if r.token else None] for r in s.references], s.place]
+             [[r.offset, r.kind, list(r.token) if r.token else None] for r in s.references], s.place, s.code]
             for s in donor.signatures]
     data = {"version": VERSION, "name": donor.name, "built": donor.built, "sources": donor.sources,
             "images": donor.images, "tables": donor.tables, "sizes": donor.sizes, "layout": donor.layout,
@@ -529,8 +566,8 @@ def load(name: str) -> Donor:
     if data.get("version") != VERSION:
         raise ValueError(f"Signatures {name!r} were built by another zkit version; build them again")
     signatures = [Signature(k, size, shape, tuple(Reference(o, kind, tuple(t) if t else None) for o, kind, t in refs),
-                            unit, data["name"], before, after, place)
-                  for shape, k, size, unit, before, after, refs, place in data["functions"]]
+                            unit, data["name"], before, after, place, code)
+                  for shape, k, size, unit, before, after, refs, place, code in data["functions"]]
     return Donor(data["name"], signatures, data["tables"], data["sizes"], data["images"], data["sources"],
                  data["built"], data["layout"], data["platform"])
 
@@ -654,6 +691,7 @@ class Matcher:
                         self.dependents[target - addend].add(shape)
                         self.watchers[target - addend].add((shape, address))
         self._texts: dict[int, str | None] = {}
+        self._code: dict[int, tuple[int, ...]] = {}
         self._text_sets: tuple | None = None
         self._vtables = None
         # each donor original's layout, and its named functions by place
@@ -675,6 +713,14 @@ class Matcher:
             total = sum(len(entries) for entries in self.by_key.values())
             self._weights = {u: math.log2(total / (1 + n)) for u, n in counts.items()}
         return self._weights.get(use, 0.0)
+
+    def code(self, item: Shape | Signature) -> tuple[int, ...]:
+        """The masked words of a target function's shape or a donor original's function."""
+        found = self._code.get(id(item))
+        if found is None:
+            raw = item.code if isinstance(item.code, bytes) else bytes.fromhex(item.code)
+            found = self._code[id(item)] = struct.unpack(f"<{len(raw) // 4}I", raw)
+        return found
 
     def text(self, address: int) -> str | None:
         if address not in self._texts:
@@ -715,7 +761,7 @@ class Matcher:
                 if cls.startswith("_ZTV"):
                     for row in rows:
                         for i, k in enumerate(row):
-                            if k is not None:
+                            if k:
                                 self._slot_classes[(i, k)].add(cls)
         return self._slot_classes
 
@@ -937,62 +983,70 @@ class _State:
                     continue
                 self.accept(address, named, agreed, entries)
 
+    def slot_code(self, kind: str, value) -> object:
+        """What `aligned` compares a target slot by: its function's shape, an import's name."""
+        if kind == "function":
+            shape = self.m.shapes.get(value)
+            return shape.shape if shape is not None else None
+        return ("import", value) if kind == "import" else None
+
+    def donor_code(self, named: str | None) -> object:
+        """A donor slot's code: the shape of its function (where the donors agree on one), an import's name."""
+        if not named:
+            return None
+        shapes = {s.shape for s in self.m.by_key.get(named, ())}
+        return next(iter(shapes)) if len(shapes) == 1 else None if shapes else ("import", named)
+
+    def name_slots(self, table: int, slots: list[tuple[str, int | str | None]], row: list[str | None]) -> None:
+        """A named table's slots from one donor table of its class, as `aligned` pairs them."""
+        ours = [self.slot_code(kind, value) for kind, value in slots]
+        for i, j in aligned(ours, [self.donor_code(k) for k in row]):
+            (kind, target), named = slots[i], row[j]
+            if kind == "function" and named and named in self.m.by_key:
+                self.vote(target, named, table, "slot")
+
     def tables(self) -> None:
-        """A named table names its slots from the donors' table of that class (same length, donors agreeing);
-        an unnamed one takes the one donor class whose table agrees with every slot already named."""
+        """A named table names its slots from the donors' table of that class, as `aligned` pairs them; an
+        unnamed one takes the one donor class whose table agrees with every slot already named."""
         for address, table in self.m.vtables().items():
             named = self.known.get(address)
             if named is not None and named.startswith("__vt__"):
                 if address in self.named_tables:
                     continue
                 self.named_tables.add(address)
-                donors = self.m.tables.get(named, [])
-                if not donors or any(len(slots) != len(table.slots) for slots in donors):
-                    continue
-                for index, target in enumerate(table.slots):
-                    keys = {slots[index] for slots in donors}
-                    if target and len(keys) == 1 and None not in keys:
-                        self.vote(target, keys.pop(), address, "slot")
+                slots = [("function", t) if t else ("other", None) for t in table.slots]
+                for row in self.m.tables.get(named, []):
+                    while row and row[-1] is None:          # trailing zeros are the next object's, as vtables reads
+                        row = row[:-1]
+                    self.name_slots(address, slots, row)
             elif named is None and address not in self.banned_addresses:
                 known = [(i, self.known[t]) for i, t in enumerate(table.slots) if t in self.known]
                 if not known:
                     continue
                 fits = {cls for cls, rows in self.m.tables.items() if all(
-                    len(slots) == len(table.slots) and all(slots[i] in (None, k) for i, k in known)
+                    len(slots) == len(table.slots) and all(slots[i] in (None, "", k) for i, k in known)
                     and any(slots[i] == k for i, k in known) for slots in rows)}
                 if len(fits) == 1:
                     self.vote(address, fits.pop(), address, "table")
 
     def itanium(self) -> None:
-        """Switch: a named `_ZTV` table names its slots from the donors' table of that class, read for the
-        donors' length (all donors agreeing on it), and only when the target's words fit it: a function where a
-        donor names one, the same import where a donor has an import. An unnamed primary table takes the one
-        donor class whose table agrees with every slot already named and has no other slot in their place."""
-        imported = set(self.m.program.image.imports.values())
+        """Switch: a named `_ZTV` table names its primary table's slots (up to the first word that is neither a
+        function nor an import) from the donors' primary table of that class, as `aligned` pairs them. An unnamed
+        primary table takes the one donor class whose table agrees with every slot already named and has no
+        other slot in their place."""
+        image = self.m.program.image
         for named, address in list(self.owner.items()):
             if not named.startswith("_ZTV") or address in self.named_tables:
                 continue
             self.named_tables.add(address)
-            donors = self.m.tables.get(named, [])
-            if not donors or len({len(slots) for slots in donors}) != 1:
+            rows = self.m.tables.get(named, [])
+            if not rows:
                 continue
-            slots = itanium_slots(self.m.program.image, address, len(donors[0]), self.m.extent)
-            if slots is None:
-                continue
-            votes = []
-            for index, (kind, target) in enumerate(slots):
-                keys = {row[index] for row in donors}
-                k = next(iter(keys))
-                if len(keys) != 1 or k is None:
-                    continue
-                if kind == "import" and k == target:
-                    continue
-                if kind != "function" or k in imported:
-                    break                                   # the target's table is laid out otherwise
-                votes.append((target, k))
-            else:
-                for target, k in votes:
-                    self.vote(target, k, address, "slot")
+            slots = []
+            while (slot := itanium_slots(image, address + 8 * len(slots), 1, self.m.extent)) and slot[0][0] != "other":
+                slots += slot
+            for row in rows:
+                self.name_slots(address, slots, row[:row.index(None)] if None in row else row)
         for address, slots in self.m.itanium_tables().items():
             if address in self.known or address in self.banned_addresses:
                 continue
@@ -1002,7 +1056,7 @@ class _State:
             candidates = set().union(*(self.m.slot_classes().get(item, ()) for item in known))
             fits = {cls for cls in candidates if all(
                 len(row) >= len(slots) and (len(row) == len(slots) or row[len(slots)] is None)
-                and all(row[i] in (None, k) for i, k in known) for row in self.m.tables[cls])}
+                and all(row[i] in (None, "", k) for i, k in known) for row in self.m.tables[cls])}
             if len(fits) == 1:
                 self.vote(address, fits.pop(), address, "table")
 
@@ -1083,9 +1137,9 @@ class _State:
         one of each, or two of each in order, of plausible sizes (and two not sharing more the other way
         round), are functions whose code changed (layout); otherwise a target function takes the donor
         function it shares the most with by what both refer to (named functions and data, texts), at least
-        `SHARED_BITS` and over twice what any other pairing of either gets (layout+references). Pairings that
-        would cross are none. (On Xenoblade 2's 3.0.1 against 1.0.0, in order was right for every gap of two
-        and wrong for one in seven of four or more.)"""
+        `SHARED_BITS` and over twice what any other pairing of either gets (layout+references), and what is
+        left pairs by how alike it is (`similar`). Pairings that would cross are none. (On Xenoblade 2's 3.0.1
+        against 1.0.0, in order was right for every gap of two and wrong for one in seven of four or more.)"""
         if not rest or not left:
             return []
         if len(rest) == 1 and len(left) == 1:
@@ -1109,8 +1163,59 @@ class _State:
             if any(2 * score[(u, id(best))] > top for u in rest if u != t) or not self.plausible(t, best.key):
                 continue
             chosen.append((t, best, "layout+references"))
-        if any(x[1].place > y[1].place for x, y in zip(chosen, chosen[1:])):
+        crossing = lambda pairs: any(x[1].place > y[1].place for x, y in zip(pairs, pairs[1:]))
+        if crossing(chosen):
             return []
+        taken = {t for t, _, _ in chosen} | {id(s) for _, s, _ in chosen}
+        alike = sorted(chosen + self.similar([t for t in rest if t not in taken],
+                                             [s for s in left if id(s) not in taken], extents))
+        return chosen if crossing(alike) else alike
+
+    def similar(self, rest: list[int], left: list[Signature], extents) -> list[tuple[int, Signature, str]]:
+        """Changed code in one gap by how alike it is. A target function and a donor function are as alike as
+        the mean of the share of their masked words in common (difflib's ratio) and the share of what either
+        refers to that both do (each reference by its weight); the target functions then align with the donor
+        functions in order, for the most likeness in all (no two pairings crossing). A pairing stands when it
+        reaches `SIMILAR`, beats every other pairing of either function in the gap by `SIMILAR_MARGIN`, and both
+        are `MINIMUM_WORDS` long or more and of plausible sizes (layout+code). Shorter code stays: a getter whose
+        field moved reads exactly like its neighbour did. (On Xenoblade 2's 3.0.1 against 1.0.0 this named 1,220
+        functions whose names callers and class tables also gave, all alike, and none otherwise.)"""
+        import difflib
+        if not rest or not left or len(rest) * len(left) > SIMILAR_PAIRS or not all(s.code for s in left):
+            return []
+        theirs = [(self.m.code(s), self.m.uses(s)) for s in left]
+        score = []
+        for t in rest:
+            ours, uses = self.m.code(self.m.shapes[t]), self.target_uses(t, extents)
+            row = []
+            for words, used in theirs:
+                if 3 * min(len(ours), len(words)) < max(len(ours), len(words)):
+                    row.append(0.0)                      # a third the size: at most half alike
+                    continue
+                code = difflib.SequenceMatcher(None, ours, words, autojunk=False).ratio()
+                shared = sum(self.m.weight(u) for u in uses & used)
+                other = sum(self.m.weight(u) for u in uses ^ used)
+                row.append((code + shared / (shared + other)) / 2 if shared + other else code)
+            score.append(row)
+        n, m = len(rest), len(left)
+        best = [[0.0] * (m + 1) for _ in range(n + 1)]       # the most likeness of rest[i:] against left[j:]
+        for i in range(n - 1, -1, -1):
+            for j in range(m - 1, -1, -1):
+                take = score[i][j] + best[i + 1][j + 1] if score[i][j] >= SIMILAR else 0.0
+                best[i][j] = max(best[i + 1][j], best[i][j + 1], take)
+        chosen, i, j = [], 0, 0
+        while i < n and j < m:
+            if score[i][j] >= SIMILAR and best[i][j] == score[i][j] + best[i + 1][j + 1]:
+                t, s, value = rest[i], left[j], score[i][j]
+                rivals = [v for k, v in enumerate(score[i]) if k != j] + [score[k][j] for k in range(n) if k != i]
+                if (value >= max(rivals, default=0.0) + SIMILAR_MARGIN and self.plausible(t, s.key)
+                        and min(self.m.shapes[t].size, s.size) >= 4 * MINIMUM_WORDS):
+                    chosen.append((t, s, "layout+code"))
+                i, j = i + 1, j + 1
+            elif best[i][j] == best[i + 1][j]:
+                i += 1
+            else:
+                j += 1
         return chosen
 
     def target_uses(self, address: int, extents) -> set[tuple]:

@@ -349,6 +349,45 @@ for old, new in (("x * 5 + g_counter", "x * 6 - g_counter"), ("x * 21 + 4", "x *
     SWITCH_TARGET = SWITCH_TARGET.replace(old, new)
 
 
+# two functions an update changed, one between them it dropped and one it added
+GAP_DONOR = """int first(int *v, int n) { int t = 1; for (int i = 0; i < n; i++) t = t * 31 + (v[i] >> 2) - i;
+  for (int i = n - 1; i >= 0; i--) t ^= v[i] * (i + 3); return t ^ 0x1234; }
+int mixing(int *v, int n) { int t = 5, u = 9; for (int i = 0; i < n; i++) { t = t * 37 + (v[i] ^ 0x15) - (i << 2);
+  u += t >> 3; } for (int i = 0; i < n; i += 2) u ^= v[i] * 11; return t + u * 7 + n; }
+int dropped(int *v, int n) { return v[n] * 3; }
+int shuffle(int *v, int n) { for (int i = 1; i < n; i++) { int j = (v[i] * 7 + i) % n; int x = v[i]; v[i] = v[j];
+  v[j] = x + 5; } int s = 0; for (int i = 0; i < n; i++) s = s * 13 + v[i]; return s; }
+int last(int *v, int n) { int t = 9; for (int i = 0; i < n; i++) t = t * 17 - (v[i] << 3) + i;
+  for (int i = 0; i < n; i++) t += v[i] * v[i]; return t ^ 0x4321; }
+"""
+GAP_TARGET = GAP_DONOR
+for old, new in (("t * 37 + (v[i] ^ 0x15)", "t * 41 + (v[i] ^ 0x25)"), ("* 7 + i) % n", "* 9 + i) % n"),
+                 ("int dropped(int *v, int n) { return v[n] * 3; }\n", ""),
+                 ("int last(", "int added(int *v, int n) { return v[0] - n; }\nint last(")):
+    GAP_TARGET = GAP_TARGET.replace(old, new)
+
+# a class one update gave a virtual (@ADDED@) and took one from (@REMOVED@)
+SHAPE_CLASS = """int g_scale = 3;
+struct Shape { virtual ~Shape(); virtual int area() const; @ADDED@ virtual int edges() const; virtual int scale(int f);
+  @REMOVED@ int w, h, d; };
+Shape::~Shape() {}
+int Shape::area() const { return w * h + g_scale * (w - h) + (w ^ 0x77) * (h | 9) - d * 5; }
+int Shape::edges() const { int t = 0; for (int i = 0; i < w; i++) t += (h + i) * 2 - g_scale; return t ^ d; }
+int Shape::scale(int f) { w = w * f + 1; h = h * f - 1; d = d * f + g_scale; return (w ^ h) + d * 3; }
+int extra(Shape *s) { return s->d * 13 + s->w * 7 - s->h; }
+Shape *build(int w, int h) { Shape *s = new Shape(); s->w = w; s->h = h; s->d = w * h + g_scale; return s; }
+@BODY@"""
+SHAPE_DEPTH = "virtual int depth() const;"
+SHAPE_COLOR = "virtual int color() const;"
+SHAPE_BODIES = {SHAPE_DEPTH: "int Shape::depth() const { return d * d - w * 11 + (h >> 2); }\n",
+                SHAPE_COLOR: "int Shape::color() const { return (w << 4) + h * 19 - d; }\n"}
+
+
+def shape_class(added: str, removed: str) -> str:
+    return SHAPE_CLASS.replace("@ADDED@", added).replace("@REMOVED@", removed).replace(
+        "@BODY@", SHAPE_BODIES.get(added, "") + SHAPE_BODIES.get(removed, ""))
+
+
 @unittest.skipUnless(shutil.which("clang++") and shutil.which("ld.lld"), "needs clang++ and ld.lld")
 class SwitchSignatureTests(unittest.TestCase):
     """A later build of a Switch module, its names stripped, named from an earlier one with symbols: by shape,
@@ -410,6 +449,44 @@ class SwitchSignatureTests(unittest.TestCase):
         self.assertEqual(evidence("_Z5inneri"), ("_Z5inneri", "call"))     # changed, the one a changed one calls
         self.assertNotIn("_Z8dropped1i", {p.name for p in found.values()})
         self.assertNotIn(at["_Z5addedi"], found)                                   # new code: no name to take
+
+    def test_a_table_whose_slots_moved(self):
+        """A later build adds a virtual and removes another, so the class table keeps its length but every slot
+        after the new one moved: slots pair by their code, never by index, and the new virtual takes no name."""
+        elf, symbols, _ = self.module("donor", shape_class("", SHAPE_DEPTH), hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        elf, symbols, at = self.module("target", shape_class(SHAPE_COLOR, ""), hide=True)
+        program = Program.from_symbols(Switch(), elf, symbols)
+        found = {p.address: p.name for p in signatures.propose(program, [donor])}
+        self.assertEqual(found.get(at["_ZTV5Shape"]), "_ZTV5Shape")
+        for name in ("_ZNK5Shape4areaEv", "_ZNK5Shape5edgesEv", "_ZN5Shape5scaleEi"):
+            self.assertEqual(found.get(at[name]), name)
+        self.assertNotIn(at["_ZNK5Shape5colorEv"], found)
+        self.assertNotIn("_ZNK5Shape5depthEv", found.values())
+
+    def test_changed_code_pairs_by_likeness(self):
+        """Between two matched functions, the donor has two functions an update changed with one it dropped
+        between them, the target the two changed ones and one it added: each changed one takes the donor function
+        it is most like, and the added one stays unnamed."""
+        elf, symbols, _ = self.module("donor", GAP_DONOR, hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        elf, symbols, at = self.module("target", GAP_TARGET, hide=True)
+        program = Program.from_symbols(Switch(), elf, symbols)
+        found = {p.address: (p.name, p.evidence) for p in signatures.propose(program, [donor])}
+        self.assertEqual(found.get(at["_Z5firstPii"]), ("_Z5firstPii", "shape"))
+        self.assertEqual(found.get(at["_Z6mixingPii"]), ("_Z6mixingPii", "layout+code"))
+        self.assertEqual(found.get(at["_Z7shufflePii"]), ("_Z7shufflePii", "layout+code"))
+        self.assertNotIn(at["_Z5addedPii"], found)
+        self.assertNotIn("_Z7droppedPii", {name for name, _ in found.values()})
+
+    def test_aligned_slots(self):
+        same = signatures.aligned(list("abcdef"), list("abcdef"))
+        self.assertEqual(same, [(i, i) for i in range(6)])
+        self.assertEqual(signatures.aligned(list("abXdef"), list("abcdef")), [(i, i) for i in range(6)])  # changed
+        self.assertEqual(signatures.aligned(list("abNcde"), list("abcdeR")),        # one added, one removed
+                         [(0, 0), (1, 1), (3, 2), (4, 3), (5, 4)])
+        self.assertEqual(signatures.aligned(list("aXYd"), list("abcd")), [(0, 0), (3, 3)])  # two side by side
+        self.assertEqual(signatures.aligned(["s", "s", "a"], ["s", "s", "s", "a"]), [(2, 3)])  # repeats can slide
 
     def test_analyze_names_the_module_and_adds_its_data(self):
         """With the donor cached, a fresh analysis of the stripped build renames its functions and adds the data
