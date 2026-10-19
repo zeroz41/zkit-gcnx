@@ -104,6 +104,18 @@ placement the original contradicts gives way; on a decomp in progress, units wit
 Double Dash (a debug build's map), 318 of the original's units come from the map and the relink stays
 byte-identical.
 
+`signatures.py` takes names from other builds. A donor function's shape is its instruction words with every
+relocated field cleared (PowerPC's, or what `aarch64.code_relocations` relocates) and what each relocation names; a
+target function takes a donor name by its shape, by what matched functions refer to and by the slots of class
+tables (CodeWarrior's, or Itanium's `_ZTV` read through a module's relocations), each only where the evidence
+admits one name, and a name two pieces of evidence dispute is withdrawn. A donor read from an original keeps its
+layout, so between two named functions the code in between is the donor's code in between, less what the linker
+dropped: copies of one shape pair in order, changed code one to one or by the callees, data and texts it shares,
+and a changed function's one unnamed callee is its donor's one unclaimed callee. `analyze.py` writes the names
+and the data they bring with the donor's sizes, and gives each named function's donor unit to `units.py` as
+evidence like a cited file (never a weak function's: the linker keeps an inline from whichever unit comes first).
+On Xenoblade 2, 3.0.1's stripped `main` takes names for 28,478 of its 35,906 functions from 1.0.0's exports.
+
 `vtables.py` finds class tables as data whose words have CodeWarrior's table shape (RTTI and offset words, then
 one function pointer per slot) and that the code stores into an object, or that holds a destructor; a dispatch
 table has the shape but is only read. `classes.py` recovers constructors (the last table a function stores into

@@ -101,6 +101,7 @@ class Module:
     symbols: dict[int, str] = field(default_factory=dict)           # offset -> dynamic symbol name (defined)
     sizes: dict[int, int] = field(default_factory=dict)             # offset -> that symbol's size
     kinds: dict[int, str] = field(default_factory=dict)             # offset -> func or object
+    weak: set[int] = field(default_factory=set)                     # weak symbols' offsets (inlines, templates)
     imports: dict[int, str] = field(default_factory=dict)           # data offset -> imported symbol it holds
     pointers: dict[int, int] = field(default_factory=dict)          # data offset -> offset it points to (relative)
     init_array: list[int] = field(default_factory=list)
@@ -230,6 +231,8 @@ def _from_elf(raw: bytes) -> Module:
             module.symbols.setdefault(symbol.value - base, symbol.name)
             module.sizes.setdefault(symbol.value - base, symbol.size)
             module.kinds.setdefault(symbol.value - base, symbol.kind)
+            if symbol.bind == "weak":
+                module.weak.add(symbol.value - base)
     _read_mod0(module)
     if not module.pointers:  # a plain ELF: its PT_DYNAMIC holds the same tables MOD0 points at
         for i in range(phnum):
@@ -279,6 +282,8 @@ def _read_dynamic(module: Module, dynamic: int) -> None:
                 module.symbols.setdefault(value, text)
                 module.sizes.setdefault(value, size)
                 module.kinds.setdefault(value, "func" if info & 0xF == 2 else "object")
+                if info >> 4 == 2:                                  # STB_WEAK
+                    module.weak.add(value)
     for start_tag, size_tag in ((DT_RELA, DT_RELASZ), (DT_JMPREL, DT_PLTRELSZ)):
         start, size = tags.get(start_tag), tags.get(size_tag)
         if start is None or not size:

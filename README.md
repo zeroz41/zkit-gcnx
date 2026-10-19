@@ -73,6 +73,11 @@ zkit setup ~/code/mygame-decomp --native ~/ports/mygame-port
 If you have a linker map from another build of the same game, `zkit units --map map.MAP` shows what it would
 change, and `--write` applies it. Units that already have source in `src/` are never changed.
 
+If another build kept its names (a Switch game's first release often exports every symbol, its updates none),
+build its signatures and analyze the build you decompile: `zkit signatures build v100 --image old/main --symbols
+old/symbols.txt --splits old/splits.txt`, then `zkit analyze --out analysis/` writes the target's symbols and
+splits with that build's names, data and units wherever the code proves them, and the evidence for each.
+
 **With an agent**, open it in the project folder and give it a short prompt:
 
 ```
