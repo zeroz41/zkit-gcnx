@@ -61,7 +61,7 @@ def section_traits(machine: Machine, name: str) -> tuple[int, int, int, int]:
     follows clang's (merge sections for strings and constants)."""
     alloc, write, execute = SHF_ALLOC, SHF_WRITE, SHF_EXECINSTR
     name = name.split("$", 1)[0] if machine is PPC else name    # `.ctors$10` is a .ctors the linker sorts first
-    if name.startswith((".text", ".init")):
+    if name.startswith(".text") or name in (".init", ".fini"):     # not `.init_array`: pointers, below
         return SHT_PROGBITS, alloc | execute, 0, 4
     if name.startswith((".bss", ".sbss", ".tbss")):
         return SHT_NOBITS, alloc | write | (SHF_TLS if name.startswith(".tbss") else 0), 0, 8
