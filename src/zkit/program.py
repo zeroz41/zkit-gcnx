@@ -97,10 +97,10 @@ class Program:
 
     @classmethod
     def from_project(cls, project, target: str) -> "Program":
-        """A project target's original, its symbols file when it has one (functions and data objects), else (a
-        GameCube target) what discovery finds in the original alone, else the functions zkit's index knows for it
-        (a report, a function list, or the original's own tables). A Switch module's own data symbols fill in
-        when the symbols file names no data."""
+        """A project target's original, its symbols file when it has one (functions and data objects), else what
+        the original alone gives (a GameCube target's discovery, a Switch module's unwind table, exports and import
+        stubs), else the functions zkit's index knows for it (a report or a function list). A Switch module's own
+        data symbols fill in when the symbols file names no data."""
         from .gc import Symbol, read_symbols
         from .inspect_dol import _dol
         from .platform import for_target
@@ -110,6 +110,10 @@ class Program:
             symbols = read_symbols(project.file(config["repository"], config["symbols"]))
         elif platform.name == "gamecube":
             return cls.from_image(platform, image)
+        elif platform.name == "switch":    # the module's own tables, never names the index kept from a decomp
+            stubs = image.stubs()
+            symbols = [Symbol(image.symbols.get(a) or stubs.get(a) or f"fn_{platform.text(a)[2:]}", ".text", a,
+                              "function", s, "global") for a, s in image.functions()]
         else:
             from .index import connect, refresh
             refresh(project)
