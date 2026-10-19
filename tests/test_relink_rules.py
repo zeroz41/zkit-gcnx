@@ -48,9 +48,10 @@ class UnitBoundsTests(unittest.TestCase):
         ev.files = {0: "a.cpp", 1: "a.cpp", 4: "b.cpp", 9: "b.cpp"}
         ev.placed = {4}
         placed, stated = (2, 4, "a.cpp then b.cpp"), (7, 7, "6 is its unit's static initializer")
-        ev.separations = [placed, stated]
-        ev.direct = {stated}
-        self.assertEqual(units._stated(ev), [stated])
+        literal = (3, 5, "two copies of one constant")              # the code's own evidence: it stands
+        ev.separations = [placed, stated, literal]
+        ev.direct, ev.borrowed = {stated}, {placed}
+        self.assertEqual(units._stated(ev), [stated, literal])
         ev.separations, ev.direct = [placed], set()                 # where the code says nothing, it stands
         self.assertEqual(units._stated(ev), [placed])
 

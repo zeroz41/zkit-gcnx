@@ -54,6 +54,7 @@ class Evidence:
     files: dict[int, str] = field(default_factory=dict)        # function index -> source file it cites
     cited: list[tuple[int, int, str]] = field(default_factory=list)   # joins of runs whose code cites one file
     direct: set[tuple[int, int, str]] = field(default_factory=set)    # separations the code itself states
+    borrowed: set[tuple[int, int, str]] = field(default_factory=set)  # separations only another build gives
     inlines: dict[int, str] = field(default_factory=dict)      # function index -> header it cites (inline)
     names: dict[int, str] = field(default_factory=dict)        # function index -> `Class::method` it cites
     placed: set[int] = field(default_factory=set)              # function indexes whose file is another build's unit
@@ -180,6 +181,8 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
             ev.separations.append((a + 1, b, f"{file_a} then {file_b}"))
             if a not in ev.placed and b not in ev.placed:
                 ev.direct.add(ev.separations[-1])
+            else:
+                ev.borrowed.add(ev.separations[-1])
 
 
 def _roots(paths: list[str]) -> list[str]:
@@ -325,15 +328,15 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
 
 
 def _stated(ev: Evidence) -> list[tuple[int, int, str]]:
-    """The separations, less those only another build's units give where the code itself states a boundary
-    (another cited file, a static initializer) between the same two functions citing their files: that build's
-    units are evidence where the code says nothing, not against it."""
+    """The separations, less those only another build's units give (`borrowed`) where the code itself states a
+    boundary (another cited file, a static initializer) between the same two functions citing their files: that
+    build's units are evidence where the code says nothing, not against it. Every other separation stands."""
     cited = sorted(i for i in ev.files if i not in ev.placed)
     direct = sorted(lo for lo, _, _ in ev.direct)
     out = []
     for row in ev.separations:
         lo, hi, _ = row
-        if row not in ev.direct:
+        if row in ev.borrowed:
             left = bisect.bisect_left(cited, lo)
             after = cited[left - 1] if left else -1                      # the last citation before the window
             right = bisect.bisect_left(cited, hi)
