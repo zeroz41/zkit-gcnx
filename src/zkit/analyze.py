@@ -31,7 +31,8 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
         symbols = {p.address: (p.name, "function" if p.kind == "function" else "object", 0) for p in named}
         sizes = {p.address: p.size for p in named if p.kind == "object" and p.size}
         with_data = _with_objects(program, _new_objects(program, symbols, sizes, set(current)))
-        return {"units": units.propose(with_data, fixed, placed), "classes": None, "symbols": symbols,
+        named_program = signatures.renamed(with_data, named)       # the names say which class owns a function
+        return {"units": units.propose(named_program, fixed, placed), "classes": None, "symbols": symbols,
                 "sizes": sizes, "signatures": named}     # the data named counts for the units' data
     proposal = units.propose(program, fixed, placed)
     result: dict[str, Any] = {"units": proposal, "classes": None, "symbols": {}, "signatures": named}

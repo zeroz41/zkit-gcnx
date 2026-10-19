@@ -34,6 +34,9 @@ class Platform:
     # The compiler gives every translation unit its own copy of each literal and the linker keeps them apart
     # (CodeWarrior); clang's mergeable sections share one copy across units, so literals prove nothing there.
     literals_per_unit = False
+    # Where a unit's data may start: CodeWarrior aligns every object's sections to a word; clang's string sections
+    # are byte-aligned, so a unit's strings start anywhere.
+    unit_alignment = 1
 
     def open(self, path: Path):
         raise NotImplementedError
@@ -93,6 +96,7 @@ class GameCube(Platform):
     name = "gamecube"
     ghidra_language = "PowerPC:BE:32:Gekko_Broadway"
     literals_per_unit = True
+    unit_alignment = 4
     IMAGE = (0x80000000, 0x81800000)
 
     def open(self, path: Path):

@@ -112,7 +112,7 @@ class Program:
         elif platform.name == "gamecube":
             return cls.from_image(platform, image)
         elif platform.name == "switch":    # the module's own tables, never names the index kept from a decomp
-            from .nxdata import objects
+            from .nxdata import linker_tables, objects
             stubs = image.stubs()
             functions = image.functions()
             symbols = [Symbol(image.symbols.get(a) or stubs.get(a) or f"fn_{platform.text(a)[2:]}", ".text", a,
@@ -120,6 +120,8 @@ class Program:
             own = _module_objects(project, target)
             symbols += own + [Symbol(f"lbl_{platform.text(a)[2:]}", section, a, "object", size, "global")
                               for a, size, section in objects(image, functions, [(s.address, s.size) for s in own])]
+            symbols += [Symbol(name or f"lbl_{platform.text(a)[2:]}", section, a, "object", size, "global")
+                        for a, size, section, name in linker_tables(image)]
         else:
             from .index import connect, refresh
             refresh(project)

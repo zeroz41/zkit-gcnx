@@ -90,7 +90,14 @@ each literal, so two copies of one value separate their users and one copy share
 only one run of code uses belongs to it; source paths cited by the code name a unit, and outrank data: data one
 run uses across two cited files is shared (a template's table, an inline's static), not one unit's. One file cited
 under two spellings (a path relative to an include folder, another build's unit name) is the full path that ends
-in the shorter one. `--check` compares an existing
+in the shorter one. On an ELF, a unit's own static initializer (one that tests no guard first; a guarded one is a
+template's static member, kept from whichever unit came first) is the unit's last function, and each initializer
+array entry is that unit's data. Another build's units count where the code states nothing: a boundary only they
+give yields to a citation change or an initializer between the same two citing functions, and a unit only they name
+after the file its neighbour's own code cites is named by its class (the qualifier of a constructor or destructor
+in its functions' Itanium names) or by its address. The linker's own sections (`.dynamic`, `.eh_frame`...) are
+nobody's, and a unit's data starts on a word only where the compiler aligns every object's sections so
+(CodeWarrior; clang's strings are byte-aligned). `--check` compares an existing
 split against the same evidence: folds (two units holding one unit's data), splits (one unit holding two copies of
 one literal) and data claims (data in no unit that one unit's code alone uses).
 

@@ -5,7 +5,7 @@ every address the code forms (`adrp` with an `add`, `adr`) or loads and stores t
 store, a literal load), every address a relocated pointer holds, and every object the module itself sizes (its
 exports). An address inside an object the module sizes is a member of it, not a start, and the linker's own
 tables in the module (`.dynamic`, `.dynsym`, `.rela.dyn`, `.eh_frame`...) are no program object and end the one
-before them. An object runs to the next
+before them; they are listed in sections of their own (`linker_tables`). An object runs to the next
 start, less what is plainly not its own: a string the code only takes the address of ends at its NUL, and a scalar
 the code only loads or stores, at one width, and that nothing points to, is that wide. The zero bytes after either,
 up to an aligned start, are alignment padding, which belongs to the gap (a unit's data starts aligned).
@@ -97,3 +97,22 @@ def _own_size(module, address: int, extent: int, section: str, whole: set[int], 
     if any(tail) or padding >= 32 or (address + extent) % (1 << padding.bit_length()):
         return extent                                   # what follows is data, or more than padding to a boundary
     return size
+
+
+ARRAYS = (".init_array", ".fini_array")
+
+
+def linker_tables(module) -> list[tuple[int, int, str, str | None]]:
+    """(address, size, section, name) of the linker's own tables in the module's data segments, each in its own
+    section (`.eh_frame`, `.rela.dyn`...), as a section table would place them: no unit's data reaches across. An
+    initializer (finalizer) array is one unnamed entry per unit's initializer: the units' own."""
+    data = [(s.offset, s.offset + s.size) for s in module.segments if s.kind == "data"]
+    out: list[tuple[int, int, str, str | None]] = []
+    for section, (start, end) in sorted(module.tables.items(), key=lambda kv: kv[1]):
+        if end <= start or not section.startswith(".") or not any(a <= start < b for a, b in data):
+            continue
+        if section in ARRAYS:
+            out += [(at, 8, section, None) for at in range(start, end - 7, 8)]
+        else:
+            out.append((start, end - start, section, "_" + section.strip(".").replace(".", "_")))
+    return out

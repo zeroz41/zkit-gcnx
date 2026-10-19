@@ -229,3 +229,16 @@ def code_relocations(words: list[int], start: int, pointers: dict[int, int],
             out.append(Reloc(origin, ADR_PREL_PG_HI21, page))
     out.sort(key=lambda r: r.offset)
     return out, cleared
+
+
+def guarded(words: list[int]) -> bool:
+    """Whether a function begins by testing a guard byte (`ldrb`, then `tbz`/`tbnz`/`cbz`/`cbnz` on what it
+    loaded): an initializer of a template's static member or an inline's static, which the linker keeps from
+    whichever unit comes first, not a unit's own initializer."""
+    for index, word in enumerate(words[:12]):
+        if word & 0xFFC00000 == 0x39400000:                               # ldrb (unsigned immediate)
+            loaded = word & 31
+            if any((test & 0x7E000000 in (0x36000000, 0x34000000)) and test & 31 == loaded
+                   for test in words[index + 1:index + 4]):
+                return True
+    return False
