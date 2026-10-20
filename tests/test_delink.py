@@ -119,10 +119,6 @@ class DelinkTests(unittest.TestCase):
         self.assertEqual(measures["matched_data"], measures["total_data"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class NoteTests(unittest.TestCase):
     def test_split_note_places_each_section_at_its_original_address(self):
         import struct
@@ -141,3 +137,32 @@ class NoteTests(unittest.TestCase):
             cursor += 20 + length + (-length % 4)
         virt = struct.unpack(f">{len(found[b'VIRT']) // 4}I", found[b"VIRT"])
         self.assertEqual(virt, (0, 0x80004000, 0x80100010, 0x80004000))   # null, the two sections, f
+
+
+class LabelLiteralTests(unittest.TestCase):
+    def test_a_literal_another_unit_holds_is_compared_by_the_originals_bytes(self):
+        """The original's object reaches a string only by a label another unit defines (the linker merged it
+        there); the compiled object has it in its own string section. Read from the original, the bytes decide."""
+        from zkit import objects
+        code = bytes.fromhex("00000090" "00000091" "c0035fd6")   # adrp x0 / add x0, x0 / ret
+        f = {"name": "f", "section": ".text", "value": 0, "size": 12, "kind": "func", "bind": "global", "address": 0}
+        with tempfile.TemporaryDirectory() as folder:
+            target, built = Path(folder) / "t.o", Path(folder) / "b.o"
+            label = {"name": "lbl_7100001000", "section": None, "value": 0, "size": 0, "kind": "notype",
+                     "bind": "global", "address": 0}
+            delink.write_object(delink.AARCH64, [(".text", 1, code, 4)], [f, label],
+                                {".text": [(0, 275, 1, 0), (4, 277, 1, 0)]}, target)
+            text = {"name": ".str", "section": ".rodata.str1.1", "value": 0, "size": 0, "kind": "notype",
+                    "bind": "local", "address": 0}
+            delink.write_object(delink.AARCH64, [(".text", 1, code, 4), (".rodata.str1.1", 1, b"hi\0", 1)],
+                                [f, text], {".text": [(0, 275, 1, 0), (4, 277, 1, 0)]}, built)
+            same = objects.function_diff(target, built, "f", labels=lambda name: b"hi\0more")
+            other = objects.function_diff(target, built, "f", labels=lambda name: b"ho\0")
+            unread = objects.function_diff(target, built, "f")
+        self.assertTrue(same["exact"], same)
+        self.assertFalse(other["exact"])
+        self.assertTrue(unread["reloc_only"] and not unread["exact"])
+
+
+if __name__ == "__main__":
+    unittest.main()

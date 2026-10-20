@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import struct
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -73,10 +74,15 @@ def _relocs(elf: Elf, section: Section, start: int, end: int, rename: dict[str, 
 CONSTANT_SECTIONS = (".rodata", ".sdata2", ".sbss2")  # constant by name: MWCC marks .sdata2 writable
 
 
-def _referenced(elf: Elf, index: int, addend: int) -> tuple[bytes, int, bool, bool] | None:
+def _referenced(elf: Elf, index: int, addend: int, original=None) -> tuple[bytes, int, bool, bool] | None:
     """(bytes from the target on, known length, string section, unnamed) for a relocation to constant data this
-    object defines; None for anything else (code, writable data, undefined symbols)."""
+    object defines, or (with `original`, a reader of the original's bytes by label) to a label another unit
+    defines, such as a literal the linker merged into another unit's range; None for anything else (code,
+    writable data, other undefined symbols)."""
     symbol = elf.symbols[index] if index < len(elf.symbols) else None
+    if symbol is not None and symbol.section == 0 and original is not None and symbol.name.startswith("lbl_"):
+        data = original(symbol.name)
+        return (data[addend:], 0, False, True) if data else None
     if symbol is None or not 0 < symbol.section < min(0xFF00, len(elf.sections)):
         return None
     section = elf.sections[symbol.section]
@@ -108,13 +114,13 @@ def _same_bytes(left: tuple, right: tuple, width: int | None = None) -> bool:
     return length > 0 and len(left[0]) >= length and left[0][:length] == right[0][:length]
 
 
-def _same_literal(a: Elf, xa: tuple, b: Elf, xb: tuple, width: int | None = None) -> bool:
+def _same_literal(a: Elf, xa: tuple, b: Elf, xb: tuple, width: int | None = None, original=None) -> bool:
     """Relocations naming different symbols for the same constant: read-only data one side leaves unnamed (a
     literal in a merge section, a generated label), compared by its bytes. Two named constants stay different."""
     if xa[0] != xb[0] or len(xa[3]) != len(xb[3]):
         return False
     for ia, aa, ib, ab in zip(xa[3], xa[2], xb[3], xb[2]):
-        left, right = _referenced(a, ia, aa), _referenced(b, ib, ab)
+        left, right = _referenced(a, ia, aa, original), _referenced(b, ib, ab)
         if left is None or right is None or not (left[3] or right[3]) or not _same_bytes(left, right, width):
             return False
     return True
@@ -262,9 +268,28 @@ def _reloc_text(reloc: tuple | None) -> str | None:
     return ", ".join(f"{name}{addend:+#x}" if addend else name for name, addend in zip(reloc[1], reloc[2]))
 
 
+def label_reader(project: Project, target: str):
+    """name -> up to 256 of the original's bytes at a `lbl_<address>` (None for any other name or address)."""
+    from .inspect_dol import _dol
+    from .platform import for_target
+    platform = for_target(project.target(target))
+    image = _dol(project, target)
+
+    def read(name: str) -> bytes | None:
+        address = platform.parse(name[4:]) if name.startswith("lbl_") else None
+        for size in (256, 64, 16):
+            try:
+                return platform.read(image, address, size) if address is not None else None
+            except (ValueError, IndexError, struct.error):
+                continue
+        return None
+    return read
+
+
 def function_diff(target_path: Path, base_path: Path, name: str, base_name: str | None = None,
-                  rename: dict[str, str] | None = None, limit: int = 24) -> dict[str, Any]:
-    """Compare one function in the original's object with the compiled one."""
+                  rename: dict[str, str] | None = None, limit: int = 24, labels=None) -> dict[str, Any]:
+    """Compare one function in the original's object with the compiled one. `labels` (`label_reader`) reads the
+    constants the original's object reaches only by a label another unit defines."""
     rename = rename or {}
     original, built = Elf.load(target_path), Elf.load(base_path)
     a, b = _find(original, name), _find(built, base_name or name)
@@ -296,7 +321,8 @@ def function_diff(target_path: Path, base_path: Path, name: str, base_name: str 
                          "original_reloc": _reloc_text(xa), "compiled_reloc": _reloc_text(xb)})
         elif xa and xb and (xa[1] != xb[1] or xa[2] != xb[2]):
             if _same_place(original, xa, built, xb) or _same_alias(original, xa, built, xb) \
-                    or _same_literal(original, xa, built, xb, _access(machine, wa)) or _same_table(original, xa, built, xb):
+                    or _same_literal(original, xa, built, xb, _access(machine, wa), labels) \
+                    or _same_table(original, xa, built, xb):
                 literals += 1
                 continue
             rows.append({"offset": offset, "original": wa.hex(), "compiled": wb.hex(),
