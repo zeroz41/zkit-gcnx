@@ -133,6 +133,93 @@ def track_addresses(words: list[int], start: int, load64=None) -> dict[int, tupl
     return out
 
 
+THIS = "this"
+
+
+def object_stores(words: list[int], start: int, load64=None) -> list[tuple]:
+    """What straight-line code stores into objects and passes them to, in order: ("store", pc, object, offset,
+    address) for each 64-bit store of an address the code formed (adrp + add, or a pointer `load64` knows a load
+    read, then offset) into an object, and ("call", pc, target, object, offset) for each call and tail call, with
+    what x0 holds (object None when not an object). An object is THIS (x0 on entry) or the pc of the call that
+    returned it; moves, adds and write-back addressing follow it, and a call forgets the caller-saved registers."""
+    held: dict[int, tuple] = {0: ("object", THIS, 0)}   # register -> ("address", value) / ("object", origin, offset)
+    out: list[tuple] = []
+    end = start + 4 * len(words)
+
+    def store(pc: int, value: int, base: int, offset: int) -> None:
+        v, b = held.get(value), held.get(base)
+        if v is not None and b is not None and v[0] == "address" and b[0] == "object":
+            out.append(("store", pc, b[1], b[2] + offset, v[1]))
+
+    def advance(register: int, amount: int) -> None:          # write-back: the base register moves
+        b = held.get(register)
+        if b is not None and b[0] == "object":
+            held[register] = ("object", b[1], b[2] + amount)
+        else:
+            held.pop(register, None)
+    for index, word in enumerate(words):
+        pc = start + 4 * index
+        rd, rn = word & 31, word >> 5 & 31
+        if word & 0x9F000000 == 0x90000000:                       # adrp
+            imm = _sign(((word >> 5 & 0x7FFFF) << 2) | (word >> 29 & 3), 21) << 12
+            held[rd] = ("address", (pc & ~0xFFF) + imm)
+        elif word & 0xFF800000 == 0x91000000:                     # add (immediate), 64 bit
+            imm = (word >> 10 & 0xFFF) << (12 if word >> 22 & 1 else 0)
+            v = held.get(rn)
+            if v is None:
+                held.pop(rd, None)
+            else:
+                held[rd] = (v[0], v[1] + imm) if v[0] == "address" else ("object", v[1], v[2] + imm)
+        elif word & 0xFFC00000 == 0xF9400000:                     # ldr x (unsigned immediate)
+            v = held.get(rn)
+            loaded = load64(v[1] + (word >> 10 & 0xFFF) * 8) if v and v[0] == "address" and load64 else None
+            if loaded is not None:
+                held[rd] = ("address", loaded)
+            else:
+                held.pop(rd, None)
+        elif word & 0xFFE0FFE0 == 0xAA0003E0:                     # mov x, x (orr with xzr)
+            if (word >> 16 & 31) in held:
+                held[rd] = held[word >> 16 & 31]
+            else:
+                held.pop(rd, None)
+        elif word & 0xFFC00000 == 0xF9000000:                     # str x (unsigned immediate)
+            store(pc, rd, rn, (word >> 10 & 0xFFF) * 8)
+        elif word & 0xFFE00000 == 0xF8000000 and word >> 10 & 3 != 2:   # str x pre-, post-index, stur
+            imm = _sign(word >> 12 & 0x1FF, 9)
+            store(pc, rd, rn, imm if word >> 10 & 3 in (0, 3) else 0)
+            if word >> 10 & 1:
+                advance(rn, imm)
+        elif word & 0xFE400000 == 0xA8000000 and word >> 23 & 3:  # stp x (offset, pre-, post-index)
+            imm = _sign(word >> 15 & 0x7F, 7) * 8
+            at = 0 if word >> 23 & 3 == 1 else imm
+            store(pc, rd, rn, at)
+            store(pc, word >> 10 & 31, rn, at + 8)
+            if word >> 23 & 3 != 2:
+                advance(rn, imm)
+        elif word & 0x7C000000 == 0x14000000:                     # bl / b
+            target = pc + _sign(word & 0x03FFFFFF, 26) * 4
+            if word >> 31 or not start <= target < end:
+                x0 = held.get(0)
+                out.append(("call", pc, target, *(x0[1:] if x0 and x0[0] == "object" else (None, 0))))
+            if word >> 31:
+                for register in (*range(19), 30):
+                    held.pop(register, None)
+                held[0] = ("object", pc, 0)
+        elif word & 0xFFFFFC1F == 0xD63F0000:                     # blr
+            for register in (*range(19), 30):
+                held.pop(register, None)
+        else:
+            if word & 0x3B200400 == 0x38000400:                   # load/store, pre- or post-index: base written
+                advance(rn, _sign(word >> 12 & 0x1FF, 9))
+            elif word & 0x3A000000 == 0x28000000 and word >> 23 & 1:   # pair, pre- or post-index
+                scale = 4 << (word >> 30) if word >> 26 & 1 else 4 << (word >> 31)
+                advance(rn, _sign(word >> 15 & 0x7F, 7) * scale)
+            for register in written(word):
+                held.pop(register, None)
+        held.pop(31, None)                                         # the zero register or sp: never an address
+    return out
+
+
 # Relocations recovered for delinking (ELF AArch64 numbers)
 ABS64, PREL32 = 257, 261
 LD_PREL_LO19, ADR_PREL_LO21, ADR_PREL_PG_HI21, ADD_ABS_LO12_NC = 273, 274, 275, 277

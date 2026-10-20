@@ -159,7 +159,11 @@ on `this` and `this + k`), sizes (`new` with a constant size reaching a construc
 `this`), and writes declarations a compiler turns back into the original tables. `--prove` compiles them
 with the project's own compiler and compares tables, pointer offsets and sizes. Names are only what evidence
 proves: a table is `__vt__<class>`, a CodeWarrior destructor `__dt__<class>Fv`; a constructor or virtual method
-keeps its placeholder until its parameters are known, because a mangled name claims a signature.
+keeps its placeholder until its parameters are known, because a mangled name claims a signature. On Switch,
+`itanium.py` reads the classes from a module's `_ZTV` tables without RTTI: a primary base is a table that is a
+prefix of the class's own, or the nearest ancestor whose table the class's constructors, destructors and
+new-expressions store at offset 0 of the object before (after, in a destructor) its own, where no other class
+could stand between them. Each base names the evidence that proved it.
 
 `score.py` measures a proposed split against a reference (another split or a CodeWarrior linker map): function
 starts and sizes, names, unit boundaries, vtables and data ownership, with the reference's fully matched units

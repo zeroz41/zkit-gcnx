@@ -984,7 +984,8 @@ def _itanium_classes(data: dict) -> str:
     c = data["counts"]
     out = [f"{data['classes']} classes from Itanium tables: " + ", ".join(f"{v:,} {k}" for k, v in sorted(c.items()))]
     for r in data["rows"]:
-        bases = ", ".join(f"{b['base']} at 0x{b['offset']:X}" for b in r["bases"]) or "no base"
+        bases = ", ".join(f"{b['base']} at 0x{b['offset']:X} ({'; '.join(b.get('evidence') or ['?'])})"
+                          for b in r["bases"]) or "no base"
         tied = "; tied: " + ", ".join(", ".join(t["candidates"]) for t in r["tied"]) if r["tied"] else ""
         out.append(f"  {r['class']} (table {r['table'] or 'none'}, slots {r['slots']}): {bases}{tied}")
     return "\n".join(out)
