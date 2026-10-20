@@ -101,16 +101,19 @@ TYPE_ALIASES = {"string": "str", "char": "str", "hex": "u8", "bytes": "u8", "byt
                 "double": "f64", "pointer": "ptr", "addr": "ptr", "address": "ptr", "quad": "u64"}
 
 
-def data_type(kind: str) -> str:
-    """A data type name as agents write it (string, hex, float, ...) -> one of DATA_TYPES."""
-    kind = (kind or "u32").strip().lower()
+def data_type(kind: str | None) -> str | None:
+    """A data type name as agents write it (string, hex, float, ...) -> one of DATA_TYPES; none given stays None
+    (the target's word, `read_data`)."""
+    if not kind:
+        return None
+    kind = kind.strip().lower()
     kind = TYPE_ALIASES.get(kind, kind)
     if kind not in DATA_TYPES:
         raise ValueError(f"Unknown type {kind!r}; use one of {', '.join(DATA_TYPES)}")
     return kind
 
 
-def typed_query(query: str, kind: str, count: int | None) -> tuple[str, str, int | None]:
+def typed_query(query: str, kind: str | None, count: int | None) -> tuple[str, str | None, int | None]:
     """`ADDR:type[:count]` (as agents write it) -> (ADDR, type, count); anything else unchanged."""
     names = "|".join([*DATA_TYPES, *TYPE_ALIASES])
     match = re.fullmatch(rf"(.+?):({names})(?::(\d+))?", query.strip(), re.I)

@@ -378,14 +378,15 @@ def _readable(project: Project, target: str, dol, address: int, width: int) -> N
 READ_CAPS = {"rows": 1024, "records": 512, "strings": 256}
 
 
-def read_data(project: Project, target: str, address: int, kind: str = "u32", count: int | None = None,
+def read_data(project: Project, target: str, address: int, kind: str | None = None, count: int | None = None,
               stride: int | None = None, fields: list[str] | None = None, size: int | None = None) -> dict:
     """Typed reads; `fields` + `stride` decode a table of records. Without count (or size, in bytes), the data
-    symbol at the address gives the extent, else 16 elements. Reads stop at the end of the section."""
+    symbol at the address gives the extent, else 16 elements. Reads stop at the end of the section. Without a
+    kind, words: u32, or pointer-sized where a 64-bit module relocates words of what is read."""
     refresh(project, [])
     db = connect(project)
     dol = _dol(project, target)
-    if kind not in TYPES and kind != "str":
+    if kind is not None and kind not in TYPES and kind != "str":
         raise ValueError(f"Unknown type {kind!r}; use one of {', '.join(list(TYPES) + ['str'])}")
     for field in fields or []:
         if field.strip() not in TYPES and not re.fullmatch(r"pad\d+", field.strip()):
@@ -396,6 +397,8 @@ def read_data(project: Project, target: str, address: int, kind: str = "u32", co
     extent = size or (symbol["size"] - symbol["offset"] if symbol and symbol["size"] > symbol["offset"] else None)
     section = dol.section_at(address)
     end = min(section.address + section.size, address + size) if size else section.address + section.size
+    if kind is None:
+        kind = _word(project, target, dol, address, min(end, address + (extent or 16 * 8)))
     rows, notes = [], []
 
     def bounded(wanted: int, cap: str) -> int:
@@ -452,11 +455,28 @@ def read_data(project: Project, target: str, address: int, kind: str = "u32", co
             "inside_function": (owner["demangled"] or owner["name"]) if owner else None}
 
 
-def _decode_text(project: Project, target: str, raw: bytes) -> str:
-    """Strings as the game stores them: Shift-JIS on GameCube, UTF-8 on Switch."""
+def _word(project: Project, target: str, dol, address: int, end: int) -> str:
+    """The type a read without one takes: u32, or on a 64-bit target the pointer-sized word where the module
+    relocates a word of [address, end) (a vtable, a table of pointers)."""
     from .platform import for_target
-    encoding = "utf-8" if for_target(project.target(target)).name == "switch" else "shift_jis"
-    return raw.decode(encoding, errors="replace")
+    if for_target(project.target(target)).pointer_size != 8 or address % 8 or getattr(dol, "pointers", None) is None:
+        return "u32"
+    return "ptr" if any(a in dol.pointers or a in dol.imports for a in range(address, end, 8)) else "u32"
+
+
+def _decode_text(project: Project, target: str, raw: bytes) -> str:
+    """Strings as the game stores them: UTF-8 or Shift-JIS (cp932, Windows' superset of it, for the rest),
+    whichever the bytes are, Shift-JIS first on GameCube; bytes that are neither are escaped."""
+    from .platform import for_target
+    order = ("utf-8", "shift_jis", "cp932")
+    if for_target(project.target(target)).name != "switch":
+        order = ("shift_jis", "cp932", "utf-8")
+    for encoding in order:
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            pass
+    return "".join(c if c.isprintable() else f"\\x{ord(c):02x}" for c in raw.decode("latin-1"))
 
 
 def _symbol_name(project: Project, target: str, address: int) -> str:
@@ -473,8 +493,13 @@ def _value(db, target: str, dol, address: int, kind: str, project: Project | Non
     if kind == "ptr":
         from .index import platform
         current = platform()
-        key = value - current.base if current.base and value >= current.base else value
-        inside = bool(value) and current.in_image(dol, key)
+        if getattr(dol, "pointers", None) is not None:  # a module: a word is a pointer where a relocation makes it one
+            if address in dol.imports:
+                return f"{dol.imports[address]} (import)"
+            key, inside = dol.pointers.get(address, value), address in dol.pointers
+        else:
+            key = value - current.base if current.base and value >= current.base else value
+            inside = bool(value) and current.in_image(dol, key)
         label = (_name(db, target, key) or (_symbol_name(project, target, key) if project else "")) if inside else ""
         return (address_text(key) if inside else f"0x{value:X}") + (f" ({label})" if label else "")
     if kind == "f32":

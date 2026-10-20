@@ -434,16 +434,17 @@ def create_server(project: Project) -> FastMCP:
         return out(data, render.permute(data), response_format)
 
     @tool()
-    def zkit_data(address: str | None = None, type: str = "u32", count: Number = None, fields: str | None = None,
+    def zkit_data(address: str | None = None, type: str | None = None, count: Number = None, fields: str | None = None,
                   stride: Number = None, query: str | None = None, size: Number = None,
                   addresses: list[str] | str | None = None, repo: str | None = None,
                   response_format: Format = "text", length: Number = None) -> str:
         """Typed reads of ORIGINAL data in the main executable at an address or symbol name (lbl_*, jumptable_*,
         __vt__*); several addresses (space separated, or addresses=[...]) read in one call. type: u8 s8 u16 s16
-        u32 s32 u64 s64 f32 f64 ptr str (count = number of strings). Without count or size (bytes), the data symbol
-        at the address gives the extent, else 16 elements; reads stop at the end of the section. Tables: fields
-        like "u32,f32,ptr,pad4" (stride optional). .bss has no bytes in the executable: zkit_xrefs shows who
-        writes it. REL module data is not read here."""
+        u32 s32 u64 s64 f32 f64 ptr str (count = number of strings); default u32, or ptr where a 64-bit module
+        relocates the words (a module's word is a pointer only where it is relocated). Without count or size
+        (bytes), the data symbol at the address gives the extent, else 16 elements; reads stop at the end of the
+        section. Tables: fields like "u32,f32,ptr,pad4" (stride optional). .bss has no bytes in the executable:
+        zkit_xrefs shows who writes it. REL module data is not read here."""
         p = decomp(repo)
         wanted = bridge.query_list(address) + bridge.query_list(query) + bridge.query_list(addresses)
         if not wanted:
