@@ -328,10 +328,13 @@ def progress(project: Project, target: str) -> dict[str, Any]:
 
 # Offline page: the reports themselves (objdiff's own counters), browsable without any service.
 
-def _unit_rows(report: dict) -> list[dict]:
+def _unit_rows(report: dict, single: str | None = None) -> list[dict]:
+    """The page's units. A one-module target (a Switch `main`) is browsed by source folder: a unit without
+    objdiff categories takes its first folder as one, and a unit outside any folder stays in the module."""
     rows = []
     for index, unit in enumerate(report.get("units", [])):
         meta = unit.get("metadata") or {}
+        folder = str(unit.get("name", "")).split("/", 1)[0] if "/" in str(unit.get("name", "")) else None
         functions = []
         for function in unit.get("functions") or []:
             info = function.get("metadata") or {}
@@ -349,9 +352,9 @@ def _unit_rows(report: dict) -> list[dict]:
                              "match": number(section.get("fuzzy_match_percent")),
                              "address": int(number(address)) if address is not None else None})
         addresses = [f["address"] for f in functions] or [s["address"] for s in sections if s["address"] is not None]
-        rows.append({"id": index, "name": unit.get("name"), "module": module_of(unit),
+        rows.append({"id": index, "name": unit.get("name"), "module": module_of(unit, single),
                      "source": meta.get("source_path"), "linked": bool(meta.get("complete")),
-                     "categories": meta.get("progress_categories") or [],
+                     "categories": meta.get("progress_categories") or ([folder] if single and folder else []),
                      "measures": measures(unit.get("measures")), "address": min(addresses) if addresses else None,
                      "functions": functions, "sections": sections})
     return rows
@@ -365,13 +368,26 @@ def _differences(report: dict, units: list[dict]) -> dict[str, dict[str, int]]:
     return {key: {"report": reported[key], "units": value} for key, value in summed.items() if reported[key] != value}
 
 
-def page(reports: list[tuple[str, dict]], title: str, subtitle: str = "") -> str:
+def page(reports: list[tuple[str, dict]], title: str, subtitle: str = "",
+         modules: dict[str, str | None] | None = None) -> str:
     """One self-contained HTML file for one or more reports (labels such as target names); each report's own file
-    is `<label>.json` beside it."""
+    is `<label>.json` beside it. `modules`: the one module of a label's target, when it has one."""
     payload = []
     for label, report in reports:
-        units = _unit_rows(report)
-        payload.append({"label": label, "file": f"{label}.json", "summary": summary(report), "units": units,
+        units = _unit_rows(report, (modules or {}).get(label))
+        totals = summary(report)
+        if not totals["categories"]:   # a one-module target's folders, each with its units' totals
+            folders: dict[str, dict[str, int]] = {}
+            for unit in units:
+                for folder in unit["categories"]:
+                    counts = folders.setdefault(folder, dict.fromkeys(COUNTERS, 0))
+                    for key, value in unit["measures"].items():
+                        counts[key] += value if key not in ("total_units", "complete_units") else 0
+                    counts["total_units"] += 1
+                    counts["complete_units"] += unit["linked"]
+            totals["categories"] = [{"id": name, "name": name, "measures": _with_percents(counts)}
+                                    for name, counts in sorted(folders.items())]
+        payload.append({"label": label, "file": f"{label}.json", "summary": totals, "units": units,
                         "differences": _differences(report, units)})
     data = json.dumps({"title": title, "subtitle": subtitle, "reports": payload,
                        "generated": datetime.now(timezone.utc).isoformat(timespec="seconds")},
@@ -395,7 +411,10 @@ def write_page(project: Project, targets: list[str], out: Path, title: str | Non
     for label, report in reports:  # the page links each report it shows
         (out / f"{label}.json").write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")
     index = out / "index.html"
-    index.write_text(page(reports, title or project.config.get("title") or project.config["id"]), encoding="utf-8")
+    subtitle = project.config.get("subtitle") or " · ".join(
+        f"{label} ({project.target(label).get('platform', 'gamecube')})" for label, _ in reports)
+    index.write_text(page(reports, title or project.config.get("title") or project.config["id"], subtitle,
+                          {label: single_module(project, label) for label, _ in reports}), encoding="utf-8")
     return index
 
 
@@ -443,10 +462,6 @@ def write_readme(project: Project, targets: list[str], path: Path) -> bool:
     updated = text[:start + len(README_START)] + "\n" + readme_block(reports) + "\n" + text[end:]
     updated = updated.rstrip("\n") + "\n"
     if updated == original:
-        return False
-    path.write_text(updated, encoding="utf-8")
-    return True
-    if updated == text:
         return False
     path.write_text(updated, encoding="utf-8")
     return True
