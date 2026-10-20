@@ -148,7 +148,12 @@ def compare(project: Project, target: str, unit: dict, name: str, text: str, kee
         staged.parent.mkdir(parents=True, exist_ok=True)
         staged.write_text(text, encoding="utf-8")
         command, expected = _restage(argv, source_arg, staged, work, source_path.parent, workdir, rooted)
-        result = subprocess.run(command, cwd=workdir, capture_output=True, text=True, encoding="utf-8",
+        cwd = workdir
+        if rooted:   # from the folder itself: clang's -working-directory would make `__FILE__` absolute
+            at = command.index("-working-directory")
+            cwd = Path(command[at + 1])
+            command = command[:at] + command[at + 2:]
+        result = subprocess.run(command, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
                                 errors="replace", timeout=300)
         built = expected if expected.is_file() else next(iter(work.glob("*.o")), None)
         out: dict[str, Any] = {"command": shlex.join(command)}

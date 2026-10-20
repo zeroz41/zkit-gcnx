@@ -328,8 +328,11 @@ def configure(project: Project, repository: str | None = None, only: str | None 
         depfile="$basefile.d", deps="gcc", description="MWCC $out")
     ninja.rule("clang", "$cc $cflags -MMD -MF $out.d -c $in -o $out", depfile="$out.d", deps="gcc",
                description="CC $out")
-    ninja.rule("clang_rooted", "$cc $cflags -MMD -MF $object.d -MT $out -c $source -o $object", depfile="$out.d",
-               deps="gcc", description="CC $out")
+    # Compiled from the folder itself, not with clang's -working-directory, which makes the main file's path, and
+    # so its `__FILE__`, absolute. The dependencies come first, from the source's path in the repository (the same
+    # file through the folder's link): ninja reads them from there, where the original's path does not exist.
+    ninja.rule("clang_rooted", "$cc $cflags -MM -MT $out -MF $object.d $in && cd $folder && "
+               "$cc $cflags -c $source -o $object", depfile="$out.d", deps="gcc", description="CC $out")
     ninja.rule("report", "$objdiff report generate -p $project $args -o $out", description="REPORT $out")
     inputs = [str(project.path)]
     stamp = "build/zkit.stamp"                       # the target objects are cut again when zkit itself changes
@@ -475,10 +478,13 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
         # path absolute (clang resolves includes and the object against the working directory)
         named = f"{config['source_root'].strip('/')}/{unit}"
         flags = words(config["cflags"]) + [f"-I{(root / folder).as_posix()}" for folder in includes] + \
-            config["extra_cflags"] + ["-working-directory", mirror.as_posix()]
+            config["extra_cflags"]
         target = (root / out).as_posix()
-        return {"rule": "clang_rooted", "cc": cc, "flags": flags, "argv": [*cc, *flags, "-c", named, "-o", target],
-                "out": out, "implicit": implicit, "variables": {"source": named, "object": target}}
+        # argv (compile_commands.json, `zkit try`) names the folder with -working-directory; ninja runs from it
+        return {"rule": "clang_rooted", "cc": cc, "flags": flags,
+                "argv": [*cc, *flags, "-working-directory", mirror.as_posix(), "-c", named, "-o", target],
+                "out": out, "implicit": implicit,
+                "variables": {"source": named, "object": target, "folder": mirror.as_posix()}}
     flags = words(config["cflags"]) + [f"-I{folder}" for folder in includes] + config["extra_cflags"]
     return {"rule": "clang", "cc": cc, "flags": flags, "argv": [*cc, *flags, "-c", source, "-o", out], "out": out,
             "implicit": implicit}

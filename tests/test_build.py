@@ -377,7 +377,13 @@ class SwitchBuildTests(unittest.TestCase):
                 tried = candidate.compare(Project.load(manifest), "test", unit, "_Z8greetingv", cites)
                 matched[rooted] = (diff["exact"], tried["exact"])
             self.assertEqual(matched, {False: (False, False), True: (True, True)})
-            self.assertIn(original.encode(), (game / "build/test/src/a.o").read_bytes())
+            # the string itself, not a path ending in it (clang's -working-directory makes the main file absolute)
+            built = (game / "build/test/src/a.o").read_bytes()
+            self.assertIn(original.encode() + b"\0", built)
+            self.assertNotIn(b"/" + original.encode(), built)
+            dry = subprocess.run(["ninja", "-f", "build/build.ninja", "-n", "-d", "explain", "build/test/src/a.o"],
+                                 cwd=game, capture_output=True, text=True)
+            self.assertIn("no work to do", dry.stdout, dry.stdout + dry.stderr)   # its dependencies are found
 
 
 if __name__ == "__main__":
