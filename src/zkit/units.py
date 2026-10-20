@@ -131,6 +131,7 @@ def _initializer_ends(program: Program, ev: Evidence) -> None:
 
 
 PIECE = re.compile(r"_[0-9A-Fa-f]{8,16}(?=\.\w+$)")   # `file_<address>.cpp`: a later piece of one file
+UNNAMED = re.compile(r"^unit_[0-9A-Fa-f]+\.\w+$")      # a placeholder: a unit no file or class names
 
 
 def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None = None) -> None:
@@ -162,7 +163,7 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
     for address, unit in (placed or {}).items():
         index = program.function_index.get(address)
         if index is not None and unit and index not in ev.files:
-            ev.files[index] = PIECE.sub("", unit)
+            ev.files[index] = unit if UNNAMED.match(unit) else PIECE.sub("", unit)   # its address is no piece's
             ev.placed.add(index)
     # One file named two ways: a path relative to an include folder (or another build's unit name) is the one
     # full path that ends in it.
@@ -527,6 +528,8 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
                 else "another build"
         else:
             name, how = _unnamed(program, class_of, first, end)
+        if UNNAMED.match(name):                  # another build's placeholder: this build's address names it
+            name, how = f"unit_{text(functions[first].address)[2:]}.cpp", "placeholder"
         named.append((first, end, name, how))
     # A file's code is one run: a unit only another build names after the file its neighbour's own code cites is
     # another file, which that build had not told apart.
