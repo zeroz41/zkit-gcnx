@@ -258,6 +258,8 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
         if len(longer) == 1:
             full[short] = longer[0]
     ev.files = {index: full.get(name, name) for index, name in ev.files.items()}
+    alias = _included(ev)                              # files one compiles inside another: the unit's one name
+    ev.files = {index: alias.get(name, name) for index, name in ev.files.items()}
     _class_files(program, ev)
     # A unit's code is one run in the link: one function another build put in X between two that agree on Y is
     # no evidence for X there (an inline that build kept from X, code that moved, other code that compiles alike).
@@ -267,6 +269,16 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
             del ev.files[index]
             ev.placed.discard(index)
     _joined_placements(ev, _initializers(program))
+    # One file's own citations around another's: that one is compiled inside it (included), and the run between
+    # is one unit, whatever else says otherwise.
+    own = sorted((i, f) for i, f in ev.files.items() if i not in ev.placed and i not in ev.classed)
+    last: dict[str, int] = {}
+    for position, (index, file) in enumerate(own):
+        if file in last and own[last[file] + 1][1] != file:
+            row = (own[last[file]][0], index, f"{file}'s citations around another file's: it includes it")
+            ev.joins.append(row)
+            ev.cited.append(row)
+        last[file] = position
     anchors = sorted(ev.files.items())
     starts = [f.address for f in program.functions]
     for (a, file_a), (b, file_b) in zip(anchors, anchors[1:]):
@@ -285,7 +297,7 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
     # Two functions citing different files themselves are in different units even where another build's units lie
     # between them: a boundary the joins of data alone do not move. Not where the two files' citations interleave:
     # one file includes the other, and both are one unit.
-    own = sorted((i, f) for i, f in ev.files.items() if i not in ev.placed)
+    own = sorted((i, f) for i, f in ev.files.items() if i not in ev.placed and i not in ev.classed)
     first_of: dict[str, int] = {}
     last_of: dict[str, int] = {}
     for i, f in own:
@@ -298,6 +310,38 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
             ev.pairs[row] = (file_a, file_b)
             ev.direct.add(row)
     _untied(program, ev, anchors)
+
+
+def _included(ev: Evidence) -> dict[str, str]:
+    """{file: the name of the unit it is compiled in} for files whose own citations interleave with another's
+    (`a.cpp`, then `b.cpp`, then `a.cpp` again): one includes the other, and they are one unit, named after the one
+    citing most (another build may name it after the other: its units take this name too)."""
+    own = sorted((i, f) for i, f in ev.files.items() if i not in ev.placed)
+    parent: dict[str, str] = {}
+
+    def root(f: str) -> str:
+        while parent.get(f, f) != f:
+            f = parent[f]
+        return f
+    last: dict[str, int] = {}
+    for position, (_, file) in enumerate(own):
+        if file in last:
+            for _, other in own[last[file] + 1:position]:
+                if other != file:
+                    a, b = root(file), root(other)
+                    if a != b:
+                        parent[b] = a
+        last[file] = position
+    counts = collections.Counter(f for _, f in own)
+    groups: dict[str, list[str]] = collections.defaultdict(list)
+    for f in {f for _, f in own} | set(parent):
+        groups[root(f)].append(f)
+    out = {}
+    for members in groups.values():
+        if len(members) > 1:
+            name = max(members, key=lambda f: (counts[f], f))
+            out.update({f: name for f in members if f != name})
+    return out
 
 
 def _joined_placements(ev: Evidence, ends: list[int]) -> None:
@@ -391,27 +435,41 @@ def _class_files(program: Program, ev: Evidence) -> None:
     instances weak, a strong function of a class whose cited functions cite one file is that file's, ahead of
     another build's unit, when the citation nearest it on either side is that file's too. A class can define a
     method in another file (`GfComBehaviorPc::callbackBattle`, among the battle code): there the citations around
-    it are that other file's, and the class says nothing."""
+    it are that other file's, and the class says nothing; nor does it across another class's functions whose own
+    citations name another file (one file including another: their classes' functions alternate), nor further
+    than a file's evidence reaches (`FILL_FUNCTIONS`)."""
+    from .score import placeholder
     weak, bound = set(getattr(program.image, "weak", ())), getattr(program.image, "symbols", None) or {}
-    strong = {f.address for f in program.functions if f.address in bound and f.address not in weak}
-    if not weak or not strong:        # only the module's own symbol table tells a class's own functions from the
-        return                        # inlines other units kept; a function it does not list is either
+    weak |= {f.address for f in program.functions if f.scope == "weak"}
+    # the module's own symbol table tells a class's own functions from the inlines other units kept, and so do the
+    # bindings that came with names from a build that has one; a function neither lists is either
+    strong = {f.address for f in program.functions if f.address not in weak and
+              (f.address in bound or f.scope == "global" and not placeholder(f.name))}
+    if not weak or not strong:
+        return
     members: dict[str, list[int]] = collections.defaultdict(list)
-    for index, cls in _function_classes(program).items():
+    for index, cls in _function_classes(program, qualifiers=True).items():
         if program.functions[index].address in strong:
             members[cls].append(index)
     cited = sorted((i, name) for i, name in ev.files.items() if i not in ev.placed)
     keys = [i for i, _ in cited]
-    for indexes in members.values():
+    file_of: dict[str, str] = {}                        # class -> the one file its own functions cite
+    for cls, indexes in members.items():
         files = {ev.files[i] for i in indexes if i in ev.files and i not in ev.placed}
-        if len(files) != 1:
+        if len(files) == 1:
+            file_of[cls] = files.pop()
+    owner = {i: file_of[cls] for cls, indexes in members.items() if cls in file_of for i in indexes}
+    for cls, indexes in members.items():
+        if cls not in file_of:
             continue
-        file = files.pop()
+        file = file_of[cls]
+        clear = lambda lo, hi: hi - lo <= FILL_FUNCTIONS and all(owner.get(i, file) == file for i in range(lo + 1, hi))
         for index in indexes:
             if index in ev.files and index not in ev.placed:
                 continue
             at = bisect.bisect_left(keys, index)
-            if (at and cited[at - 1][1] == file) or (at < len(cited) and cited[at][1] == file):
+            if (at and cited[at - 1][1] == file and clear(cited[at - 1][0], index)) or \
+                    (at < len(cited) and cited[at][1] == file and clear(index, cited[at][0])):
                 ev.files[index] = file
                 ev.placed.discard(index)
                 ev.classed.add(index)
@@ -734,11 +792,11 @@ def _unnamed(program: Program, class_of: dict[int, str], first: int, end: int) -
     return f"unit_{program.platform.text(program.functions[first].address)[2:]}.cpp", "placeholder"
 
 
-def _function_classes(program: Program) -> dict[int, str]:
+def _function_classes(program: Program, qualifiers: bool = False) -> dict[int, str]:
     """Function index -> the class it belongs to: the recovered class of a CodeWarrior table, or the class an
     Itanium name qualifies (`_itanium_classes`)."""
     if program.platform.name == "switch":
-        return _itanium_classes(program)
+        return _itanium_classes(program, qualifiers)
     if program.platform.name != "gamecube":
         return {}
     from .classes import recover
@@ -758,10 +816,12 @@ def _function_classes(program: Program) -> dict[int, str]:
     return out
 
 
-def _itanium_classes(program: Program) -> dict[int, str]:
+def _itanium_classes(program: Program, qualifiers: bool = False) -> dict[int, str]:
     """Function index -> the class its Itanium name qualifies it with, where some function is that class's
     constructor or destructor (a namespace has neither) and the class is no template's instance (the linker keeps
-    one of those from whichever unit comes first). The class is spelled as a path: `fw::Camera` is `fw/Camera`."""
+    one of those from whichever unit comes first). The class is spelled as a path: `fw::Camera` is `fw/Camera`.
+    With `qualifiers`, also a qualifier that qualifies nothing else's (a class whose constructor every caller
+    inlined, `gf::GfMoveBrakeControler`; a namespace holds classes or namespaces)."""
     from .platform import demangle_itanium
     named = [(i, f.name) for i, f in enumerate(program.functions) if f.name.startswith("_Z")]
     owners: dict[int, str] = {}
@@ -776,6 +836,9 @@ def _itanium_classes(program: Program) -> dict[int, str]:
         owners[index] = owner
         if method.lstrip("~") == parts[-2]:
             classes.add(owner)
+    if qualifiers:
+        outer = {"::".join(o.split("::")[:k]) for o in set(owners.values()) for k in range(1, o.count("::") + 1)}
+        classes |= set(owners.values()) - outer
     return {index: owner.replace("::", "/") for index, owner in owners.items() if owner in classes}
 
 

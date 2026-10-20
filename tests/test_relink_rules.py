@@ -184,6 +184,30 @@ class UnitEvidenceTests(unittest.TestCase):
             units._file_evidence(code, ev, placed)
         self.assertFalse({row for row in ev.direct if row[0] <= 9 and row[1] >= 4})
 
+    def test_files_whose_citations_interleave_are_one_unit(self):
+        """a.cpp cites 2, 6 and 8 around b.cpp's 4: b.cpp is compiled inside a.cpp, one unit named after the
+        file citing most, its other build's name too; c.cpp after them is its own."""
+        ev = units.Evidence({}, [], [])
+        ev.files = {2: "a.cpp", 4: "b.cpp", 6: "a.cpp", 8: "a.cpp", 9: "b.cpp", 12: "c.cpp", 14: "c.cpp"}
+        ev.placed = {9}
+        self.assertEqual(units._included(ev), {"b.cpp": "a.cpp"})
+
+    def test_a_class_without_a_constructor_is_its_cited_file_s(self):
+        """K::reflect (1) cites k.cpp, L::reflect (3) l.cpp; K::update (2) cites nothing and another build put it
+        in l.cpp: K's file is k.cpp. M's 6 is beyond L's 7 (l.cpp's class) from M's own citation at 9: M says
+        nothing there, nor does L's weak 4 (an inline, kept from any unit)."""
+        from unittest import mock
+        code = _Code(10)
+        classes = {1: "K", 2: "K", 3: "L", 4: "L", 7: "L", 6: "M", 9: "M"}
+        ev = units.Evidence({}, [], [])
+        ev.files = {1: "k.cpp", 2: "l.cpp", 3: "l.cpp", 9: "m.cpp"}
+        ev.placed = {2}
+        code.functions[4] = type(code.functions[4])(code.functions[4].address, 0x40, "fn_4", "weak")
+        with mock.patch.object(units, "_function_classes", return_value=classes):
+            units._class_files(code, ev)
+        self.assertEqual(ev.files[2], "k.cpp")
+        self.assertEqual(ev.classed, {2})
+
     def test_merged_literals_come_in_link_order_once_per_block(self):
         """Units 0-9 in link order, strings then constants: the strings run 0..9 with one misplaced claim (a
         global another unit defines), the constants 0..9 again, then their other read-only data 0..9: blocks start
