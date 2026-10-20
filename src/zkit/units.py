@@ -19,6 +19,9 @@ that fact holds:
   in two units, so a boundary lies between the functions using them.
 - **join**: data only a tight run of functions uses belongs to one unit, so no boundary falls inside that run.
   Writable statics count everywhere; literals only where they are per unit (clang shares them across units).
+  A global holds its users together wrongly where several files use it: two functions citing different files
+  themselves are in different units whatever data joins them, unless the files' citations interleave (one file
+  includes the other).
 - **first use** (an ELF module marking inlines and template instances weak): every unit using one compiles it
   after its first use there and the linker keeps the first unit's copy, so it is in its earliest user's unit.
 - **order**: a boundary between functions is one in each data section too, so it goes where the fewest
@@ -62,6 +65,7 @@ class Evidence:
     separations: list[tuple[int, int, str]]            # a boundary lies before a function index in [lo, hi], why
     files: dict[int, str] = field(default_factory=dict)        # function index -> source file it cites
     cited: list[tuple[int, int, str]] = field(default_factory=list)   # joins of runs whose code cites one file
+    firsts: list[tuple[int, int, str]] = field(default_factory=list)  # joins of a weak function and its first user
     direct: set[tuple[int, int, str]] = field(default_factory=set)    # separations the code itself states
     borrowed: set[tuple[int, int, str]] = field(default_factory=set)  # separations only another build gives
     inlines: dict[int, str] = field(default_factory=dict)      # function index -> header it cites (inline)
@@ -109,7 +113,8 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
                 if local[b][0] > local[a][-1]:
                     separations.append((local[a][-1] + 1, local[b][0],
                                         f"two copies of one constant: {text(a.address)} and {text(b.address)}"))
-    ev = Evidence(local, joins + _first_users(program), separations)
+    firsts = _first_users(program)
+    ev = Evidence(local, joins + firsts, separations, firsts=firsts)
     _file_evidence(program, ev, placed)
     _initializer_ends(program, ev)
     _start_up_object(program, ev)
@@ -274,6 +279,21 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
                 ev.direct.add(ev.separations[-1])
             else:
                 ev.borrowed.add(ev.separations[-1])
+    # Two functions citing different files themselves are in different units even where another build's units lie
+    # between them: a boundary the joins of data alone do not move. Not where the two files' citations interleave:
+    # one file includes the other, and both are one unit.
+    own = sorted((i, f) for i, f in ev.files.items() if i not in ev.placed)
+    first_of: dict[str, int] = {}
+    last_of: dict[str, int] = {}
+    for i, f in own:
+        first_of.setdefault(f, i)
+        last_of[f] = i
+    for (a, file_a), (b, file_b) in zip(own, own[1:]):
+        row = (a + 1, b, f"{file_a} then {file_b}")
+        if file_a != file_b and row not in ev.pairs and last_of[file_a] == a and first_of[file_b] == b:
+            ev.separations.append(row)
+            ev.pairs[row] = (file_a, file_b)
+            ev.direct.add(row)
     _untied(program, ev, anchors)
 
 
@@ -509,6 +529,7 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     count = len(program.functions)
     joined = ev.joined(count)
     cited = ev.joined(count, ev.cited)
+    first = ev.joined(count, ev.firsts)
     calls = _cover(((min(i, j), max(i, j)) for i, callees in program.calls.items() for j in callees
                     if 0 < abs(i - j) <= SHORT_CALL), count)
     members: dict[str, list[int]] = collections.defaultdict(list)
@@ -522,16 +543,21 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
             crossings[p] = _crossings(program, ev, p)
         return crossings[p], classes[p], calls[p]
     chosen: list[Boundary] = []
-    stated = _minimal(_stated(ev))      # where a file's evidence ends: met by any boundary within its reach
-    for row in [r for r in stated if r not in ev.edges] + [r for r in stated if r in ev.edges]:
+    rows = _stated(ev)
+    stated = _minimal(rows)             # where a file's evidence ends: met by any boundary within its reach
+    # then the others, narrowest first: one an inner one did not meet (it had no place the joins allow) still
+    # needs its boundary
+    rest = sorted(set(rows) - set(stated), key=lambda r: (r[1] - r[0], r[0]))
+    for row in [r for r in stated if r not in ev.edges] + [r for r in stated if r in ev.edges] + rest:
         lo, hi, because = row
         toward = ev.edges.get(row, lo)  # among equal places, the one nearest the evidence (else the earliest)
         if any(lo <= c.position <= hi for c in chosen):
             continue
         candidates = [p for p in range(lo, hi + 1) if not joined[p]]
         if not candidates and (lo, hi, because) in ev.direct:   # data one run uses across what the code itself
-            candidates = [p for p in range(lo, hi + 1) if not cited[p]]   # separates is shared (a template's
-                                                                           # table, an inline's static)
+            candidates = [p for p in range(lo, hi + 1) if not cited[p] and not first[p]]   # separates is shared
+            # (a template's table, an inline's static, a class's static member); a weak function is in its first
+            # user's unit whatever the files between cite (one file including another)
         if not candidates:
             continue
         best = min(candidates, key=lambda p: (*cost(p), abs(p - toward)))
