@@ -4,6 +4,7 @@ reads and strings, vtable slots, and the GOT, which code reaches through and no 
 import support  # noqa: F401  (isolates config, cache and state)
 import json
 import os
+import shutil
 import struct
 import tempfile
 import unittest
@@ -45,7 +46,8 @@ def module(got: int = GOT) -> bytes:
     struct.pack_into("<6i", image, 0xC, DYNAMIC - 0x8, END - 0x8, END + 0x100 - 0x8, 0, 0, 0)
     code = {0x100: [adrp(8, 0x100, got + 8), ldr(8, 8, (got + 8) & 0xFFF), add(8, 8, 16), RET],
             0x120: [adrp(9, 0x120, got + 16), ldr(9, 9, (got + 16) & 0xFFF), RET],
-            0x140: [adrp(10, 0x140, NUMBERS), add(10, 10, NUMBERS & 0xFFF), RET]}
+            0x140: [adrp(10, 0x140, NUMBERS), add(10, 10, NUMBERS & 0xFFF), RET],
+            0x160: [0x94000000 | ((0x100 - 0x160) >> 2 & 0x3FFFFFF), RET]}   # bl foo_set
     for start, words in code.items():
         struct.pack_into(f"<{len(words)}I", image, start, *words)
     image[SJIS:SJIS + 13] = "キャラツリー".encode("shift_jis") + b"\0"
@@ -123,6 +125,17 @@ class SwitchToolTests(unittest.TestCase):
     def read(self, address, kind=None, **options):
         from zkit.inspect_dol import read_data
         return read_data(self.project, "t", address, kind, **options)
+
+    @unittest.skipUnless(shutil.which("llvm-objdump"), "needs llvm-objdump")
+    def test_asm_names_a_branch_target_by_its_current_name(self):
+        """The disassembler reads a cached ELF of the module, written with the names of its time; a rename since
+        must still name the branch target."""
+        from zkit.inspect_dol import disasm
+        caller = "caller = .text:0x00000160; // type:function size:0x8 scope:global\n"
+        (self.root / "symbols.txt").write_text(SYMBOLS + caller, encoding="utf-8")
+        self.assertIn("<foo_set>", disasm(self.project, "t", 0x160)["text"])
+        (self.root / "symbols.txt").write_text(SYMBOLS.replace("foo_set", "foo_renamed") + caller, encoding="utf-8")
+        self.assertIn("<foo_renamed>", disasm(self.project, "t", 0x160)["text"])
 
     def test_words_are_pointer_sized_where_the_module_relocates_them(self):
         table = self.read(VTABLE)
