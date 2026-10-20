@@ -900,6 +900,7 @@ class _State:
         self.named_tables: set[int] = set()
         self.dirty: set[str] = set(matcher.groups)     # groups to decide again
         self.later: list[tuple[int, list[Signature]]] = []  # functions named otherwise whose code is the donors'
+        self.regrown: list[tuple[int, str, int, str]] = []  # votes for a function whose size changed past plausible
         self.cached: dict[tuple[str, int], dict] = {}  # (shape, address) -> its options, until a name they use
         self.changed = False
 
@@ -967,8 +968,11 @@ class _State:
         sizes = [s.size for s in self.m.by_key.get(named, ())]
         return not size or not sizes or min(sizes) * 3 <= size * 4 and size * 3 <= max(sizes) * 4
 
-    def vote(self, address: int, named: str, source: int, evidence: str = "reference") -> None:
-        if address in self.banned_addresses or not self.plausible(address, named):
+    def vote(self, address: int, named: str, source: int, evidence: str = "reference", checked: bool = False) -> None:
+        if address in self.banned_addresses:
+            return
+        if not checked and not self.plausible(address, named):
+            self.regrown.append((address, named, source, evidence))   # what it refers to decides (`calls`)
             return
         self.votes[address].setdefault(named, []).append(source)
         if len(self.votes[address]) == 1:
@@ -1329,7 +1333,8 @@ class _State:
         with its donors' in order (`call_order`). A caller one of whose pairings in order more callers contradict
         (another name for its callee, or another callee for its name) is misaligned, an update having moved its
         calls, and names nothing in order. Each pairing left needs no other caller saying otherwise, and a
-        plausible size or, where an update grew or split the callee, what it refers to (`still_refers`)."""
+        plausible size or, where an update grew or split the callee, what it refers to (`still_refers`), which also
+        decides the references and slots that named a function of such a size (`vote`)."""
         from . import aarch64
         kinds = {ppc.REL24, aarch64.CALL26, aarch64.JUMP26}
         found: dict[int, dict[str, int]] = collections.defaultdict(dict)
@@ -1369,6 +1374,14 @@ class _State:
                     extents = self.data_extents()
                 if self.still_refers(target, named, source, kinds, extents):
                     self.name(target, named, "function", "call+references", source)
+        regrown, self.regrown = self.regrown, []
+        for target, named, source, evidence in regrown:
+            if target in self.known or named in self.owner:
+                continue
+            if extents is None:
+                extents = self.data_extents()
+            if self.still_refers(target, named, source, kinds, extents):
+                self.vote(target, named, source, evidence + "+references", checked=True)
 
     def data_order(self) -> None:
         """A named function whose code changed still uses what its donors' code uses, in order: its references
