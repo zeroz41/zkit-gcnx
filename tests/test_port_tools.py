@@ -323,7 +323,7 @@ class PortToolTests(unittest.TestCase):
 
 class ScannerTests(unittest.TestCase):
     def test_definitions_in_any_layout(self):
-        from zkit.cxx import definitions
+        from zkit.cxx import definitions, scan
         text = ("namespace a {\n    int f(int x,\n          int y) {\n        return x;\n    }\n}\n"
                 "struct S { int g() const { return 1; } S() : v{1}, w(2) {} int v, w; };\n"
                 "enum class E : int { A, B };\nauto l = [](int x) { return x; };\n"
@@ -331,6 +331,9 @@ class ScannerTests(unittest.TestCase):
         found = [(d.name, d.scope, d.in_class, d.line + 1, d.end + 1) for d in definitions(text)]
         self.assertEqual(found, [("f", "a", False, 2, 5), ("g", "S", True, 7, 7), ("S", "S", True, 7, 7),
                                  ("c", "", False, 11, 11), ("S::operator==", "", False, 13, 13)])
+        self.assertEqual([d.qualified for d in definitions(text)], ["a::f", "S::g", "S::S", "c", "S::operator=="])
+        self.assertEqual([(b.kind, b.name, b.open + 1, b.end + 1) for b in scan(text)[1]],
+                         [("namespace", "a", 1, 6), ("class", "S", 7, 7), ("extern", "", 10, 12)])
 
 
 if __name__ == "__main__":

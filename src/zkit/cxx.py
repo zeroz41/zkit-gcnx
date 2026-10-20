@@ -1,4 +1,5 @@
-"""C/C++ function definitions found by brace matching, for the port checks (any indentation, any line layout).
+"""C/C++ function definitions and the blocks around them, found by brace matching, for the port checks (any
+indentation, any line layout).
 
 Comments, string and character literals and preprocessor lines are blanked first, so braces and parentheses in
 them do not count. A `{` at file, namespace, class or `extern "C"` scope opens a function body when the text since
@@ -11,6 +12,7 @@ macros are not expanded, so a function-like macro followed by a brace reads as a
 from __future__ import annotations
 
 import bisect
+import dataclasses
 import re
 from dataclasses import dataclass
 
@@ -41,6 +43,19 @@ class Definition:
     end: int         # 0-based line of the body's closing brace
     params: str      # parameter list text, whitespace collapsed
     body: str        # text between the braces without comments, whitespace collapsed
+
+    @property
+    def qualified(self) -> str:
+        """The name it defines: `void Flag::build() {` inside `namespace gf {` defines gf::Flag::build."""
+        return f"{self.scope}::{self.name}" if self.scope else self.name
+
+
+@dataclass(frozen=True)
+class Block:
+    kind: str        # namespace, class or extern
+    name: str        # enclosing scopes and its own name joined by :: ("" for an anonymous or extern block)
+    open: int        # 0-based line of the opening brace
+    end: int         # 0-based line of the closing brace (the last line when it is not closed)
 
 
 def blank(text: str) -> str:
@@ -133,11 +148,26 @@ def _matching(code: str, at: int) -> int:
 
 def definitions(text: str) -> list[Definition]:
     """Every function definition in a C/C++ source text, outermost first, in file order."""
+    return scan(text)[0]
+
+
+def scan(text: str) -> tuple[list[Definition], list[Block]]:
+    """definitions(), and every namespace, class and `extern "C"` block, outermost first, in file order."""
     code = blank(text)
     starts = [0] + [m.end() for m in re.finditer(r"\n", code)]
     line = lambda offset: bisect.bisect_right(starts, offset) - 1
     out: list[Definition] = []
-    scopes: list[tuple[str, str]] = []   # (kind, name) of entered namespace/class/extern blocks
+    entered: list[Block] = []
+    scopes: list[tuple[str, str, int]] = []   # (kind, name, index in entered) of the blocks open here
+
+    def enter(kind: str, name: str, at: int) -> None:
+        scopes.append((kind, name, len(entered)))
+        entered.append(Block(kind, "::".join(n for _, n, _ in scopes if n) if name else "", line(at), line(len(code))))
+
+    def leave(at: int) -> None:
+        index = scopes.pop()[2]
+        entered[index] = dataclasses.replace(entered[index], end=line(at))
+
     head_start, position = 0, 0
     while True:
         match = _STRUCTURE.search(code, position)
@@ -149,7 +179,7 @@ def definitions(text: str) -> list[Definition]:
             continue
         if char == "}":
             if scopes:
-                scopes.pop()
+                leave(at)
             head_start = position = at + 1
             continue
         raw = code[head_start:at]
@@ -162,7 +192,7 @@ def definitions(text: str) -> list[Definition]:
             continue
         klass = _CLASS_HEAD.search(clean)
         if klass and "=" not in clean[:klass.start()]:
-            scopes.append(("class", (klass["name"] or "").rsplit("::", 1)[-1]))
+            enter("class", (klass["name"] or "").rsplit("::", 1)[-1], at)
             head_start = position = at + 1
             continue
         found = _declarator(head) if "(" in head else None
@@ -173,7 +203,7 @@ def definitions(text: str) -> list[Definition]:
             name_at, open_, close = found
             end = _matching(code, at)
             first = offset + len(head) - len(head.lstrip())
-            scope = "::".join(name for _, name in scopes if name)
+            scope = "::".join(name for _, name, _ in scopes if name)
             out.append(Definition(
                 name=re.sub(r"\s+", "", head[name_at:open_]), scope=scope,
                 in_class=bool(scopes) and scopes[-1][0] == "class", start=line(first), line=line(offset + name_at),
@@ -183,15 +213,30 @@ def definitions(text: str) -> list[Definition]:
             continue
         if "(" not in clean and re.search(r"\bnamespace\b", clean):
             name = re.search(r"\bnamespace\s+([\w:]*)", clean)
-            scopes.append(("namespace", name[1] if name else ""))
+            enter("namespace", name[1] if name else "", at)
         elif re.fullmatch(r"\s*extern\s*", clean):  # extern "C" (the string is blanked)
-            scopes.append(("extern", ""))
+            enter("extern", "", at)
         else:
             position = _matching(code, at) + 1   # enum body, initializer, lambda or a stray block: not a scope
             head_start = position
             continue
         head_start = position = at + 1
-    return out
+    return out, entered
+
+
+def arity(params: str) -> int:
+    """How many parameters a parameter list's text declares (`void` and an empty list declare none)."""
+    if params.strip() in ("", "void"):
+        return 0
+    depth, count = 0, 1
+    for char in params:
+        if char in "(<[":
+            depth += 1
+        elif char in ")>]" and depth:
+            depth -= 1
+        elif char == "," and not depth:
+            count += 1
+    return count
 
 
 def comment_start(lines: list[str], start: int) -> int:

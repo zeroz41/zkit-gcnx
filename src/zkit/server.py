@@ -492,8 +492,8 @@ def create_server(project: Project) -> FastMCP:
     @tool()
     def zkit_refs(query: str, repo: str | None = None, limit: int = 60, response_format: Format = "text") -> str:
         """Where an original function or global is defined, declared and used in the source of every configured
-        repo, under all its spellings (mangled, Class::method, method beside its class, address in a placeholder
-        name). Use instead of grepping src/ and include/."""
+        repo, under all its spellings (mangled, Class::method also inside its namespace block, method beside or
+        inside its class, address in a placeholder name). Use instead of grepping src/ and include/."""
         p = current()
         data = bridge.refs(p, query, target(p), p.repo_key(repo) if repo else None, max(1, min(limit, 400)))
         return out(data, render.refs(data), response_format)
