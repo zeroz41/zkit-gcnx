@@ -160,6 +160,30 @@ class UnitEvidenceTests(unittest.TestCase):
         code.platform = GameCube()
         self.assertEqual(units._first_users(code), [])
 
+    def test_two_files_own_citations_part_whatever_data_joins_them(self):
+        """3 cites a.cpp and 9 cites b.cpp themselves, with another build's units for 5 and 6 between and a global
+        (2-12) holding everything together: a boundary still falls between 3 and 9, though not inside 5-7, where a
+        weak 7 follows its first user 5 (one file including another)."""
+        code = _Code(14)
+        code.strings = lambda: {0x8000: "src/a.cpp", 0x8010: "src/b.cpp"}
+        code.refs = {3: [(0, 0x8000, "addr")], 9: [(0, 0x8010, "addr")]}
+        code.function_index = {f.address: i for i, f in enumerate(code.functions)}
+        first = (5, 7, "7 is first used by 5")
+        ev = units.Evidence({}, [(2, 12, "a global"), first], [], firsts=[first])
+        placed = {code.functions[5].address: "src/a.cpp", code.functions[6].address: "src/b.cpp"}
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            units._file_evidence(code, ev, placed)
+            cuts = [c.position for c in units.boundaries(code, ev)]
+        self.assertIn((4, 9, "src/a.cpp then src/b.cpp"), ev.direct)
+        self.assertEqual(len(cuts), 1)
+        self.assertIn(cuts[0], (4, 5, 8, 9))
+        # a.cpp's citations on both sides of b.cpp's: a.cpp includes b.cpp, and their citations part nothing
+        code.refs[11] = [(0, 0x8000, "addr")]
+        ev = units.Evidence({}, [(2, 12, "a global"), first], [], firsts=[first])
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            units._file_evidence(code, ev, placed)
+        self.assertFalse({row for row in ev.direct if row[0] <= 9 and row[1] >= 4})
+
     def test_another_build_s_unit_yields_to_the_code_s_joins(self):
         """Another build put 2-3 in a.cpp and 5 in b.cpp, but data only 2-5 use joins them: 5 is a.cpp's too, as
         most of that build's run says. 12 cites c.cpp itself and so outweighs that build's d.cpp for 10 in its
