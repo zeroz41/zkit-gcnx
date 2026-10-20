@@ -130,6 +130,17 @@ class UnitEvidenceTests(unittest.TestCase):
         units._untied(code, ev, [(10, "a.cpp"), (150, "b.cpp")])
         self.assertEqual(sorted(ev.edges.values()), [81, 150])     # over 40-41 (unknown, among inlines), not 81
 
+    def test_another_build_s_placeholder_is_no_piece_of_a_file(self):
+        """`unit_<address>.cpp` is a unit no file names, not a piece of `unit.cpp`: it keeps its address as its
+        identity (a piece of a file, `a_<address>.cpp`, is the file)."""
+        code = _Code(10)
+        code.strings, code.refs = (lambda: {}), {}
+        code.function_index = {f.address: i for i, f in enumerate(code.functions)}
+        ev = units.Evidence({}, [], [])
+        units._file_evidence(code, ev, {code.functions[2].address: "unit_7100000024.cpp",
+                                        code.functions[6].address: "a_7100000024.cpp"})
+        self.assertEqual(ev.files, {2: "unit_7100000024.cpp", 6: "a.cpp"})
+
     def test_a_file_s_evidence_ends_at_a_boundary_within_its_reach(self):
         """Another boundary (a static initializer at 29) within reach of a.cpp's evidence is where a.cpp ends:
         no second boundary right after its evidence."""
