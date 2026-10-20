@@ -7,6 +7,9 @@ linker resolved it:
 - a section at the address of a symbol it defines, by name (the unit's own copy when a name has several); a
   section no name places (a jump table, a constant pool) at the address the original's code reaches it through,
   its bytes then checked there; a template's discarded copy (a COMDAT group kept by another unit) not at all;
+  nor, in a unit whose every byte comes from its object, a section neither the symbols name nor any placed code
+  reaches: the module was linked with `--gc-sections`, which drops a function nothing calls (a constructor every
+  caller inlined), and its bytes are nowhere in the unit;
 - a literal of a mergeable section (strings, constants) where the original's reference lands on the same bytes;
 - a call to an import through its stub, a GOT load through the slot whose dynamic relocation holds the target,
   a pointer in data only where the original carries a dynamic relocation to the same address.
@@ -71,6 +74,8 @@ class UnitLink:
     covered: list[tuple[int, int]] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
     folded: list[str] = field(default_factory=list)   # template copies another unit's object provides
+    collected: list[str] = field(default_factory=list)   # sections the original's linker dropped as unused
+    unnamed: dict[int, str] = field(default_factory=dict)   # section index -> the name the symbols lack
     linked: bool = False
     gaps: list[str] = field(default_factory=list)
 
@@ -288,7 +293,7 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
         result = results[item.unit]
         _compare(linker, item, result)
     for obj in objects:
-        _cover(linker, obj, results[obj.unit])
+        _cover(linker, obj, results[obj.unit], placed)
     identical = bytes(linker.image) == linker.original
     segments = []
     for segment in linker.module.segments:
@@ -318,6 +323,7 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
                        if r.whole and not r.linked],
         "problems": [f"{r.name}: {p}" for r in results.values() for p in r.problems][:200],
         "folded": sum(len(r.folded) for r in results.values()),
+        "collected": sum(len(r.collected) for r in results.values()),
     }
     if not identical:
         first = next(i for i, (a, b) in enumerate(zip(linker.image, linker.original)) if a != b)
@@ -382,8 +388,7 @@ def _place_named(linker: Linker, obj: _Object, placed: dict, result: UnitLink) -
                 address = at - symbol.value
                 break
         if address is None:
-            result.problems.append(f"{names[0].name}: the symbols name no such function or object (its original "
-                                   "is unnamed, or another unit's): name it, or move it to the unit that holds it")
+            result.unnamed[section.index] = names[0].name   # placed if code reaches it, else maybe collected
             continue
         if not any(s <= address < e for s, e in obj.ranges):
             if section.flags & SHF_GROUP:
@@ -572,11 +577,17 @@ def _compare(linker: Linker, item: Placed, result: UnitLink) -> None:
         result.data += size
 
 
-def _cover(linker: Linker, obj: _Object, result: UnitLink) -> None:
+def _cover(linker: Linker, obj: _Object, result: UnitLink, placed: dict | None = None) -> None:
     """A whole unit links when no problem stands and every byte of its ranges came from its object: its placed
     sections, the literals its code reaches, and every other literal of its mergeable sections that the original
-    holds inside the unit (the linker keeps a literal no code reaches, in the unit that brought it)."""
+    holds inside the unit (the linker keeps a literal no code reaches, in the unit that brought it). A section the
+    symbols do not name and no placed code reached is one `--gc-sections` dropped when nothing else is missing;
+    while a byte is, it may be that byte's original under another name."""
+    unnamed = [name for index, name in result.unnamed.items() if (obj.unit, index) not in (placed or {})]
+    unknown = [f"{name}: the symbols name no such function or object (its original is unnamed, or another "
+               "unit's): name it, or move it to the unit that holds it" for name in unnamed]
     if not obj.whole:
+        result.problems += unknown
         return
     for section in obj.elf.sections:
         if not (section.flags & SHF_ALLOC and section.flags & SHF_MERGE) or not section.size:
@@ -616,6 +627,10 @@ def _cover(linker: Linker, obj: _Object, result: UnitLink) -> None:
             if high - low >= PADDING or any(content):
                 result.gaps.append(f"{linker.platform.text(low)}..{linker.platform.text(high)} ({high - low} bytes) "
                                    "not from the compiled object")
+    if result.gaps:
+        result.problems += unknown
+    else:
+        result.collected += unnamed
     result.linked = not result.problems and not result.gaps
 
 
