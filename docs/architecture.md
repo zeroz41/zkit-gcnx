@@ -157,8 +157,9 @@ disassemblies), and proves a change kept every object identical apart from inten
 compiles a candidate outside the tree with its unit's exact build command. `progress.py` reads objdiff reports:
 matched and linked code and data bytes, exact functions and units, and changes keyed by address so a rename or a
 fold is not a regression; `report.html` is a self-contained page of the same, which every build writes to
-`build/progress/index.html` beside a copy of each report it shows, and `zkit report --readme` writes a small
-table of the totals between `<!-- progress -->` markers in the decomp's README (adding them when missing).
+`build/progress/index.html` beside a copy of each report it shows, titled by the manifest's `title` and
+`subtitle`; a target with one module (a Switch `main`) is browsed by source folder. `zkit report --readme` writes
+a small table of the totals between `<!-- progress -->` markers in the decomp's README (adding them when missing).
 
 ### The index and the evidence tools
 
