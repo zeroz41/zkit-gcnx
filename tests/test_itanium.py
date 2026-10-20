@@ -263,6 +263,27 @@ class StoredBaseModuleTests(unittest.TestCase):
                       (self.root / "proof" / "include" / "classes" / "List.h").read_text())
 
 
+class TableExtentTests(unittest.TestCase):
+    def test_a_table_s_slots_stop_at_the_next_named_object(self):
+        """A table of three slots (its symbol says 0x28 bytes) followed by a named array of function pointers:
+        the array is not its slots. With no name after it, slots run on past a short symbol size."""
+        from types import SimpleNamespace
+        segment = SimpleNamespace(offset=0x1000, size=0x100)
+        functions = {0x100: 0, 0x140: 1, 0x180: 2, 0x1C0: 3}
+        pointers = {0x1010: 0x100, 0x1018: 0x140, 0x1020: 0x180, 0x1028: 0x1C0, 0x1030: 0x100}
+        image = SimpleNamespace(section_at=lambda a: segment if 0x1000 <= a < 0x1100 else None, pointers=pointers,
+                                imports={}, u64=lambda a: 0)
+        def program(objects):
+            return SimpleNamespace(image=image, function_index=functions, objects=objects, cache={})
+        from zkit.program import DataObject
+        table = DataObject(0x1000, 0x28, "_ZTV1A", ".data")
+        array = DataObject(0x1028, 0x10, "_ZN1A7s_callsE", ".data")
+        slots = itanium._groups(program([table, array]), 0x1000, 0x28)[0].slots
+        self.assertEqual(slots, [0x100, 0x140, 0x180])
+        slots = itanium._groups(program([table, DataObject(0x1028, 0x10, "lbl_1028", ".data")]), 0x1000, 0x28)
+        self.assertEqual(slots[0].slots, [0x100, 0x140, 0x180, 0x1C0, 0x100])
+
+
 class HeaderDebtTests(unittest.TestCase):
     def test_a_header_declares_virtuals_a_source_file_must_not(self):
         from zkit import quality
