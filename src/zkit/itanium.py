@@ -12,6 +12,10 @@ the compiler emit the same table.
   longest is the nearest ancestor, then the one whose own functions it inherits most, then sharing most slots. A secondary group is matched the same way. A base the module has no table for (its constructor
   inlined everywhere) is the class owning the functions its derived classes all inherit, its slots rebuilt from
   them.
+- **stored bases**: constructors, destructors and new-expressions store the tables of a class's primary ancestors
+  at offset 0 of the object, in order. The nearest ancestor they prove is the primary base where the table prefix
+  finds none or a farther one, if it fits the class's table and no class proven to derive from it could stand
+  between (clang drops an intermediate's store nothing can read). Each base keeps the evidence that proved it.
 - **names**: one inherited virtual has one name across every override (a pure slot takes its overrides' name);
   a slot no function names is `vf<slot>`. Return types are not in the names: `void` until code proves one.
 """
@@ -45,6 +49,7 @@ class ItClass:
     unresolved: list[tuple[int, list[str]]] = field(default_factory=list)   # (offset, tied candidates)
     constructors: list[int] = field(default_factory=list)
     destructors: list[int] = field(default_factory=list)
+    evidence: dict[int, list[tuple[str, int | None]]] = field(default_factory=dict)  # offset -> (how, function)
 
 
 @dataclass
@@ -177,11 +182,12 @@ def recover(program: Program) -> dict[str, ItClass]:
         if groups:
             classes[text[len("vtable for "):]] = ItClass(text[len("vtable for "):], table.address, groups)
     named = methods(program)
-    _bases(classes, named)
+    stored = _stored(program, classes, named)
+    _bases(classes, named, stored)
     for _ in range(4):                                 # bases the module has no table for, then bases again
         if not (_tableless(classes, named) | _intermediates(classes, named)):
             break
-        _bases(classes, named)
+        _bases(classes, named, stored)
     for address, m in named.items():
         if m.owner in classes and not m.thunk:
             if m.name == _plain(m.owner):
@@ -201,7 +207,7 @@ def _same_method(a: str, b: str) -> bool:
     return a == b or (a.startswith("~") and b.startswith("~"))
 
 
-def _bases(classes: dict[str, ItClass], named: dict[int, Method]) -> None:
+def _bases(classes: dict[str, ItClass], named: dict[int, Method], stored: list | None = None) -> None:
     by_slot: dict[tuple[int, int], set[str]] = collections.defaultdict(set)
     for name, cls in classes.items():
         for index, slot in enumerate(cls.groups[0].slots):
@@ -228,7 +234,7 @@ def _bases(classes: dict[str, ItClass], named: dict[int, Method]) -> None:
         chosen[name] = rows
     for name, rows in chosen.items():                 # ties: the one every other tied candidate derives from
         cls = classes[name]
-        cls.bases, cls.unresolved = [], []
+        cls.bases, cls.unresolved, cls.evidence = [], [], {}
         for offset, top in rows:
             if len(top) == 1:
                 cls.bases.append((offset, top[0][3]))
@@ -239,6 +245,9 @@ def _bases(classes: dict[str, ItClass], named: dict[int, Method]) -> None:
                     cls.bases.append((offset, roots[0]))
                 else:
                     cls.unresolved.append((offset, tied))
+        for offset, _ in cls.bases:
+            cls.evidence[offset] = [("table prefix", None)]
+    _stored_bases(classes, named, stored or [])
 
 
 def _fits_as(cls: ItClass, slots: list, base: list, named: dict[int, Method], candidate: str):
@@ -273,6 +282,119 @@ def _ancestors(chosen: dict[str, list], name: str, seen: frozenset = frozenset()
     if base in seen:
         return []
     return [base] + _ancestors(chosen, base, seen | {base})
+
+
+NEW = ("_Znw", "_Zna")                                 # operator new and new[], the module's own overloads too
+
+
+def _role(m: Method | None, classes: dict[str, ItClass]) -> str | None:
+    if m is None or m.thunk or m.owner not in classes:
+        return None
+    return {_plain(m.owner): "constructor", "~" + _plain(m.owner): "destructor"}.get(m.name)
+
+
+def _stored(program: Program, classes: dict[str, ItClass], named: dict[int, Method]) -> list[tuple]:
+    """(class, its primary ancestors nearest last, how, function) from the table address points (a table's start
+    + 16) code stores at offset 0 of one object, in order: a constructor (C1/C2) stores its bases' tables before
+    its own; a destructor (D0/D1/D2) its own (not at all when its body is empty: clang skips it), then its bases';
+    a new-expression its class's bases' tables, then its class's own (the last one) into what `new` returned. A
+    call passing the object adds the tables its callee stores into its own `this` (a base's constructor or
+    destructor, not inlined). An object with a table stored twice, or a constructor whose last table is not its
+    own, proves nothing."""
+    from .aarch64 import THIS, object_stores
+    points = {cls.table + 16: name for name, cls in classes.items() if cls.table is not None}
+    events = {}
+    for function in program.functions:
+        try:
+            words = program.platform.words(program.image, function.address, function.size)
+        except ValueError:
+            continue
+        events[function.address] = object_stores(words, function.address, program.image.pointers.get)
+    own = {address: [points[e[4]] for e in rows
+                     if e[0] == "store" and e[2] == THIS and e[3] == 0 and e[4] in points]
+           for address, rows in events.items()}
+    new = {f.address for f in program.functions if f.name.startswith(NEW)}
+    out = []
+    for address, rows in events.items():
+        role = _role(named.get(address), classes)
+        objects, made = collections.defaultdict(list), {}
+        for e in rows:
+            if e[0] == "store" and e[3] == 0 and e[4] in points:
+                objects[e[2]].append(points[e[4]])
+            elif e[0] == "call":
+                made[e[1]] = e[2]
+                if e[3] is not None and e[4] == 0:
+                    objects[e[3]] += own.get(e[2], [])
+        for origin, tables in objects.items():
+            tables = [t for i, t in enumerate(tables) if not i or tables[i - 1] != t]
+            if len(set(tables)) != len(tables):
+                continue
+            if origin == THIS and role == "constructor":
+                name, chain, how = named[address].owner, tables, "constructor"
+            elif origin == THIS and role == "destructor":
+                name, how = named[address].owner, "destructor"
+                chain = tables[:0:-1] if tables[:1] == [name] else tables[::-1]
+                chain.append(name)
+            elif origin != THIS and made.get(origin) in new and tables:
+                name, chain, how = tables[-1], tables, "new-expression"
+            else:
+                continue
+            if len(chain) >= 2 and chain[-1] == name and name not in chain[:-1]:
+                out.append((name, chain[:-1], how, address))
+    return out
+
+
+def _stored_bases(classes: dict[str, ItClass], named: dict[int, Method], stored: list[tuple]) -> None:
+    """Primary bases from the tables code stores (`_stored`). Each chain proves its tables ancestors of its class,
+    in order; so do the bases the table prefixes found. A class's base is its nearest proven ancestor: the one
+    every other candidate (each chain's nearest, the table prefix's base) is a proven ancestor of. It must fit the
+    class's table as a base, close no cycle, and no class proven to derive from it may fit between them (an
+    intermediate whose stores the compiler dropped: an empty body, or a store overwritten before anything reads
+    it). Anything else leaves the table prefix's reading as it is."""
+    above: dict[str, set[str]] = collections.defaultdict(set)
+    for name, ancestors, _, _ in stored:
+        for lower, upper in zip(ancestors[1:] + [name], ancestors):
+            above[lower].add(upper)
+    for name, cls in classes.items():
+        above[name] |= {b for o, b in cls.bases if o == 0}
+    proven: dict[str, set[str]] = {}
+    for name in list(above):
+        seen, stack = set(), list(above[name])
+        while stack:
+            current = stack.pop()
+            if current not in seen:
+                seen.add(current)
+                stack.extend(above.get(current, ()))
+        proven[name] = seen - {name}
+    below: dict[str, set[str]] = collections.defaultdict(set)
+    for name, ancestors in proven.items():
+        for ancestor in ancestors:
+            below[ancestor].add(name)
+    near: dict[str, dict[str, list]] = collections.defaultdict(dict)
+    for name, ancestors, how, function in stored:
+        near[name].setdefault(ancestors[-1], []).append((how, function))
+    for name, found in near.items():
+        cls = classes[name]
+        slot = next((b for o, b in cls.bases if o == 0), None)
+        candidates = set(found) | ({slot} if slot else set())
+        nearest = [c for c in candidates if all(o == c or o in proven.get(c, ()) for o in candidates)]
+        if len(nearest) != 1 or nearest[0] not in found:
+            continue                                   # contradictory, or the table prefix's base is nearer
+        base = nearest[0]
+        if base != slot:
+            if name in proven.get(base, ()) or not _fits(cls, classes[base], named):
+                continue
+            if any(m != name and name not in proven.get(m, ()) and _fits(cls, classes[m], named)
+                   for m in below[base]):
+                continue                               # a class between them, its stores dropped
+            cls.bases = [(0, base)] + [(o, b) for o, b in cls.bases if o != 0]
+            cls.unresolved = [(o, t) for o, t in cls.unresolved if o != 0]
+            cls.evidence[0] = []
+        cls.evidence[0] = cls.evidence.get(0, []) + found[base]
+
+
+def _fits(cls: ItClass, base: ItClass, named: dict[int, Method]) -> bool:
+    return _fits_as(cls, cls.groups[0].slots, base.groups[0].slots, named, base.name) is not None
 
 
 def _tableless(classes: dict[str, ItClass], named: dict[int, Method]) -> bool:
@@ -941,6 +1063,7 @@ def _in(namespaces: list[str], declaration: str) -> str:
 def audit(program: Program, class_filter: str | None = None, limit: int = 60) -> dict[str, Any]:
     """What the tables say: classes, bases found, tied or unknown, bases rebuilt from derived classes."""
     classes = recover(program)
+    text = program.platform.text
     counts: collections.Counter = collections.Counter()
     rows = []
     for name, cls in sorted(classes.items()):
@@ -948,15 +1071,29 @@ def audit(program: Program, class_filter: str | None = None, limit: int = 60) ->
         primary = next((b for o, b in cls.bases if o == 0), None)
         counts["primary base found" if primary else "primary base tied" if any(o == 0 for o, _ in cls.unresolved)
                else "no primary base"] += 1
+        if primary:
+            kinds = {"table prefix" if how == "table prefix" else "code" for how, _ in cls.evidence.get(0, [])}
+            counts["primary base by " + " and ".join(sorted(kinds, reverse=True))] += 1
         for group in cls.groups[1:]:
             counts["secondary base found" if any(o == group.offset for o, _ in cls.bases)
                    else "secondary base unknown"] += 1
         if not class_filter or name.lower() == class_filter.lower():
-            rows.append({"class": name, "table": program.platform.text(cls.table) if cls.table is not None else None,
-                         "bases": [{"offset": o, "base": b} for o, b in cls.bases],
+            rows.append({"class": name, "table": text(cls.table) if cls.table is not None else None,
+                         "bases": [{"offset": o, "base": b, "evidence": _evidence(cls.evidence.get(o, []), text)}
+                                   for o, b in cls.bases],
                          "tied": [{"offset": o, "candidates": t[:4]} for o, t in cls.unresolved],
                          "slots": [len(g.slots) for g in cls.groups]})
     return {"classes": len(classes), "counts": dict(counts), "rows": rows[:limit]}
+
+
+def _evidence(rows: list[tuple[str, int | None]], text) -> list[str]:
+    """What proved a base, one line per kind: the table prefix, or the first function of each kind that stores
+    its table (and how many more do)."""
+    out: dict[str, list] = {}
+    for how, function in rows:
+        out.setdefault(how, []).append(function)
+    return [how if functions == [None] else f"{how} {text(functions[0])}"
+            + (f" (+{len(functions) - 1})" if len(functions) > 1 else "") for how, functions in out.items()]
 
 
 def write_headers(program: Program, folder: Path, unproven: dict[str, str] | None = None) -> dict[str, Any]:
