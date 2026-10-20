@@ -184,6 +184,18 @@ class UnitEvidenceTests(unittest.TestCase):
             units._file_evidence(code, ev, placed)
         self.assertFalse({row for row in ev.direct if row[0] <= 9 and row[1] >= 4})
 
+    def test_merged_literals_come_in_link_order_once_per_block(self):
+        """Units 0-9 in link order, strings then constants: the strings run 0..9 with one misplaced claim (a
+        global another unit defines), the constants 0..9 again, then their other read-only data 0..9: blocks start
+        at the constants and at the other data, not at the stray claim."""
+        strings = [u for u in range(10) for _ in range(20)]
+        strings.insert(60, 8)                         # one claim out of place: a few stand by a cut there
+        constants = [u for u in range(10) for _ in range(3)]
+        other = [u for u in range(10) for _ in range(12)]
+        values = strings + constants + other
+        self.assertEqual(units._cuts(values), [len(strings), len(strings) + len(constants)])
+        self.assertEqual(units._cuts(list(range(50))), [])
+
     def test_another_build_s_unit_yields_to_the_code_s_joins(self):
         """Another build put 2-3 in a.cpp and 5 in b.cpp, but data only 2-5 use joins them: 5 is a.cpp's too, as
         most of that build's run says. 12 cites c.cpp itself and so outweighs that build's d.cpp for 10 in its
