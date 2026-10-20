@@ -341,6 +341,9 @@ class MwldRoundTripTests(unittest.TestCase):
         result = self.link("units")
         self.assertTrue(result["identical"], result)
         self.assertEqual((result["units"]["compiled"], result["code_from_compiled"]), (1, 16))
+        marked = json.loads((self.root / "report.json").read_text())   # the identical link marks what it linked
+        self.assertEqual([u["metadata"].get("complete", False) for u in marked["units"]], [False, True])
+        self.assertEqual(marked["measures"]["complete_units"], 1)
         result = self.link("functions")
         self.assertTrue(result["identical"], result)
         self.assertEqual((result["units"]["combined"], result["functions_from_compiled"], result["code_from_compiled"]),
