@@ -1,5 +1,5 @@
 """Read-only tools on a hand-built Switch module (an NSO with MOD0, a dynamic section and relocations): typed data
-reads and strings. No compiler needed."""
+reads and strings, and vtable slots. No compiler needed."""
 
 import support  # noqa: F401  (isolates config, cache and state)
 import json
@@ -128,6 +128,15 @@ class SwitchToolTests(unittest.TestCase):
     def test_strings_in_the_encoding_their_bytes_are(self):
         texts = [self.read(a, "str")["rows"][0]["values"][0] for a in (SJIS, UTF8, LATIN)]
         self.assertEqual(texts, ["キャラツリー", "武器モーション", "\\x80Caf\xe9"])
+
+    def test_vtable_slots_count_from_the_first_virtual_in_both_views(self):
+        from zkit.bridge import lookup
+        from zkit.render import lookup as render
+        table = render(lookup(self.project, "_ZTV3Foo"))
+        self.assertIn("+0x10 (slot 0) -> 0x7100000100 foo_set", table)   # after offset-to-top and typeinfo
+        self.assertIn("+0x18 (slot 1) -> 0x7100000120 foo_data", table)
+        self.assertIn("vtable slot +0x18 (slot 1) in 1 table(s): _ZTV3Foo", render(lookup(self.project, "foo_data")))
+        self.assertIn("+0x10 (slot 2) -> 0x7100001000", render(lookup(self.project, "lbl_7100002020")))  # 8-byte words
 
 
 if __name__ == "__main__":

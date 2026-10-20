@@ -847,18 +847,25 @@ def _holders(project: Project, target: str, db, pointee: int) -> list[dict]:
             table = symbol["key"]
             entry.update(symbol=symbol["name"], table=symbol["address"], offset=symbol["offset"],
                          table_size=symbol["size"])
-            itanium = symbol["name"].startswith("_ZTV")
-            is_vtable = symbol["name"].startswith("__vt__") or itanium
-            if itanium:
-                entry["vtable_slot"] = (symbol["offset"] - 16) // 8
-            elif is_vtable or symbol["name"].startswith("lbl_"):
-                entry["vtable_slot"] = symbol["offset"] // 4
+            is_vtable = symbol["name"].startswith(("__vt__", "_ZTV"))
+            if is_vtable or symbol["name"].startswith("lbl_"):
+                entry["vtable_slot"] = _slot(project, target, symbol["name"], symbol["offset"])
             if not is_vtable:
                 owners = _table_owners(project, target, db, table)
                 if owners:
                     entry["owners"] = owners
         out.append(entry)
     return out
+
+
+def _slot(project: Project, target: str, symbol: str, offset: int) -> int | None:
+    """The slot of a pointer at `offset` in a table: an Itanium vtable's first virtual (after offset-to-top and
+    typeinfo, which are no slot) is slot 0; other tables (CodeWarrior's) count pointers from their start."""
+    from .platform import for_target
+    size = for_target(project.target(target)).pointer_size
+    if symbol.startswith("_ZTV"):
+        return offset // size - 2 if offset >= 2 * size else None
+    return offset // size
 
 
 def _table_owners(project: Project, target: str, db, table: int) -> list[str]:
@@ -996,15 +1003,18 @@ def data_lookup(project: Project, address: int, target: str, query: str | None =
     from .structure import split_owner, splits
     return {"query": query or address_text(address), "found": False, "address": address_text(address),
             "symbol": symbol, "owner_unit": split_owner(project, target, address),
-            "has_splits": bool(splits(project, target)[0]), "slots": _pointer_slots(project, target, db, start, size) if symbol else [],
+            "has_splits": bool(splits(project, target)[0]),
+            "slots": _pointer_slots(project, target, db, start, size, symbol["name"]) if symbol else [],
             "readers_writers": refs["code"], "pointed_from": refs["data"],
             "cites": _cites(db, start, size), "mentions": _cites(db, start, size, limit=20, table="mentions"),
             "hint": "Not inside a known function; the symbol above (if any) is the data/object owner."}
 
 
-def _pointer_slots(project: Project, target: str, db, start: int, size: int, cap: int = 256) -> list[dict]:
-    """Words inside a data object that point at code or data in the original (a vtable's methods, a callback or
-    jump table's targets). Read from the original executable; nothing for .bss or without one."""
+def _pointer_slots(project: Project, target: str, db, start: int, size: int, name: str = "",
+                   cap: int = 256) -> list[dict]:
+    """Words inside a data object (the symbol `name`) that point at code or data in the original (a vtable's
+    methods, a callback or jump table's targets), with their slot (`_slot`). Read from the original executable;
+    nothing for .bss or without one."""
     from .inspect_dol import _dol
     from .platform import for_target
     platform = for_target(project.target(target))
@@ -1020,15 +1030,18 @@ def _pointer_slots(project: Project, target: str, db, start: int, size: int, cap
     for index, word in enumerate(words):
         if not word or not platform.in_image(dol, word):
             continue
+        offset = index * platform.pointer_size
         row = containing(db, target, word)
         if row is not None:
-            name = row["demangled"] or row["name"]
-            label = name + (f"+0x{word - row['address']:X}" if word != row["address"] else "")
-            out.append({"offset": index * platform.pointer_size, "target": f"{address_text(word)} {label}", "status": status_word(_status(row))})
+            title = row["demangled"] or row["name"]
+            label = title + (f"+0x{word - row['address']:X}" if word != row["address"] else "")
+            out.append({"offset": offset, "slot": _slot(project, target, name, offset),
+                        "target": f"{address_text(word)} {label}", "status": status_word(_status(row))})
         else:
             symbol = _symbol_lookup(project, target, word)
             label = (symbol["name"] + (f"+0x{symbol['offset']:X}" if symbol["offset"] else "")) if symbol else ""
-            out.append({"offset": index * platform.pointer_size, "target": f"{address_text(word)} {label}".strip()})
+            out.append({"offset": offset, "slot": _slot(project, target, name, offset),
+                        "target": f"{address_text(word)} {label}".strip()})
     return out
 
 
