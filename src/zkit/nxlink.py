@@ -495,7 +495,12 @@ def _reached(linker: Linker, hints: list, kind: int) -> int | None:
 
 
 def _got_slot(linker: Linker, symbol: Symbol, value: int, hint) -> int | None:
+    """The GOT slot holding a value (or an import): one the original's load reaches, inside .got when the module
+    says where that is."""
     candidates = linker.imported.get(symbol.name, []) if value == -1 else linker.slots.get(value, [])
+    start, end = linker.module.tables.get(".got", (None, None))
+    if start is not None:
+        candidates = [s for s in candidates if start <= s < end]
     agreeing = [s for s in candidates if _agrees(s, hint)]
     return agreeing[0] if agreeing else None
 
