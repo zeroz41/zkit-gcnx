@@ -164,7 +164,8 @@ def compare(project: Project, target: str, unit: dict, name: str, text: str, kee
                            "run the compiler outside the sandbox\n" + message[-800:])
             out.update(compiled=False, errors=message[-3000:])
             return out
-        diff = objects.function_diff(root / unit["target_path"], built, name)
+        diff = objects.function_diff(root / unit["target_path"], built, name,
+                                     labels=objects.label_reader(project, target))
         out.update(compiled=True, **{k: v for k, v in diff.items() if k not in ("target", "base")})
         if keep:
             keep.parent.mkdir(parents=True, exist_ok=True)
