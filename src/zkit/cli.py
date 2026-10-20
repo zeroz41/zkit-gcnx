@@ -633,7 +633,10 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from . import classes
         if args.headers:
             data = classes.write_headers(project, target, args.headers.expanduser().resolve(), args.types_include)
-            return data, f"wrote {data['headers']} headers to {data['folder']}"
+            proof = data.get("proof")
+            return data, f"wrote {data['headers']} headers to {data['folder']}" + (
+                "; proof: " + ", ".join(f"{v:,} {k}" for k, v in sorted(proof.items(), key=lambda kv: -kv[1]))
+                if proof else "")
         if args.prove:
             data = classes.prove(project, target, args.cls, args.limit)
             return data, render.classes_proof(data)
