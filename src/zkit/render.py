@@ -1329,6 +1329,36 @@ def link(data: dict) -> str:
     return "\n".join(lines)
 
 
+def nxlink(data: dict) -> str:
+    units, report = data["units"], data.get("report", {})
+    total = report.get("total_code")
+    share = lambda value: f"{value:,} code bytes" + (f" ({100 * value / total:.2f}%)" if total else "")
+    lines = [f"{units['compiled']} compiled objects placed ({units['whole']} of units whose every function matches), "
+             f"{data['functions_from_compiled']} functions and {data['data_from_compiled']:,} data bytes from them; "
+             f"{data['folded']} template copies left to the unit the link kept",
+             f"linked from compiled objects: {share(data['code_from_compiled'])}"]
+    lines.append(f"units linked: {units['linked']} of {units['whole']} whose code all matches" + (
+        f" ({', '.join(data['linked_units'][:6])}{', ...' if len(data['linked_units']) > 6 else ''})"
+        if data["linked_units"] else ""))
+    for row in data["not_linked"][:12]:
+        lines.append(f"  not linked {row['unit']}: " + "; ".join(row["why"][:3]))
+    for problem in data["problems"][:12]:
+        lines.append(f"  problem: {problem}")
+    if len(data["problems"]) > 12:
+        lines.append(f"  ... {len(data['problems']) - 12} more problems (link.json)")
+    hashes = [s for s in data["segments"] if s["matches_header"] is not None]
+    verdict = "== the original" if data["identical"] else "!= the original"
+    lines.append(f"{data['out']}: {verdict}" + (
+        "; segment SHA-256s " + ", ".join(f"{s['segment']} {'ok' if s['matches_header'] else 'DIFFERENT'}"
+                                          for s in hashes) if hashes else ""))
+    if data.get("first_difference"):
+        d = data["first_difference"]
+        lines.append(f"first difference at {d['address']}: ours {d['ours']}, original {d['original']}")
+    if data.get("report_updated"):
+        lines.append("the report now marks the linked units complete")
+    return "\n".join(lines)
+
+
 def map_adoption(data: dict[str, Any]) -> str:
     lines = [f"{data['map']}: {data['units_lined_up']:,} objects line up with the original "
              f"({data['units_confirmed_by_data']:,} confirmed by their data), {data['units_bounded']:,} more have "

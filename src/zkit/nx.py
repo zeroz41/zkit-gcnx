@@ -108,6 +108,8 @@ class Module:
     init_array: list[int] = field(default_factory=list)
     eh_frame_hdr: tuple[int, int] | None = None
     tables: dict[str, tuple[int, int]] = field(default_factory=dict)  # the linker's own: name -> (start, end)
+    raw: bytes = b""                    # the image as stored, before the dynamic relocations are applied
+    hashes: dict[str, bytes] = field(default_factory=dict)          # segment -> the NSO header's SHA-256 of it
 
     @property
     def bss(self) -> tuple[int, int]:
@@ -199,7 +201,8 @@ def _from_nso(raw: bytes) -> Module:
     data_end = headers[2][1] + headers[2][2]
     if bss:
         segments.append(Segment("bss", data_end, bss, "data"))
-    module = Module(image, segments, build_id)
+    module = Module(image, segments, build_id, raw=bytes(image),
+                    hashes={name: raw[0xA0 + 0x20 * i:0xC0 + 0x20 * i] for i, name in enumerate(("text", "rodata", "data"))})
     _read_mod0(module)
     return module
 
@@ -227,7 +230,7 @@ def _from_elf(raw: bytes) -> Module:
             segments.append(Segment(name, vaddr - base, filesz, "code" if flags & 1 else "data"))
         if memsz > filesz:
             segments.append(Segment("bss", vaddr - base + filesz, memsz - filesz, "data"))
-    module = Module(image, segments)
+    module = Module(image, segments, raw=bytes(image))
     for symbol in elf.symbols:
         if symbol.name and 0 < symbol.section < 0xFF00 and symbol.kind in ("func", "object"):
             module.symbols.setdefault(symbol.value - base, symbol.name)

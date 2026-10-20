@@ -310,6 +310,69 @@ class SwitchBuildTests(unittest.TestCase):
                 measures = json.loads((game / "build/test/report.json").read_text())["measures"]
                 self.assertEqual(measures["matched_code"], measures["total_code"])
 
+    def test_link_rebuilds_the_module_and_marks_the_units_it_proves(self):
+        """`zkit link` on Switch: both units' objects placed where the original holds them, every relocation
+        resolved as the module's linker did (calls, a string literal, a merged constant, a GOT load), the module
+        identical; the report then marks both linked. A unit whose data differs from the original's is caught
+        even when the report calls its code matched."""
+        from zkit import nxlink
+        from zkit.elf import Elf
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in (("a.cpp", A_CPP), ("b.cpp", B_CPP)):
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, str(root / name), "-o", str(root / name.replace(".cpp", ".o"))],
+                               check=True, capture_output=True)
+            subprocess.run([LLD, "-shared", "--no-relax", "--unresolved-symbols=ignore-all", "-o",
+                            str(root / "main.elf"), str(root / "a.o"), str(root / "b.o")], check=True,
+                           capture_output=True)
+            result = new.new(root / "main.elf", root / "game", game_id="test")
+            game, manifest = root / "game", Path(result["manifest"])
+            linked = Elf.load(game / "orig/test/main.elf")
+            at = {s.name: s.value for s in linked.symbols if s.name}
+            rodata = linked.section(".rodata").address
+            (game / "config/test/splits.txt").write_text(
+                f"a.cpp:\n\t.text start:{at['_Z6scaledi']:#x} end:{at['_Z6helperi']:#x}\n"
+                f"\t.rodata.str1.1 start:{rodata:#x} end:{rodata + 13:#x}\n\n"
+                f"b.cpp:\n\t.text start:{at['_Z6helperi']:#x} end:{at['_Z6helperi'] + 36:#x}\n"
+                f"\t.rodata.cst16 start:{at['_ZL5table']:#x} end:{at['_ZL5table'] + 16:#x}\n"
+                f"\t.data start:{at['g_counter']:#x} end:{at['g_counter'] + 4:#x}\n", encoding="utf-8")
+            data = json.loads(manifest.read_text())
+            data["targets"]["test"]["build"].update(compiler=CLANG, cflags=[f for f in FLAGS if f != "-c"])
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+            report = game / "build/test/report.json"
+
+            def built(b_cpp: str) -> dict:
+                (game / "src/a.cpp").write_text(A_CPP, encoding="utf-8")
+                (game / "src/b.cpp").write_text(b_cpp, encoding="utf-8")
+                self.assertTrue(build.build(Project.load(manifest), quiet=True)["ok"])
+                units = []
+                for unit in ("a", "b"):   # what objdiff would say: every function exact
+                    functions = [{"name": s.name, "size": str(s.size), "fuzzy_match_percent": 100.0,
+                                  "metadata": {"virtual_address": str(at[s.name])}}
+                                 for s in Elf.load(game / f"build/test/src/{unit}.o").symbols
+                                 if s.kind == "func" and s.name in at]
+                    size = sum(int(f["size"]) for f in functions)
+                    units.append({"name": unit, "functions": functions, "sections": [{"name": ".data", "size": "4"}],
+                                  "measures": {"total_code": str(size), "matched_code": str(size),
+                                               "total_data": "4"}, "metadata": {"source_path": f"src/{unit}.cpp"}})
+                report.write_text(json.dumps({"units": units, "measures": {}}), encoding="utf-8")
+                return nxlink.link(Project.load(manifest), "test", game / "build/test/link")
+
+            good = built(B_CPP)
+            self.assertTrue(good["identical"], good)
+            self.assertEqual(good["linked_units"], ["a.cpp", "b.cpp"], good["not_linked"])
+            self.assertTrue(all(s["matches_header"] is None for s in good["segments"]))   # an ELF: no hashes
+            marked = json.loads(report.read_text())
+            self.assertEqual([u["metadata"].get("complete") for u in marked["units"]], [True, True])
+            self.assertEqual(marked["measures"]["complete_units"], 2)
+            self.assertEqual(marked["units"][1]["measures"]["matched_data"], "4")
+            bad = built(B_CPP.replace("g_counter = 3", "g_counter = 4"))
+            self.assertFalse(bad["identical"])
+            self.assertEqual(bad["linked_units"], [])
+            self.assertTrue(any("differs" in p for p in bad["problems"]), bad["problems"])
+            self.assertFalse(any(u["metadata"].get("complete") for u in json.loads(report.read_text())["units"]))
+
     def test_a_renamed_symbol_reaches_the_target_objects(self):
         """The target objects take their function names from symbols.txt, also once a report exists: the index
         reads the report, which the objects themselves wrote, so a name the file changes must come from the file."""

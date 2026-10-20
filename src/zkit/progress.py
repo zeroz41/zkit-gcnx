@@ -326,6 +326,74 @@ def progress(project: Project, target: str) -> dict[str, Any]:
     return data
 
 
+# A link's proof, written into the report
+
+def apply_link(path: Path, linked: list[str]) -> bool:
+    """Mark the units a link proved (zkit link: every byte of them placed from the compiled objects and found
+    identical) complete in objdiff's report, with their data matched, and unmark the rest; the totals and
+    categories are recounted from the units. objdiff's own data counts are kept under `zkit_link` so a unit that
+    stops linking gets them back. True when the report changed."""
+    report = load(path)
+    before = json.dumps(report, sort_keys=True)
+    names = set(linked)
+    kept = report.setdefault("zkit_link", {}).setdefault("units", {})
+    for unit in report.get("units", []):
+        name = str(unit.get("name", ""))
+        meta, own = unit.setdefault("metadata", {}), unit.setdefault("measures", {})
+        sections = unit.get("sections") or []
+        proven = name in names or name.split("/", 1)[-1] in names
+        if name in kept:   # objdiff's values first, as if no link had marked it
+            saved = kept.pop(name)
+            own["matched_data"] = saved["matched_data"]
+            for section in sections:
+                if section.get("name") in saved["sections"]:
+                    value = saved["sections"][section["name"]]
+                    if value is None:
+                        section.pop("fuzzy_match_percent", None)
+                    else:
+                        section["fuzzy_match_percent"] = value
+        meta.pop("complete", None)
+        for key in ("complete_code", "complete_data", "complete_units"):
+            own.pop(key, None)
+        if not proven:
+            continue
+        data = [x for x in sections if not is_code(str(x.get("name", "")))]
+        kept[name] = {"matched_data": own.get("matched_data"),
+                      "sections": {x.get("name"): x.get("fuzzy_match_percent") for x in data}}
+        meta["complete"] = True
+        own["matched_data"] = own.get("total_data", "0")
+        for section in data:
+            section["fuzzy_match_percent"] = 100.0
+        own.update(complete_code=own.get("total_code", "0"), complete_data=own.get("total_data", "0"),
+                   complete_units=1)
+    if not kept:
+        report.pop("zkit_link")
+    _recount(report)
+    if json.dumps(report, sort_keys=True) == before:
+        return False
+    path.write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")
+    return True
+
+
+def _recount(report: dict) -> None:
+    """The report's matched-data and linked totals, and each category's, from its units."""
+    def total(units: list[dict], into: dict) -> None:
+        sums = {key: sum(int(number((u.get("measures") or {}).get(key))) for u in units)
+                for key in ("total_code", "total_data", "matched_data", "complete_code", "complete_data")}
+        into.update(matched_data=str(sums["matched_data"]), complete_code=str(sums["complete_code"]),
+                    complete_data=str(sums["complete_data"]),
+                    complete_units=sum(1 for u in units if (u.get("metadata") or {}).get("complete")))
+        for key, whole in (("matched_data", "total_data"), ("complete_code", "total_code"),
+                           ("complete_data", "total_data")):
+            into[f"{key}_percent"] = 100.0 * sums[key] / sums[whole] if sums[whole] else 0.0
+    units = report.get("units", [])
+    total(units, report.setdefault("measures", {}))
+    for category in report.get("categories", []):
+        members = [u for u in units if category.get("id") in ((u.get("metadata") or {}).get("progress_categories")
+                                                              or [])]
+        total(members, category.setdefault("measures", {}))
+
+
 # Offline page: the reports themselves (objdiff's own counters), browsable without any service.
 
 def _unit_rows(report: dict, single: str | None = None) -> list[dict]:
