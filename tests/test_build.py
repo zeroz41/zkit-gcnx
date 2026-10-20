@@ -310,6 +310,33 @@ class SwitchBuildTests(unittest.TestCase):
                 measures = json.loads((game / "build/test/report.json").read_text())["measures"]
                 self.assertEqual(measures["matched_code"], measures["total_code"])
 
+    def test_a_renamed_symbol_reaches_the_target_objects(self):
+        """The target objects take their function names from symbols.txt, also once a report exists: the index
+        reads the report, which the objects themselves wrote, so a name the file changes must come from the file."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "a.cpp").write_text(A_CPP + B_CPP.replace("int g_counter = 3;\n", ""), encoding="utf-8")
+            subprocess.run([CLANG, *FLAGS, str(root / "a.cpp"), "-o", str(root / "a.o")], check=True,
+                           capture_output=True)
+            subprocess.run([LLD, "-shared", "--no-relax", "--unresolved-symbols=ignore-all", "-o",
+                            str(root / "main.elf"), str(root / "a.o")], check=True, capture_output=True)
+            result = new.new(root / "main.elf", root / "game", game_id="test")
+            game = root / "game"
+            from zkit.elf import Elf
+            at = {s.name: s.value for s in Elf.load(game / "orig/test/main.elf").symbols if s.name}
+            (game / "config/test/splits.txt").write_text(
+                f"a.cpp:\n\t.text start:{at['_Z6scaledi']:#x} end:{at['_Z6helperi'] + 36:#x}\n", encoding="utf-8")
+            self.assertEqual(build.run_ninja(game, [], quiet=True), 0)
+            (game / "build/test/report.json").write_text('{"units": []}', encoding="utf-8")  # a report exists
+            symbols = game / "config/test/symbols.txt"
+            text = symbols.read_text(encoding="utf-8")
+            self.assertIn("_Z6scaledi = ", text)
+            symbols.write_text(text.replace("_Z6scaledi = ", "_Z7renamedi = "), encoding="utf-8")
+            self.assertEqual(build.run_ninja(game, [], quiet=True), 0)
+            names = {s.name for s in Elf.load(game / "build/test/obj/a.o").symbols}
+            self.assertIn("_Z7renamedi", names)
+            self.assertNotIn("_Z6scaledi", names)
+
     def test_source_root_gives_the_original_file_name(self):
         """The original was built from `D:/proj/src/`, and its `__FILE__` says so: with `source_root` the build
         and `zkit try` compile src/a.cpp as `D:/proj/src/a.cpp`, so the function citing it matches; without, the
