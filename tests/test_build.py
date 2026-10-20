@@ -345,7 +345,8 @@ class SwitchBuildTests(unittest.TestCase):
             def built(b_cpp: str) -> dict:
                 (game / "src/a.cpp").write_text(A_CPP, encoding="utf-8")
                 (game / "src/b.cpp").write_text(b_cpp, encoding="utf-8")
-                self.assertTrue(build.build(Project.load(manifest), quiet=True)["ok"])
+                # with objdiff-cli the build links too, and a link that is not identical fails it
+                self.assertEqual(build.build(Project.load(manifest), quiet=True)["ok"], b_cpp == B_CPP or not OBJDIFF)
                 units = []
                 for unit in ("a", "b"):   # what objdiff would say: every function exact
                     functions = [{"name": s.name, "size": str(s.size), "fuzzy_match_percent": 100.0,
@@ -386,9 +387,11 @@ class SwitchBuildTests(unittest.TestCase):
             result = new.new(root / "main.elf", root / "game", game_id="test")
             game = root / "game"
             from zkit.elf import Elf
-            at = {s.name: s.value for s in Elf.load(game / "orig/test/main.elf").symbols if s.name}
+            symbols = Elf.load(game / "orig/test/main.elf").symbols
+            at = {s.name: s.value for s in symbols if s.name}
+            end = next(s.value + s.size for s in symbols if s.name == "_Z6helperi")   # its size varies by clang
             (game / "config/test/splits.txt").write_text(
-                f"a.cpp:\n\t.text start:{at['_Z6scaledi']:#x} end:{at['_Z6helperi'] + 36:#x}\n", encoding="utf-8")
+                f"a.cpp:\n\t.text start:{at['_Z6scaledi']:#x} end:{end:#x}\n", encoding="utf-8")
             self.assertEqual(build.run_ninja(game, [], quiet=True), 0)
             (game / "build/test/report.json").write_text('{"units": []}', encoding="utf-8")  # a report exists
             symbols = game / "config/test/symbols.txt"
