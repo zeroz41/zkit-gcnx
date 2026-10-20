@@ -711,6 +711,13 @@ def health(project: Project, name: str) -> list[tuple[str, str, str, str]]:
                      "zkit build --download   # fetches m2c"))
         rows.append(("ok" if permuter else "warn", f"{name}: decomp-permuter", str(permuter or "not found"),
                      "zkit build --download   # fetches decomp-permuter"))
+    record = root / layout(name, target).dir / "link" / "link.json"
+    if config["platform"] == "switch" and record.is_file():   # the last build's link
+        linked = json.loads(record.read_text(encoding="utf-8"))
+        rows.append(("ok" if linked.get("identical") else "fail", f"{name}: rebuilt module",
+                     ("identical to the original" if linked.get("identical") else "NOT identical to the original")
+                     + f"; {len(linked.get('linked_units', []))} units linked from source",
+                     "zkit link --out build/<dir>/link   # says where it differs"))
     return rows
 
 
