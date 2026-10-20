@@ -225,12 +225,15 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
             "worse": [r for r in rows if r["delta"] > 0]}
 
 
-def findings(text: str, catalog: Iterable[Pattern]) -> list[dict]:
+def findings(text: str, catalog: Iterable[Pattern], header: bool = False) -> list[dict]:
     """Every match in a piece of source (one line or a function body), for check and port readiness; `blocks`
-    says whether it hides what the code does (spelling debt such as a hand-mangled call does not)."""
+    says whether it hides what the code does (spelling debt such as a hand-mangled call does not). In a header,
+    what is debt only in a source file (a class declared with virtuals) is none."""
     code = _strip_comments(text)
     out = []
     for pattern in catalog:
+        if header and pattern.sources_only:
+            continue
         for match in pattern.regex.finditer(code):
             out.append({"key": pattern.key, "label": pattern.label, "text": match.group(0)[:80],
                         "group": pattern.group, "blocks": pattern.blocks_port})
