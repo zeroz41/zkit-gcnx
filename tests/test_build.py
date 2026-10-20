@@ -310,6 +310,48 @@ class SwitchBuildTests(unittest.TestCase):
                 measures = json.loads((game / "build/test/report.json").read_text())["measures"]
                 self.assertEqual(measures["matched_code"], measures["total_code"])
 
+    def test_source_root_gives_the_original_file_name(self):
+        """The original was built from `D:/proj/src/`, and its `__FILE__` says so: with `source_root` the build
+        and `zkit try` compile src/a.cpp as `D:/proj/src/a.cpp`, so the function citing it matches; without, the
+        citation reads src/a.cpp and does not."""
+        cites = A_CPP.replace('"hello from a"', "__FILE__")
+        original = "D:/proj/src/a.cpp"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "D:/proj/src").mkdir(parents=True)
+            for name, text in (("a.cpp", cites), ("b.cpp", B_CPP)):
+                (root / "D:/proj/src" / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, f"D:/proj/src/{name}", "-o", name.replace(".cpp", ".o")], cwd=root,
+                               check=True, capture_output=True)
+            subprocess.run([LLD, "-shared", "--no-relax", "--unresolved-symbols=ignore-all", "-o",
+                            str(root / "main.elf"), str(root / "a.o"), str(root / "b.o")], check=True,
+                           capture_output=True)
+            result = new.new(root / "main.elf", root / "game", game_id="test")
+            game, manifest = root / "game", Path(result["manifest"])
+            from zkit.elf import Elf
+            linked = Elf.load(game / "orig/test/main.elf")
+            at = {s.name: s.value for s in linked.symbols if s.name}
+            rodata = linked.section(".rodata").address
+            (game / "config/test/splits.txt").write_text(
+                f"a.cpp:\n\t.text start:{at['_Z6scaledi']:#x} end:{at['_Z6helperi']:#x}\n"
+                f"\t.rodata.str1.1 start:{rodata:#x} end:{rodata + len(original) + 1:#x}\n", encoding="utf-8")
+            (game / "src/a.cpp").write_text(cites, encoding="utf-8")
+            data = json.loads(manifest.read_text())
+            settings = data["targets"]["test"]["build"]
+            settings.update(compiler=CLANG, cflags=[f for f in FLAGS if f != "-c"])
+            matched = {}
+            for rooted in (False, True):
+                if rooted:
+                    settings["source_root"] = original.rsplit("/", 1)[0]
+                manifest.write_text(json.dumps(data), encoding="utf-8")
+                self.assertTrue(build.build(Project.load(manifest), quiet=True)["ok"])
+                diff = objects.function_diff(game / "build/test/obj/a.o", game / "build/test/src/a.o", "_Z8greetingv")
+                unit = objects.objdiff_units(Project.load(manifest), "test")["a"]
+                tried = candidate.compare(Project.load(manifest), "test", unit, "_Z8greetingv", cites)
+                matched[rooted] = (diff["exact"], tried["exact"])
+            self.assertEqual(matched, {False: (False, False), True: (True, True)})
+            self.assertIn(original.encode(), (game / "build/test/src/a.o").read_bytes())
+
 
 if __name__ == "__main__":
     unittest.main()
