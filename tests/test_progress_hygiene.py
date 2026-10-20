@@ -165,6 +165,12 @@ class QualityTests(unittest.TestCase):
             self.assertEqual(quality.audit(project, "decomp", revision="HEAD")["total"],
                              quality.compare(project, "decomp", "HEAD")["total"]["before"])
 
+    def test_a_c_modules_header_may_declare_extern_c(self):
+        catalog = quality.patterns()
+        guarded = '#ifdef __cplusplus\nextern "C" {\n#endif\nvoid* memset(void*, int, unsigned long);\n'
+        self.assertEqual(quality.count(guarded, catalog, header=True)["extern_c"], 0)
+        self.assertEqual(quality.count(guarded, catalog)["extern_c"], 1)
+
     def test_function_body_findings_skip_comments(self):
         catalog = quality.patterns()
         self.assertEqual(quality.findings("// raw *(u8 *)((u8 *)p + 0x10)\nreturn this->x;", catalog), [])
