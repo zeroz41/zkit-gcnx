@@ -225,13 +225,21 @@ def _disasm_elf(project: Project, target: str, address: int, size: int | None, m
     for pc, value, kind in platform.addresses(image, start, size, {}):
         refs.setdefault(pc, []).append((value, kind))
     lines = []
+
+    def live(found: re.Match) -> str:   # the cached ELF keeps the names it was written with: name targets now
+        value = int(found[1], 16) - platform.base
+        holder = containing(db, target, value)
+        if holder is None:
+            return found[0]
+        offset = value - holder["address"]
+        return f"0x{found[1]} <{holder['name']}{f'+0x{offset:x}' if offset else ''}>"
     for line in result.stdout.splitlines():
         match = re.match(r"\s*([0-9a-f]+):\s+((?:[0-9a-f]{2} ){4}|[0-9a-f]{8})\s*(.*)", line)
         if not match:
             continue
         pc = int(match[1], 16) - platform.base
         word = match[2].replace(" ", "")
-        text = re.sub(r"\s+", " ", match[3].strip())
+        text = re.sub(r"0x([0-9a-f]+) <[^>]*>", live, re.sub(r"\s+", " ", match[3].strip()))
         for value, kind in refs.get(pc, []):
             label = _name(db, target, value) or _symbol_name(project, target, value) or \
                 (image.symbols.get(value) if hasattr(image, "symbols") else "")
