@@ -40,7 +40,9 @@ def _p(key: str, label: str, regex: str, group: str, blocks_port: bool = True, f
 # Defaults cover CodeWarrior (GameCube/Wii) and Clang/GCC (Itanium ABI) decomps and both m2c and Ghidra output.
 # A project adds or replaces patterns in its manifest (`quality.patterns`: key -> {label, regex, group}).
 DEFAULT_PATTERNS: tuple[Pattern, ...] = (
-    _p("extern_c", 'extern "C" declarations', r'\bextern\s+"C"', "linkage", blocks_port=False),
+    # a C module's header declares its functions in a guarded extern "C" block (the contract's rule 6); a source
+    # file has no business with one
+    _p("extern_c", 'extern "C" declarations', r'\bextern\s+"C"', "linkage", blocks_port=False, sources_only=True),
     # A hand-mangled spelling names its callee in full: spelling debt that does not hide what the code does.
     _p("mangled_member", "hand-mangled member names (CodeWarrior)",
        r"\b[A-Za-z_]\w*?__\d+[A-Za-z_]\w*?F\w*\b", "linkage", blocks_port=False),
