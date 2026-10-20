@@ -116,6 +116,23 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual((data(consistent)["differences"], data(consistent)["file"]), ({}, "T.json"))
         self.assertEqual(data(changed)["differences"], {"total_code": {"report": 52, "units": 48}})
 
+    def test_a_one_module_page_is_browsed_by_folder(self):
+        """A Switch `main`: objdiff's report drops the module, so units are grouped by their first folder as
+        categories, and a placeholder unit outside any folder stays in the module instead of becoming one."""
+        bare = report([("gf/menu", "f", 0x7100001000, 0x20, 100.0), ("gf/data", "g", 0x7100001020, 0x10, 0.0),
+                       ("unit_7100002000", "h", 0x7100002000, 0x10, 0.0)], [])
+        for unit in bare["units"]:
+            unit["metadata"].pop("module_name")
+            unit["measures"] = {"total_code": str(sum(int(f["size"]) for f in unit["functions"])),
+                                "matched_code": "32" if unit["name"] == "gf/menu" else "0", "total_units": 1}
+        data = lambda modules: json.loads(progress.page([("T", bare)], "Game", "", modules).split(
+            'id="data" type="application/json">')[1].split("</script>")[0])["reports"][0]
+        shown = data({"T": "main"})
+        self.assertEqual({u["module"] for u in shown["units"]}, {"main"})
+        self.assertEqual([(c["id"], c["measures"]["total_code"], c["measures"]["matched_code"],
+                           c["measures"]["total_units"]) for c in shown["summary"]["categories"]], [("gf", 48, 32, 2)])
+        self.assertEqual(sorted(u["module"] for u in data(None)["units"]), ["gf", "gf", "unit_7100002000"])
+
     def test_readme_progress_table_between_markers_or_added(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
