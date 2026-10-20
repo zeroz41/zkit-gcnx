@@ -269,6 +269,7 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
             del ev.files[index]
             ev.placed.discard(index)
     _joined_placements(ev, _initializers(program))
+    _wide_statics(program, ev)
     # One file's own citations around another's: that one is compiled inside it (included), and the run between
     # is one unit, whatever else says otherwise.
     own = sorted((i, f) for i, f in ev.files.items() if i not in ev.placed and i not in ev.classed)
@@ -342,6 +343,23 @@ def _included(ev: Evidence) -> dict[str, str]:
             name = max(members, key=lambda f: (counts[f], f))
             out.update({f: name for f in members if f != name})
     return out
+
+
+def _wide_statics(program: Program, ev: Evidence) -> None:
+    """A static no symbol names (a file's own, in no symbol table) whose users spread wider than a tight run, but
+    over no evidence of another file than one: its users are that file's, and the run between them one unit."""
+    from .score import placeholder
+    anchors = sorted(ev.files.items())
+    keys = [i for i, _ in anchors]
+    for o, fs in program.users().items():
+        if o.section not in WRITABLE_SECTIONS or not placeholder(o.name) or not fs:
+            continue
+        lo, hi = min(fs), max(fs)
+        if hi - lo <= TIGHT:
+            continue                                   # a tight run's: a join already
+        files = {f for _, f in anchors[bisect.bisect_left(keys, lo):bisect.bisect_right(keys, hi)]}
+        if len(files) == 1:
+            ev.joins.append((lo, hi, f"{o.name} ({o.section}) is {next(iter(files))}'s only"))
 
 
 def _joined_placements(ev: Evidence, ends: list[int]) -> None:
