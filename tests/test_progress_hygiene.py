@@ -171,6 +171,32 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(quality.count(guarded, catalog, header=True)["extern_c"], 0)
         self.assertEqual(quality.count(guarded, catalog)["extern_c"], 1)
 
+    def test_extern_c_is_debt_only_at_a_call_site_or_on_a_cxx_name(self):
+        owned = ('extern "C" const char* TQuestBgmCtrl__class_name;\n'
+                 'extern "C" __declspec(section ".rodata") const char epi1[] = "epi1.adx";\n'
+                 'extern "C" void* table[2] = {\n    (void*)epi1, 0,\n};\n'
+                 'extern "C" {\nint counter;\nvoid OSReport(const char* format, ...) {\n    counter++;\n}\n'
+                 'static int (*hook)(int);\n}\n'
+                 'extern "C" int nnMain(void) { return 0; }\n'
+                 'extern "C" void later(void);\n'
+                 'void later(void) { }\n'
+                 'extern "C" const char* TQuestBgmCtrl__class_name = epi1;\n'
+                 '// extern "C" void commented(void);\nconst char* s = "extern \\"C\\" void quoted(void);";\n')
+        self.assertEqual(quality.extern_c_debt(owned), [])
+        borrowed = ('#include "x.h"\nextern "C" void OSReport(const char*, ...);\n'
+                    'extern "C" {\nvoid* memcpy(void*, const void*, unsigned long);\nextern int g_frame;\n}\n'
+                    'extern "C" int g_count;\n'
+                    'extern "C" void update__6TEnemyFv(void* self) { }\n'
+                    'extern "C" void _ZN6TEnemy4drawEv(void* self) { }\n')
+        self.assertEqual(quality.extern_c_debt(borrowed), [
+            (2, "OSReport"), (4, "memcpy"), (5, "g_frame"), (7, "g_count"), (8, "update__6TEnemyFv"),
+            (9, "_ZN6TEnemy4drawEv")])
+        catalog = quality.patterns()
+        self.assertEqual(quality.count(owned, catalog)["extern_c"], 0)
+        self.assertEqual(quality.count(borrowed, catalog)["extern_c"], 6)
+        self.assertEqual([f["text"] for f in quality.findings('extern "C" void f(int);', catalog)
+                          if f["key"] == "extern_c"], ['extern "C" f'])
+
     def test_function_body_findings_skip_comments(self):
         catalog = quality.patterns()
         self.assertEqual(quality.findings("// raw *(u8 *)((u8 *)p + 0x10)\nreturn this->x;", catalog), [])

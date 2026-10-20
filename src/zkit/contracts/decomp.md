@@ -26,7 +26,9 @@ repair on a 27,000-function decomp. A project may tighten them; it should not lo
    registration) or has a static initializer; library code identified against donor objects keeps its own
    language; the rest is C until code says otherwise. A function's linkage follows its unit: a C module has one
    header declaring its functions in a guarded `extern "C"` block that C++ units include; C++ functions carry
-   C++ names. Never `extern "C"` at a call site, never a C name on a C++ function.
+   C++ names. A function or object whose original name is a C name is defined under `extern "C"` in the unit
+   that owns its address, even a C++ one; that is its linkage, not debt. Never `extern "C"` at a call site (a
+   declaration of what another file defines), never a C name on a C++ function.
 7. **Compiler and flags per unit.** Identify them before matching (prologue patterns, a probe on untouched seeds);
    splits and folds inherit them, and a change is kept only when every function already exact stays exact.
    The tools come pinned from `zkit build --download`, which fetches only what the target's platform uses: never
