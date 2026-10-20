@@ -333,7 +333,7 @@ def audit(project: Project, repo: str, paths: list[str] | None = None, revision:
     scanned = 0
     for rel, text in files:
         scanned += 1
-        found = count(text, catalog, header=Path(rel).suffix.lower() in HEADER_SUFFIXES)
+        found = +count(text, catalog, header=Path(rel).suffix.lower() in HEADER_SUFFIXES)   # zero counts dropped
         if found:
             totals.update(found)
             per_file[rel] = found
