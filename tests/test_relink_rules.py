@@ -168,6 +168,7 @@ class UnitEvidenceTests(unittest.TestCase):
         code.strings = lambda: {0x8000: "src/a.cpp", 0x8010: "src/b.cpp"}
         code.refs = {3: [(0, 0x8000, "addr")], 9: [(0, 0x8010, "addr")]}
         code.function_index = {f.address: i for i, f in enumerate(code.functions)}
+        code.users = lambda: {}
         first = (5, 7, "7 is first used by 5")
         ev = units.Evidence({}, [(2, 12, "a global"), first], [], firsts=[first])
         placed = {code.functions[5].address: "src/a.cpp", code.functions[6].address: "src/b.cpp"}
@@ -207,6 +208,20 @@ class UnitEvidenceTests(unittest.TestCase):
             units._class_files(code, ev)
         self.assertEqual(ev.files[2], "k.cpp")
         self.assertEqual(ev.classed, {2})
+
+    def test_a_file_s_unnamed_static_holds_its_users_together_however_far(self):
+        """An unnamed static 0 and 100 use, over a.cpp's evidence alone, joins them; one over b.cpp's too, or a
+        named global, or a tight run's (a join already), does not."""
+        code = _Code(200)
+        local = DataObject(0x9000, 8, "lbl_9000", ".bss")
+        shared = DataObject(0x9010, 8, "lbl_9010", ".bss")
+        named = DataObject(0x9020, 8, "_ZN1K6s_listE", ".bss")
+        tight = DataObject(0x9030, 8, "lbl_9030", ".bss")
+        code.users = lambda: {local: {0, 100}, shared: {40, 190}, named: {0, 100}, tight: {0, 20}}
+        ev = units.Evidence({}, [], [])
+        ev.files = {50: "a.cpp", 150: "b.cpp"}
+        units._wide_statics(code, ev)
+        self.assertEqual([(lo, hi) for lo, hi, _ in ev.joins], [(0, 100)])
 
     def test_merged_literals_come_in_link_order_once_per_block(self):
         """Units 0-9 in link order, strings then constants: the strings run 0..9 with one misplaced claim (a
@@ -263,6 +278,7 @@ class UnitEvidenceTests(unittest.TestCase):
         code = _Code(10)
         code.strings, code.refs = (lambda: {}), {}
         code.function_index = {f.address: i for i, f in enumerate(code.functions)}
+        code.users = lambda: {}
         ev = units.Evidence({}, [], [])
         units._file_evidence(code, ev, {code.functions[2].address: "unit_7100000024.cpp",
                                         code.functions[6].address: "a_7100000024.cpp"})
