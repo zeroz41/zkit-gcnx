@@ -2,6 +2,7 @@ import support  # noqa: F401  (isolates config, cache and state)
 import struct
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from zkit import delink, discover, link, units
@@ -50,16 +51,86 @@ class UnitBoundsTests(unittest.TestCase):
         placed, stated = (2, 4, "a.cpp then b.cpp"), (7, 7, "6 is its unit's static initializer")
         literal = (3, 5, "two copies of one constant")              # the code's own evidence: it stands
         ev.separations = [placed, stated, literal]
-        ev.direct, ev.borrowed = {stated}, {placed}
+        ev.direct, ev.borrowed, ev.pairs = {stated}, {placed}, {placed: ("a.cpp", "b.cpp")}
         self.assertEqual(units._stated(ev), [stated, literal])
         ev.separations, ev.direct = [placed], set()                 # where the code says nothing, it stands
         self.assertEqual(units._stated(ev), [placed])
+        third = (2, 4, "a.cpp then lib/x.cpp")                      # a third file between them: the initializer
+        ev.files[4] = "lib/x.cpp"                                   # can be its end, and that build's boundary
+        ev.separations, ev.direct, ev.borrowed = [third, stated], {stated}, {third}     # stands
+        ev.pairs = {third: ("a.cpp", "lib/x.cpp")}
+        self.assertEqual(units._stated(ev), [third, stated])
 
     def test_claims_against_link_order_are_dropped(self):
         rows = [(0x10, 0x14, "a", ".data"), (0x14, 0x18, "c", ".data"), (0x18, 0x1C, "b", ".data"),
                 (0x1C, 0x20, "b", ".data"), (0x20, 0x24, "c", ".data")]
         kept = units._in_link_order(rows, {"a": 0, "b": 1, "c": 2})
         self.assertEqual([r[2] for r in kept], ["a", "b", "b", "c"])          # c's early claim is a reference
+
+
+class _Code:
+    """Just functions (one every 0x40 bytes), for the unit evidence rules."""
+
+    def __init__(self, count, weak=(), unlisted=()):
+        from types import SimpleNamespace
+        from zkit.platform import Switch
+        from zkit.program import Function
+        self.platform = Switch()
+        self.functions = [Function(0x1000 + 0x40 * i, 0x40, f"fn_{i}") for i in range(count)]
+        listed = [f for i, f in enumerate(self.functions) if i not in unlisted]     # the module's symbol table
+        self.image = SimpleNamespace(weak={self.functions[i].address for i in weak},
+                                     symbols={f.address: f.name for f in listed})
+        self.calls = {}
+
+
+class UnitEvidenceTests(unittest.TestCase):
+    """What a module's code states about which file a function was compiled in."""
+
+    def test_a_class_s_own_functions_are_its_file_s(self):
+        """K's 0 cites a.cpp: its strong 2 and 3 are a.cpp's, ahead of another build's unit for 3; its weak 4 is
+        an inline kept from any unit, its 7, among b.cpp's citations, is a method defined in b.cpp, and its 1 is
+        in no symbol table, so either."""
+        from unittest import mock
+        code = _Code(10, weak=[4], unlisted=[1])
+        classes = {0: "K", 1: "K", 2: "K", 3: "K", 4: "K", 7: "K", 6: "M", 8: "M"}
+        ev = units.Evidence({}, [], [])
+        ev.files = {0: "a.cpp", 3: "c.cpp", 5: "b.cpp", 9: "b.cpp"}
+        ev.placed = {3}
+        with mock.patch.object(units, "_function_classes", return_value=classes):
+            units._class_files(code, ev)
+        self.assertEqual(ev.files, {0: "a.cpp", 2: "a.cpp", 3: "a.cpp", 5: "b.cpp", 9: "b.cpp"})
+        self.assertEqual((ev.classed, ev.placed), ({2, 3}, set()))
+        ev.files, ev.classed = {0: "a.cpp", 5: "b.cpp"}, set()
+        with mock.patch.object(units, "_function_classes", return_value=classes):
+            units._class_files(_Code(10), ev)                       # no weak marks: no class says anything
+        self.assertEqual(ev.classed, set())
+
+    def test_code_tied_to_neither_file_is_a_unit_of_its_own(self):
+        """a.cpp cites 10 and its data reaches 14; b.cpp cites 150 and its data reaches back to 140: the 125
+        functions between are neither's, with a boundary within reach of each file's evidence."""
+        code = _Code(200)
+        ev = units.Evidence({}, [(10, 14, "data"), (140, 150, "data")], [])
+        units._untied(code, ev, [(10, "a.cpp"), (150, "b.cpp")])
+        self.assertEqual(sorted(ev.edges), [(15, 15 + units.FILL_FUNCTIONS, "a.cpp's evidence ends"),
+                                            (140 - units.FILL_FUNCTIONS, 140, "b.cpp's evidence starts")])
+        self.assertEqual(ev.direct, set(ev.edges))
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            cuts = [c.position for c in units.boundaries(code, ev)]
+        self.assertEqual(cuts, [15, 140])
+        near = units.Evidence({}, [(10, 14, "data")], [])
+        units._untied(code, near, [(10, "a.cpp"), (40, "b.cpp")])   # 25 between: one boundary, as before
+        self.assertEqual(near.edges, {})
+
+    def test_a_file_s_evidence_ends_at_a_boundary_within_its_reach(self):
+        """Another boundary (a static initializer at 29) within reach of a.cpp's evidence is where a.cpp ends:
+        no second boundary right after its evidence."""
+        code = _Code(200)
+        ev = units.Evidence({}, [(10, 14, "data")], [(30, 30, "29 is its unit's static initializer")])
+        units._untied(code, ev, [(10, "a.cpp"), (150, "b.cpp")])
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            cuts = [c.position for c in units.boundaries(code, ev)]
+        self.assertEqual(cuts[0], 30)
+        self.assertEqual(len(cuts), 2)
 
 
 class LinkerTableTests(unittest.TestCase):
