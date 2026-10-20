@@ -328,6 +328,8 @@ def configure(project: Project, repository: str | None = None, only: str | None 
         depfile="$basefile.d", deps="gcc", description="MWCC $out")
     ninja.rule("clang", "$cc $cflags -MMD -MF $out.d -c $in -o $out", depfile="$out.d", deps="gcc",
                description="CC $out")
+    ninja.rule("clang_rooted", "$cc $cflags -MMD -MF $object.d -MT $out -c $source -o $object", depfile="$out.d",
+               deps="gcc", description="CC $out")
     ninja.rule("report", "$objdiff report generate -p $project $args -o $out", description="REPORT $out")
     inputs = [str(project.path)]
     stamp = "build/zkit.stamp"                       # the target objects are cut again when zkit itself changes
@@ -373,7 +375,7 @@ def configure(project: Project, repository: str | None = None, only: str | None 
                 basedir = Path(step["out"]).parent.as_posix()
                 variables = {"basedir": _command([basedir]), "basefile": _command([f"{basedir}/{Path(unit).stem}"])}
             else:
-                variables = {}
+                variables = {key: _command([value]) for key, value in step.get("variables", {}).items()}
             ninja.build([step["out"]], step["rule"], [f"src/{unit}"], implicit=step["implicit"],
                         variables={"cc": _command(step["cc"]), "cflags": _command(step["flags"]), **variables})
             compiled.append(step["out"])
@@ -466,9 +468,45 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
         return {"rule": "mwcc", "cc": cc, "flags": flags, "argv": argv, "out": out,
                 "implicit": [_relative(p, root) for p in (run, exe) if p]}
     cc = [str(exe) if exe else config["compiler"]]
+    implicit = [_relative(exe, root)] if exe else []
+    mirror = source_root(root, paths, config, notes)
+    if mirror is not None:
+        # from the folder whose `source_root` is src/: the source as the original's build named it, every other
+        # path absolute (clang resolves includes and the object against the working directory)
+        named = f"{config['source_root'].strip('/')}/{unit}"
+        flags = words(config["cflags"]) + [f"-I{(root / folder).as_posix()}" for folder in includes] + \
+            config["extra_cflags"] + ["-working-directory", mirror.as_posix()]
+        target = (root / out).as_posix()
+        return {"rule": "clang_rooted", "cc": cc, "flags": flags, "argv": [*cc, *flags, "-c", named, "-o", target],
+                "out": out, "implicit": implicit, "variables": {"source": named, "object": target}}
     flags = words(config["cflags"]) + [f"-I{folder}" for folder in includes] + config["extra_cflags"]
     return {"rule": "clang", "cc": cc, "flags": flags, "argv": [*cc, *flags, "-c", source, "-o", out], "out": out,
-            "implicit": [_relative(exe, root)] if exe else []}
+            "implicit": implicit}
+
+
+def source_root(root: Path, paths: Layout, config: dict[str, Any], notes: list[str]) -> Path | None:
+    """Where a clang target with `source_root` compiles from: `<build dir>/root`, in which that path (the folder
+    the original's `__FILE__` strings start with, `D:/Monolithsoft/BF2/prog`) is a link to src/, so a unit's
+    `__FILE__` reads as the original's. None without the setting, or where links cannot be made."""
+    original = (config.get("source_root") or "").strip("/")
+    if not original:
+        return None
+    mirror = root / paths.dir / "root"
+    link = mirror / original
+    wanted = os.path.relpath(root / "src", link.parent)
+    if os.name == "nt":
+        notes.append("source_root is ignored on Windows: its drive letter cannot be a folder name there")
+        return None
+    try:
+        if not (link.is_symlink() and os.readlink(link) == wanted):
+            link.parent.mkdir(parents=True, exist_ok=True)
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            link.symlink_to(wanted, target_is_directory=True)
+    except OSError as error:
+        notes.append(f"source_root is ignored: cannot link {link} to src/ ({error})")
+        return None
+    return mirror
 
 
 def write_objdiff(path: Path, root: Path, units: list[str], compiled: set[str], paths: Layout,

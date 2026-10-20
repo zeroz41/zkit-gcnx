@@ -659,7 +659,7 @@ def prove(project, target: str | None = None, class_filter: str | None = None, l
     if (project.target(default_target(project, target)).get("platform") or "gamecube").lower() in ("switch", "nx"):
         from . import itanium
         return itanium.prove(project, target, class_filter=class_filter, limit=limit)
-    from .candidate import _restage, compile_command
+    from .candidate import _restage, compile_command, plain_command
     from .elf import Elf
     from .objects import objdiff_units
     target = default_target(project, target)
@@ -672,6 +672,7 @@ def prove(project, target: str | None = None, class_filter: str | None = None, l
     if unit is None:
         raise ValueError("No C++ unit in objdiff.json to borrow a compile command from")
     argv, workdir, source_arg = compile_command(project, target, unit)
+    argv = plain_command(argv, workdir, source_arg)
     scratch = project.root(project.target(target)["repository"]) / "build" / "zkit-classes"
     scratch.mkdir(parents=True, exist_ok=True)
     families: dict[int, list[int]] = collections.defaultdict(list)

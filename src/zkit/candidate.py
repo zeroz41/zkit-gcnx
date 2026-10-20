@@ -60,14 +60,40 @@ def _rel(path: Path, base: Path) -> str:
         return str(path)
 
 
+def _rooted(argv: list[str], workdir: Path, source: Path) -> tuple[int, int] | None:
+    """A command compiling from another folder (clang's `-working-directory`, the build's `source_root`): the
+    indices of that folder and of the source as it names it, which reads as the original's path."""
+    if "-working-directory" not in argv[:-1]:
+        return None
+    folder_index = argv.index("-working-directory") + 1
+    folder = workdir / argv[folder_index]
+    for index, arg in enumerate(argv):
+        if index != folder_index and not arg.startswith("-") and (folder / arg).resolve() == source.resolve():
+            return folder_index, index
+    return None
+
+
+def plain_command(argv: list[str], workdir: Path, source_arg: str) -> list[str]:
+    """A rooted command (`_rooted`) as an ordinary one, for a compile whose `__FILE__` does not matter: from the
+    working directory, the source as src/ names it."""
+    rooted = _rooted(argv, workdir, workdir / source_arg)
+    if rooted is None:
+        return argv
+    folder, source = rooted
+    return [source_arg if i == source else a for i, a in enumerate(argv) if i not in (folder - 1, folder)]
+
+
 def _restage(argv: list[str], source_arg: str, staged: Path, out_dir: Path, source_dir: Path,
-             workdir: Path) -> tuple[list[str], Path]:
-    """The unit's command, compiling `staged` into `out_dir` with the unit's own folder searched first."""
+             workdir: Path, rooted: tuple[int, int] | None = None) -> tuple[list[str], Path]:
+    """The unit's command, compiling `staged` into `out_dir` with the unit's own folder searched first. A rooted
+    command (`_rooted`) compiles from `out_dir` instead, where `staged` has the source's path, so the candidate's
+    `__FILE__` is the unit's; its other paths are absolute."""
     mwcc = any("mwcc" in Path(a).name.lower() for a in argv[:3])
     out: list[str] = []
     skip = False
     replaced = False
     expected = out_dir / (staged.stem + ".o")
+    place = (lambda path: str(path.resolve())) if rooted else (lambda path: _rel(path, workdir))
     for index, arg in enumerate(argv):
         if skip:
             skip = False
@@ -77,14 +103,21 @@ def _restage(argv: list[str], source_arg: str, staged: Path, out_dir: Path, sour
         if arg in DEP_ARGS:
             skip = True
             continue
+        if rooted and index == rooted[0]:
+            out.append(str(out_dir.resolve()))
+            continue
+        if rooted and index == rooted[1]:
+            out.append(arg)
+            replaced = True
+            continue
         if arg == "-o" and index + 1 < len(argv):
-            out += ["-o", _rel(out_dir if mwcc else expected, workdir)]
+            out += ["-o", place(out_dir if mwcc else expected)]
             skip = True
             continue
         if arg.startswith("-o") and len(arg) > 2 and not mwcc:
-            out.append(f"-o{_rel(expected, workdir)}")
+            out.append(f"-o{place(expected)}")
             continue
-        if arg == source_arg or Path(arg).as_posix() == Path(source_arg).as_posix():
+        if not rooted and (arg == source_arg or Path(arg).as_posix() == Path(source_arg).as_posix()):
             out.append(_rel(staged, workdir))
             replaced = True
             continue
@@ -92,7 +125,7 @@ def _restage(argv: list[str], source_arg: str, staged: Path, out_dir: Path, sour
     if not replaced:
         raise ValueError("Could not find the unit's source in its compile command")
     # The unit's folder first, so its quoted includes resolve as they do in the tree.
-    folder = _rel(source_dir, workdir)
+    folder = place(source_dir)
     search = ["-i", folder] if mwcc else [f"-I{folder}"]
     first_flag = next((i for i, a in enumerate(out) if a.startswith("-")), len(out))
     return out[:first_flag] + search + out[first_flag:], expected
@@ -109,9 +142,12 @@ def compare(project: Project, target: str, unit: dict, name: str, text: str, kee
     scratch_dir = scratch if scratch.is_dir() else None
     with tempfile.TemporaryDirectory(prefix="zkit-try-", dir=scratch_dir) as work:
         work = Path(work)
-        staged = work / source_path.name  # same basename: static initializer names embed it
+        rooted = _rooted(argv, workdir, source_path)
+        # same basename: static initializer names embed it; a rooted command's whole path: `__FILE__` is it
+        staged = work / argv[rooted[1]] if rooted else work / source_path.name
+        staged.parent.mkdir(parents=True, exist_ok=True)
         staged.write_text(text, encoding="utf-8")
-        command, expected = _restage(argv, source_arg, staged, work, source_path.parent, workdir)
+        command, expected = _restage(argv, source_arg, staged, work, source_path.parent, workdir, rooted)
         result = subprocess.run(command, cwd=workdir, capture_output=True, text=True, encoding="utf-8",
                                 errors="replace", timeout=300)
         built = expected if expected.is_file() else next(iter(work.glob("*.o")), None)
