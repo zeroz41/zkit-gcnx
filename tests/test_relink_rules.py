@@ -108,7 +108,7 @@ class UnitEvidenceTests(unittest.TestCase):
     def test_code_tied_to_neither_file_is_a_unit_of_its_own(self):
         """a.cpp cites 10 and its data reaches 14; b.cpp cites 150 and its data reaches back to 140: the 125
         functions between are neither's, with a boundary within reach of each file's evidence."""
-        code = _Code(200)
+        code = _Code(160)
         ev = units.Evidence({}, [(10, 14, "data"), (140, 150, "data")], [])
         units._untied(code, ev, [(10, "a.cpp"), (150, "b.cpp")])
         self.assertEqual(sorted(ev.edges), [(15, 15 + units.FILL_FUNCTIONS, "a.cpp's evidence ends"),
@@ -118,17 +118,40 @@ class UnitEvidenceTests(unittest.TestCase):
             cuts = [c.position for c in units.boundaries(code, ev)]
         self.assertEqual(cuts, [15, 140])
         near = units.Evidence({}, [(10, 14, "data")], [])
-        units._untied(code, near, [(10, "a.cpp"), (40, "b.cpp")])   # 25 between: one boundary, as before
+        units._untied(_Code(60), near, [(10, "a.cpp"), (40, "b.cpp")])   # 25 between: one boundary, as before
         self.assertEqual(near.edges, {})
 
     def test_a_file_s_code_reaches_over_the_inlines_after_it(self):
         """11-80 are weak (inlines and template instances, emitted after the code that first uses them) but for
         40-41, in no symbol table: a.cpp's evidence reaches over them all, and the run tied to neither file starts
         at 81, though it is in none either."""
-        code = _Code(200, weak=[i for i in range(11, 81) if i not in (40, 41)], unlisted=[40, 41, 81])
+        code = _Code(160, weak=[i for i in range(11, 81) if i not in (40, 41)], unlisted=[40, 41, 81])
         ev = units.Evidence({}, [], [])
         units._untied(code, ev, [(10, "a.cpp"), (150, "b.cpp")])
         self.assertEqual(sorted(ev.edges.values()), [81, 150])     # over 40-41 (unknown, among inlines), not 81
+
+    def test_the_module_s_start_and_end_bound_its_first_and_last_files(self):
+        """Code before the first file's evidence, or after the last's, tied to neither and longer than its reach,
+        is a unit of its own too (a start-up object, a library at the end); a boundary at the module's own start
+        or end is none."""
+        code = _Code(300)
+        ev = units.Evidence({}, [], [])
+        units._untied(code, ev, [(100, "a.cpp"), (110, "b.cpp")])
+        self.assertEqual(sorted(ev.edges), [(100 - units.FILL_FUNCTIONS, 100, "a.cpp's evidence starts"),
+                                            (111, 111 + units.FILL_FUNCTIONS, "b.cpp's evidence ends")])
+        near = units.Evidence({}, [], [])
+        units._untied(_Code(130), near, [(30, "a.cpp"), (110, "b.cpp")])     # 30 before, 19 after: in reach
+        self.assertEqual([why for _, _, why in near.edges], ["a.cpp's evidence ends", "b.cpp's evidence starts"])
+
+    def test_the_sdk_s_start_up_object_ends_at_its_markers(self):
+        from zkit.program import Function
+        code = _Code(60)
+        code.functions[5:7] = [Function(code.functions[5].address, 4, "__nnDetailNintendoSdkRuntimeObjectFileRefer"),
+                               Function(code.functions[6].address, 4, "__nnDetailNintendoSdkRuntimeObjectFile")]
+        ev = units.Evidence({}, [], [])
+        units._start_up_object(code, ev)
+        self.assertEqual([lo for lo, _, _ in ev.separations], [7])
+        self.assertEqual(ev.direct, set(ev.separations))
 
     def test_another_build_s_placeholder_is_no_piece_of_a_file(self):
         """`unit_<address>.cpp` is a unit no file names, not a piece of `unit.cpp`: it keeps its address as its
@@ -144,7 +167,7 @@ class UnitEvidenceTests(unittest.TestCase):
     def test_a_file_s_evidence_ends_at_a_boundary_within_its_reach(self):
         """Another boundary (a static initializer at 29) within reach of a.cpp's evidence is where a.cpp ends:
         no second boundary right after its evidence."""
-        code = _Code(200)
+        code = _Code(160)
         ev = units.Evidence({}, [(10, 14, "data")], [(30, 30, "29 is its unit's static initializer")])
         units._untied(code, ev, [(10, "a.cpp"), (150, "b.cpp")])
         with unittest.mock.patch.object(units, "_function_classes", return_value={}):

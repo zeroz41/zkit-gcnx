@@ -109,7 +109,29 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     ev = Evidence(local, joins, separations)
     _file_evidence(program, ev, placed)
     _initializer_ends(program, ev)
+    _start_up_object(program, ev)
     return ev
+
+
+SDK_MARKER = "__nnDetailNintendoSdk"   # NintendoSDK's own objects: `__nnDetailNintendoSdkRuntimeObjectFile`, ...
+
+
+def _start_up_object(program: Program, ev: Evidence) -> None:
+    """A NintendoSDK module starts with the SDK's start-up object (`_init`, `_fini`, their stubs), which ends with
+    the marker functions the SDK gives its objects (`__nnDetailNintendoSdkRuntimeObjectFile` and its `...Refer`):
+    the game's first unit starts after them."""
+    if program.platform.name != "switch":
+        return
+    last = None
+    for index, function in enumerate(program.functions[:32]):
+        if function.name.startswith(SDK_MARKER):
+            last = index
+        elif last is not None:
+            break
+    if last is not None and last + 1 < len(program.functions):
+        row = (last + 1, last + 1, f"{program.functions[last].name} ends the SDK's start-up object")
+        ev.separations.append(row)
+        ev.direct.add(row)
 
 
 def _initializer_ends(program: Program, ev: Evidence) -> None:
@@ -221,11 +243,15 @@ def _untied(program: Program, ev: Evidence, anchors: list[tuple[int, str]]) -> N
         right[p] = max(right[p], right[p - 1])
     for p in range(count - 2, -1, -1):
         left[p] = min(left[p], left[p + 1])
-    for (a, file_a), (b, file_b) in zip(anchors, anchors[1:]):
+    if not anchors:
+        return
+    starts.append(program.functions[-1].address + program.functions[-1].size)
+    bounded = [(-1, None), *anchors, (count, None)]     # the module's start and end bound the first and last files
+    for (a, file_a), (b, file_b) in zip(bounded, bounded[1:]):
         if file_a == file_b:
             continue
         end = a                                     # the last function tied to file_a's
-        while end < b - 1:
+        while file_a is not None and end < b - 1:
             if right[end] > end:
                 end = min(right[end], b - 1)
                 continue
@@ -236,7 +262,7 @@ def _untied(program: Program, ev: Evidence, anchors: list[tuple[int, str]]) -> N
                 break
             end = following
         start = b                                   # the first tied to file_b's
-        while left[start] < start and start > end + 1:
+        while file_b is not None and left[start] < start and start > end + 1:
             start = max(left[start], end + 1)
         first = end + 1
         if start - first <= FILL_FUNCTIONS and starts[start] - starts[first] <= FILL_BYTES:
@@ -249,6 +275,8 @@ def _untied(program: Program, ev: Evidence, anchors: list[tuple[int, str]]) -> N
             lo -= 1
         for row, side in (((first, hi, f"{file_a}'s evidence ends"), first),
                           ((lo, start, f"{file_b}'s evidence starts"), start)):
+            if row[0] <= 0 or row[1] >= count:       # at the module's start or end: no boundary there
+                continue
             ev.separations.append(row)
             ev.pairs[row], ev.edges[row] = (file_a, file_b), side
             (ev.direct if a not in ev.placed and b not in ev.placed else ev.borrowed).add(row)
