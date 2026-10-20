@@ -539,6 +539,8 @@ class SwitchSignatureTests(unittest.TestCase):
         self.assertRegex(text, rf"(?m)^_Z6callerPii = \.text:0x{at['_Z6callerPii']:08X}; // type:function ")
         self.assertRegex(text, rf"(?m)^_ZTV5Child = \.\w+:0x{at['_ZTV5Child']:08X}; // type:object size:0x30 ")
         self.assertRegex(text, rf"(?m)^g_counter = \.data:0x{at['g_counter']:08X}; // type:object size:0x4 ")
+        self.assertRegex(text, rf"(?m)^_Z6sharedi = \.text:0x{at['_Z6sharedi']:08X}; // .* scope:weak")  # inline
+        self.assertRegex(text, rf"(?m)^_Z4useri = \.text:0x{at['_Z4useri']:08X}; // .* scope:global")
         addresses = [int(line.split(":0x")[1][:8], 16) for line in text.splitlines()]
         self.assertEqual(addresses, sorted(addresses))
         splits = (self.root / "analysis" / "splits.txt").read_text()
@@ -553,6 +555,8 @@ class SwitchSignatureTests(unittest.TestCase):
         donor = signatures.build("earlier", elf, symbols, splits=splits)
         units = {s.key: s.unit for s in donor.signatures}
         self.assertEqual((units["_Z6sharedi"], units["_Z4useri"]), ("", "lib.cpp"))
+        weak = {s.key: s.weak for s in donor.signatures}
+        self.assertEqual((weak["_Z6sharedi"], weak["_Z4useri"]), (True, False))   # and a name keeps its binding
 
     def test_cache_keeps_the_layout(self):
         elf, symbols, _ = self.module("donor", SWITCH_DONOR, hide=False)
@@ -561,6 +565,8 @@ class SwitchSignatureTests(unittest.TestCase):
         loaded = signatures.load("earlier")
         self.assertEqual(loaded.layout, donor.layout)
         self.assertEqual([s.place for s in loaded.signatures], [s.place for s in donor.signatures])
+        self.assertEqual([s.weak for s in loaded.signatures], [s.weak for s in donor.signatures])
+        self.assertTrue(any(s.weak for s in loaded.signatures))
         self.assertTrue(signatures.remove("earlier"))
 
 

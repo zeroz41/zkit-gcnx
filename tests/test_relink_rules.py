@@ -121,6 +121,15 @@ class UnitEvidenceTests(unittest.TestCase):
         units._untied(code, near, [(10, "a.cpp"), (40, "b.cpp")])   # 25 between: one boundary, as before
         self.assertEqual(near.edges, {})
 
+    def test_a_file_s_code_reaches_over_the_inlines_after_it(self):
+        """11-80 are weak (inlines and template instances, emitted after the code that first uses them) but for
+        40-41, in no symbol table: a.cpp's evidence reaches over them all, and the run tied to neither file starts
+        at 81, though it is in none either."""
+        code = _Code(200, weak=[i for i in range(11, 81) if i not in (40, 41)], unlisted=[40, 41, 81])
+        ev = units.Evidence({}, [], [])
+        units._untied(code, ev, [(10, "a.cpp"), (150, "b.cpp")])
+        self.assertEqual(sorted(ev.edges.values()), [81, 150])     # over 40-41 (unknown, among inlines), not 81
+
     def test_a_file_s_evidence_ends_at_a_boundary_within_its_reach(self):
         """Another boundary (a static initializer at 29) within reach of a.cpp's evidence is where a.cpp ends:
         no second boundary right after its evidence."""

@@ -202,8 +202,17 @@ def _untied(program: Program, ev: Evidence, anchors: list[tuple[int, str]]) -> N
     """A file's evidence reaches through the data its code shares with the code after it, and a short way past
     that (`FILL_*`, as far as a gap between two of its citations is filled). Between two files, a longer run of
     code tied to neither is neither's: a library no string names, or files that cite nothing. It is a unit of its
-    own, with a boundary within reach of each file's evidence, until evidence names it."""
+    own, with a boundary within reach of each file's evidence, until evidence names it. Where the module (or the
+    build a name came from) marks inlines and template instances weak, clang emits each after the code that
+    first uses it, so the code before a run of them reaches over it, and over code of unknown binding (no
+    symbol, a placeholder name) between two of them."""
+    from .score import placeholder
     count, starts = len(program.functions), [f.address for f in program.functions]
+    weak = set(getattr(program.image, "weak", ())) | {f.address for f in program.functions if f.scope == "weak"}
+    bound = getattr(program.image, "symbols", None) or {}
+    inline = [f.address in weak for f in program.functions]
+    unknown = [not inline[i] and f.address not in bound and placeholder(f.name)
+               for i, f in enumerate(program.functions)]
     right, left = list(range(count)), list(range(count))   # the furthest function a join reaches from each one
     for lo, hi, _ in ev.joins:
         right[lo], left[hi] = max(right[lo], hi), min(left[hi], lo)
@@ -215,8 +224,16 @@ def _untied(program: Program, ev: Evidence, anchors: list[tuple[int, str]]) -> N
         if file_a == file_b:
             continue
         end = a                                     # the last function tied to file_a's
-        while right[end] > end and end < b - 1:
-            end = min(right[end], b - 1)
+        while end < b - 1:
+            if right[end] > end:
+                end = min(right[end], b - 1)
+                continue
+            following = end + 1
+            while inline[end] and following < b - 1 and unknown[following]:
+                following += 1
+            if not inline[following]:
+                break
+            end = following
         start = b                                   # the first tied to file_b's
         while left[start] < start and start > end + 1:
             start = max(left[start], end + 1)

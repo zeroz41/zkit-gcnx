@@ -193,6 +193,7 @@ class Signature:
     after: str | None = None
     place: int | None = None
     code: str = ""               # an original's function: its masked words (hex), to compare changed code
+    weak: bool = False           # an inline or a template instance: the copy the linker kept from some unit
 
     @property
     def name(self) -> str:
@@ -376,9 +377,10 @@ def add_program(donor: Donor, program: Program, units: list[tuple[int, int, str]
                     text = text_at(program.read, target)
                     token = ("s", text) if text is not None else None
             references.append(Reference(offset, kind, token))
-        own = "" if function.address in weak or function.scope == "weak" else unit_of(function.address)
-        found.append(Signature(named, shape.size, shape.shape, tuple(references), own, donor.name,
-                               place=first + index, code=shape.code.hex()))
+        inline = function.address in weak or function.scope == "weak"
+        found.append(Signature(named, shape.size, shape.shape, tuple(references), "" if inline else
+                               unit_of(function.address), donor.name, place=first + index, code=shape.code.hex(),
+                               weak=inline))
     _neighbours(found, order)
     donor.signatures += found
     # a table's slots: a function's key ("" when the donor does not name it), an import's name, None for any other
@@ -443,7 +445,7 @@ def add_object(donor: Donor, elf, unit: str = "") -> None:
                 places.append((word * 4, r.type))
                 references.append(Reference(word * 4, r.type, _object_token(elf, r, unit, donor.sizes)))
             found.append(Signature(named, len(words) * 4, digest(words, places), tuple(references), unit,
-                                   donor.name))
+                                   donor.name, weak=symbol.bind == "weak"))
         _neighbours(found, order)
         donor.signatures += found
 
@@ -574,8 +576,8 @@ def save(donor: Donor) -> Path:
     path = _path(donor.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [[s.shape, s.key, s.size, s.unit, s.before, s.after,
-             [[r.offset, r.kind, list(r.token) if r.token else None] for r in s.references], s.place, s.code]
-            for s in donor.signatures]
+             [[r.offset, r.kind, list(r.token) if r.token else None] for r in s.references], s.place, s.code,
+             s.weak] for s in donor.signatures]
     data = {"version": VERSION, "name": donor.name, "built": donor.built, "sources": donor.sources,
             "images": donor.images, "tables": donor.tables, "sizes": donor.sizes, "layout": donor.layout,
             "platform": donor.platform, "functions": rows}
@@ -596,8 +598,8 @@ def load(name: str) -> Donor:
     if data.get("version") != VERSION:
         raise ValueError(f"Signatures {name!r} were built by another zkit version; build them again")
     signatures = [Signature(k, size, shape, tuple(Reference(o, kind, tuple(t) if t else None) for o, kind, t in refs),
-                            unit, data["name"], before, after, place, code)
-                  for shape, k, size, unit, before, after, refs, place, code in data["functions"]]
+                            unit, data["name"], before, after, place, code, bool(weak and weak[0]))
+                  for shape, k, size, unit, before, after, refs, place, code, *weak in data["functions"]]
     return Donor(data["name"], signatures, data["tables"], data["sizes"], data["images"], data["sources"],
                  data["built"], data["layout"], data["platform"])
 
@@ -628,6 +630,7 @@ class Proposal:
     unit: str = ""                # the donor unit it was in, when the donors agree on one
     source: int | None = None     # the function (or table) whose reference named it
     agreed: int = 0               # references and neighbours the target agreed with when its shape matched
+    weak: bool = False            # every donor's function of that name is weak: an inline or template instance
 
 
 def _canonical(donors: list[Donor]) -> dict[str, str]:
@@ -943,7 +946,8 @@ class _State:
         self.proposals[address] = Proposal(address, display(named), kind, evidence,
                                            next(iter(sizes)) if len(sizes) == 1 else 0,
                                            tuple(sorted({s.donor for s in entries})),
-                                           next(iter(units)) if len(units) == 1 else "", source, agreed)
+                                           next(iter(units)) if len(units) == 1 else "", source, agreed,
+                                           kind == "function" and bool(entries) and all(s.weak for s in entries))
         self.changed = True
         return True
 
@@ -1388,9 +1392,10 @@ def renamed(program: Program, proposals: list[Proposal]) -> Program:
     from dataclasses import replace
     from .score import placeholder
     names = {p.address: p.name for p in proposals}
+    weak = {p.address for p in proposals if p.weak}
     out = Program(program.platform, program.image,
-                  [replace(f, name=names[f.address]) if f.address in names and placeholder(f.name) else f
-                   for f in program.functions],
+                  [replace(f, name=names[f.address], scope="weak" if f.address in weak else f.scope)
+                   if f.address in names and placeholder(f.name) else f for f in program.functions],
                   [replace(o, name=names[o.address]) if o.address in names and placeholder(o.name) else o
                    for o in program.objects], program.sda)
     out.labels, out.sections = program.labels, program.sections

@@ -14,6 +14,7 @@ the signatures alone.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -33,9 +34,11 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
         with_data = _with_objects(program, _new_objects(program, symbols, sizes, set(current)))
         named_program = signatures.renamed(with_data, named)       # the names say which class owns a function
         return {"units": units.propose(named_program, fixed, placed), "classes": None, "symbols": symbols,
-                "sizes": sizes, "signatures": named}     # the data named counts for the units' data
+                "sizes": sizes, "signatures": named,     # the data named counts for the units' data
+                "weak": {p.address for p in named if p.weak}}
     proposal = units.propose(program, fixed, placed)
-    result: dict[str, Any] = {"units": proposal, "classes": None, "symbols": {}, "signatures": named}
+    result: dict[str, Any] = {"units": proposal, "classes": None, "symbols": {}, "signatures": named,
+                              "weak": {p.address for p in named if p.weak}}
     program = signatures.renamed(program, named)
     tables = vtables.find(program)
     found = classes.recover(program, tables)
@@ -66,7 +69,7 @@ def write(program: Program, result: dict[str, Any], symbols_in: Path, folder: Pa
     from .gc import SYMBOL_LINE
     folder.mkdir(parents=True, exist_ok=True)
     units.write_splits(result["units"], folder / "splits.txt")
-    renamed = result["symbols"]
+    renamed, weak = result["symbols"], result.get("weak", set())
     lines, seen, starts = [], set(), set()
     for line in symbols_in.read_text(encoding="utf-8", errors="replace").splitlines():
         match = SYMBOL_LINE.match(line.strip())
@@ -81,6 +84,8 @@ def write(program: Program, result: dict[str, Any], symbols_in: Path, folder: Pa
             attrs = match["attrs"]
             if size:
                 attrs = _with_size(attrs, size)
+            if address in weak:                   # the donors' copy is an inline or a template instance
+                attrs = re.sub(r"\bscope:\w+", "scope:weak", attrs)
             lines.append(f"{name} = {match['section']}:0x{address:08X}; //{attrs}")
         else:
             lines.append(line)
