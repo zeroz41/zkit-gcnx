@@ -233,7 +233,8 @@ def lookup(data: dict) -> str:
         if slots:
             lines.append(f"pointers inside it ({len(slots)}" + (", first 48" if len(slots) > 48 else "") + "):")
             for slot in slots[:48]:
-                lines.append(f"  +0x{slot['offset']:X} (slot {slot['offset'] // 4}) -> {slot['target']}"
+                number = f" (slot {slot['slot']})" if slot.get("slot") is not None else ""
+                lines.append(f"  +0x{slot['offset']:X}{number} -> {slot['target']}"
                              + (f" [{slot['status']}]" if slot.get("status") else ""))
         rw = data.get("readers_writers") or []
         if rw:
