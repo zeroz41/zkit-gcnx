@@ -1,6 +1,6 @@
 ---
 name: zkit-clean-source
-description: Clean up a matching decomp's source without changing a single byte - turn decompiler output (extern "C" bodies, raw offsets, fake vtables, temporaries, placeholder names, re-typing macros) into real classes, members, fields and names, proven by object identity. Use when asked to clean, refactor, headerize or rename decomp source.
+description: Clean up a matching decomp's source without changing a single byte - turn decompiler output (extern "C" bodies on void *, call-site prototypes, raw offsets, fake vtables, temporaries, placeholder names, re-typing macros) into real classes, members, fields and names, proven by object identity. Use when asked to clean, refactor, headerize or rename decomp source.
 ---
 
 # Clean decomp source

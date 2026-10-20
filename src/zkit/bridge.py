@@ -1617,10 +1617,15 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
             removed_text = "\n".join(old for lines_added, removed in (hunks.get(rel) or []) for old in removed)
             header = Path(rel).suffix.lower() in quality.HEADER_SUFFIXES
             had = quality.count(removed_text, catalog, header=header)
+            externs = collections.defaultdict(list)   # read against the whole file: a forward declaration is fine
+            if not header and any(p.key == "extern_c" for p in catalog):
+                label = next(p.label for p in catalog if p.key == "extern_c")
+                for number, name in quality.extern_c_debt(texts[rel]):
+                    externs[number].append({"key": "extern_c", "label": label, "text": f'extern "C" {name}'})
             for number, line in enumerate(text_lines, 1):
                 if added is not None and number not in added:
                     continue
-                for found in quality.findings(line, catalog, header=header):
+                for found in quality.findings(line, catalog, header=header, skip=("extern_c",)) + externs[number]:
                     stats["debt_added"] += 1
                     old = had[found["key"]] > 0
                     if old:
