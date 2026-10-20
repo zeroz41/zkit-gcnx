@@ -709,15 +709,30 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     in the order of their code: a claim against that order is a reference from another unit, not ownership, and is
     dropped (the fewest claims that restore the order). A range always covers whole symbols. `fixed` ranges (a
     linker map's) take part in that order as `FIXED` claims each (the `firm` units' never give way: they have a
-    source); one that stands is kept as given, and no claim crosses it or adds to its unit in its section."""
+    source); one that stands is kept as given, and no claim crosses it or adds to its unit in its section. Weak
+    data (an inline's static, a template's member or table) is in every unit using it, and the linker keeps the
+    copy of the first in link order: it is that unit's."""
     from .link import LINKER_OBJECTS
+    order: dict[str, int] = {}                         # unit -> its place in link order (its first code)
+    ordered = set()                                    # .init code says nothing of where its unit is linked
+    for index in sorted(owner):
+        if owner[index] not in order:
+            order[owner[index]] = len(order)
+            if program.section_of(program.functions[index].address) != ".init":
+                ordered.add(owner[index])
+    weak = set(getattr(program.image, "weak", ()))
     claims: list[tuple[int, int, str, str]] = []
+    soft: list[tuple[int, int, str, str]] = []       # weak data: the first unit using it, where the order allows
     for o, fs in program.users().items():              # however far apart its users are: they are one unit's
         homes = {owner.get(i) for i in fs} - {None}
         if o.name in LINKER_OBJECTS or o.section in TABLES + ARRAYS + LINKER_SECTIONS:   # the linker's, or a
             continue                                                                    # table entry (below)
-        if len(homes) == 1 and not program.in_code(o.address):      # data in code is in its unit's code range
+        if program.in_code(o.address):                                  # data in code is in its unit's code range
+            continue
+        if len(homes) == 1:
             claims.append((o.address, o.address + max(o.size, 1), next(iter(homes)), o.section))
+        elif homes and (o.scope == "weak" or o.address in weak) and homes <= ordered:
+            soft.append((o.address, o.address + max(o.size, 1), min(homes, key=order.__getitem__), o.section))
     if program.platform.name == "gamecube":
         from .classes import recover
         from .vtables import find
@@ -728,13 +743,6 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
                 claims.append((address, address + tables[address].size, next(iter(homes)), ".data"))
         claims += _exception_tables(program, owner)
     claims += _through_data(program, ev, claims)
-    order: dict[str, int] = {}                         # unit -> its place in link order (its first code)
-    ordered = set()                                    # .init code says nothing of where its unit is linked
-    for index in sorted(owner):
-        if owner[index] not in order:
-            order[owner[index]] = len(order)
-            if program.section_of(program.functions[index].address) != ".init":
-                ordered.add(owner[index])
     out: list[tuple[int, int, str, str]] = []
     if program.platform.name == "gamecube":
         claims += _initializer_tables(program, owner)
@@ -745,7 +753,11 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     pinned = {row: FIRM if row[2] in firm else FIXED for row in fixed}
     for row in pinned:
         by_section[(row[3], _instance(program, row[0]))].append(row)
-    for (section, _), rows in by_section.items():
+    by_soft: dict[tuple[str, int], list] = collections.defaultdict(list)
+    for claim in soft:
+        by_soft[(claim[3], _instance(program, claim[0]))].append(claim)
+        by_section.setdefault((claim[3], _instance(program, claim[0])), [])
+    for (section, instance), rows in by_section.items():
         rows = sorted(r if r in pinned else _whole_symbols(program, [r])[0] for r in rows)
         if section in TABLES and len(rows) > 1 and rows[0] not in pinned and rows[0][2] in order and \
                 order[rows[0][2]] > min(order.get(r[2], 0) for r in rows[1:]):
@@ -759,6 +771,8 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
         fixed_units = {r[2] for r in stand}
         kept = [r for r in kept if r not in pinned and r[2] not in fixed_units
                 and not any(a < r[1] and r[0] < b for a, b, _, _ in stand)]
+        kept += _fitting(kept, _whole_symbols(program, by_soft.get((section, instance), [])), order, ordered,
+                         fixed_units, stand)
         spans: dict[str, list[int]] = {}
         for start, stop, unit, _ in kept:
             span = spans.setdefault(unit, [start, stop])
@@ -771,6 +785,25 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
             out.append(row)
             last = row
     out.sort()
+    return out
+
+
+def _fitting(kept: list[tuple[int, int, str, str]], soft: list[tuple[int, int, str, str]], order: dict[str, int],
+             ordered: set[str], fixed_units: set[str], stand: list) -> list[tuple[int, int, str, str]]:
+    """The `soft` claims that fit the link order of the `kept` ones where they lie: never one that would displace a
+    claim, since the unit that kept a weak object's copy may be one whose code no longer refers to it (its copy
+    of the inline using it was dropped for another unit's)."""
+    places = sorted((r[0], order[r[2]]) for r in kept if r[2] in ordered)
+    out = []
+    for row in sorted(soft):
+        if row[2] not in ordered or row[2] in fixed_units or any(a < row[1] and row[0] < b for a, b, _, _ in stand):
+            continue
+        at = bisect.bisect_left(places, (row[0], -1))
+        low = places[at - 1][1] if at else -1
+        high = places[at][1] if at < len(places) else 1 << 30
+        if low <= order[row[2]] <= high:
+            places.insert(at, (row[0], order[row[2]]))
+            out.append(row)
     return out
 
 

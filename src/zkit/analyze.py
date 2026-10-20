@@ -31,11 +31,12 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
     if program.platform.name != "gamecube":
         symbols = {p.address: (p.name, "function" if p.kind == "function" else "object", 0) for p in named}
         sizes = {p.address: p.size for p in named if p.kind == "object" and p.size}
-        with_data = _with_objects(program, _new_objects(program, symbols, sizes, set(current)))
+        weak = {p.address for p in named if p.weak}
+        with_data = _with_objects(program, _new_objects(program, symbols, sizes, set(current), weak))
         named_program = signatures.renamed(with_data, named)       # the names say which class owns a function
         return {"units": units.propose(named_program, fixed, placed), "classes": None, "symbols": symbols,
                 "sizes": sizes, "signatures": named,     # the data named counts for the units' data
-                "weak": {p.address for p in named if p.weak}}
+                "weak": weak}
     proposal = units.propose(program, fixed, placed)
     result: dict[str, Any] = {"units": proposal, "classes": None, "symbols": {}, "signatures": named,
                               "weak": {p.address for p in named if p.weak}}
@@ -89,7 +90,7 @@ def write(program: Program, result: dict[str, Any], symbols_in: Path, folder: Pa
             lines.append(f"{name} = {match['section']}:0x{address:08X}; //{attrs}")
         else:
             lines.append(line)
-    added = _added_objects(program, renamed, result.get("sizes", {}), starts)
+    added = _added_objects(program, renamed, result.get("sizes", {}), starts, weak)
     if added:                                     # in address order among the others
         keyed = [(int(m["address"], 16) if (m := SYMBOL_LINE.match(line.strip())) else -1, line) for line in lines]
         lines = [line for _, line in sorted(keyed + added, key=lambda row: row[0])]
@@ -120,10 +121,11 @@ def write(program: Program, result: dict[str, Any], symbols_in: Path, folder: Pa
 
 
 def _added_objects(program: Program, renamed: dict[int, tuple[str, str, int]], sizes: dict[int, int],
-                   starts: set[int]) -> list[tuple[int, str]]:
+                   starts: set[int], weak: set[int] = frozenset()) -> list[tuple[int, str]]:
     """(address, line) for each named data object the base symbols lack that the donors size."""
-    return [(o.address, f"{o.name} = {o.section}:0x{o.address:08X}; // type:object size:0x{o.size:X} scope:global")
-            for o in _new_objects(program, renamed, sizes, starts)]
+    return [(o.address, f"{o.name} = {o.section}:0x{o.address:08X}; // type:object size:0x{o.size:X} "
+                        f"scope:{'weak' if o.address in weak else 'global'}")
+            for o in _new_objects(program, renamed, sizes, starts, weak)]
 
 
 def _with_objects(program: Program, added: list) -> Program:
@@ -134,7 +136,7 @@ def _with_objects(program: Program, added: list) -> Program:
 
 
 def _new_objects(program: Program, renamed: dict[int, tuple[str, str, int]], sizes: dict[int, int],
-                 starts: set[int]) -> list:
+                 starts: set[int], weak: set[int] = frozenset()) -> list:
     """Each named data object the base symbols lack that the donors size: that size, cut at the next symbol and
     at the end of its section."""
     import bisect
@@ -161,7 +163,7 @@ def _new_objects(program: Program, renamed: dict[int, tuple[str, str, int]], siz
         if segment is not None:                   # a module's segment names the section
             section = segment.name
         section = section if section.startswith(".") else f".{section}"
-        out.append(DataObject(address, size, name, section))
+        out.append(DataObject(address, size, name, section, "weak" if address in weak else "global"))
     return out
 
 
