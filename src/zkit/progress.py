@@ -98,11 +98,12 @@ def _with_percents(counts: dict[str, int]) -> dict[str, Any]:
     return out
 
 
-def summary(report: dict) -> dict[str, Any]:
-    """Totals for the report, each objdiff progress category and each module."""
+def summary(report: dict, single: str | None = None) -> dict[str, Any]:
+    """Totals for the report, each objdiff progress category and each module (`single`: the target's one module,
+    which objdiff's report does not record)."""
     modules: dict[str, dict[str, int]] = {}
     for unit in report.get("units", []):
-        counts = modules.setdefault(module_of(unit), dict.fromkeys(COUNTERS, 0))
+        counts = modules.setdefault(module_of(unit, single), dict.fromkeys(COUNTERS, 0))
         own = measures(unit.get("measures"))
         own["total_units"] = own["total_units"] or 1
         own["complete_units"] = own["complete_units"] or int(bool((unit.get("metadata") or {}).get("complete")))
@@ -320,7 +321,7 @@ def progress(project: Project, target: str) -> dict[str, Any]:
     path = report_path(project, target)
     if not path.is_file():
         raise ValueError(f"No report at {path}: build the project (it writes objdiff's report)")
-    data = summary(load(path))
+    data = summary(load(path), single_module(project, target))
     data["target"] = target
     data["report_age_h"] = round((time.time() - path.stat().st_mtime) / 3600, 2)
     return data
