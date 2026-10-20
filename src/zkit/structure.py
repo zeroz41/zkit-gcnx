@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import bisect
 import collections
+import json
 import re
 from typing import Any
 
@@ -224,16 +225,22 @@ def blocked(project: Project, target: str | None = None, limit: int = 40) -> dic
         counts[2] += linked
     candidates = [name for name, (total, exact, linked) in per_unit.items() if total and exact == total and linked < total]
     linked_units = sum(1 for total, exact, linked in per_unit.values() if total and linked == total)
+    from .build import layout
+    config = project.target(target)
+    record = project.root(config["repository"]) / layout(target, config).dir / "link" / "link.json"
+    attempt = {}   # a Switch link's own reasons, unit by unit: what only a link attempt shows
+    if record.is_file():
+        attempt = {row["unit"]: row["why"] for row in json.loads(record.read_text(encoding="utf-8")).get("not_linked", [])}
     out = []
     for name in candidates:
         view = unit(project, name, target, limit=200)
         incoming = [{"symbol": d["name"], "section": d["section"], "from": [u for u, _ in d["refs_outside"][:4]]}
                     for d in view["data"] if d["refs_outside"]]
         literals = [o for o in view["outgoing"] if o["literal"]]
-        reasons = []
-        if incoming:
+        reasons = [f"the last link: {why}" for why in attempt.get(name, [])[:4]]
+        if incoming and not attempt:
             reasons.append(f"{len(incoming)} data symbol(s) used by other units")
-        if literals:
+        if literals and not attempt:
             reasons.append(f"uses {sum(o['symbol_count'] for o in literals)} literal(s) stored outside the unit")
         out.append({"unit": name, "functions": view["functions"], "incoming": incoming[:8],
                     "literals": [{"unit": o["unit"], "section": o["section"], "symbols": o["symbols"][:6]}

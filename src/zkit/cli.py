@@ -231,14 +231,17 @@ def build_parser() -> argparse.ArgumentParser:
                           "the target object's at the same place (renames made in the source)")
     c.add_argument("--write", action="store_true", help="rewrite the symbols file (default: list the renames)")
     c.add_argument("--limit", type=int, default=40)
-    c = add("link", help="Link the original back together with the project's CodeWarrior linker (GameCube) from "
-                         "delinked and compiled objects, and check the DOL against the original")
-    c.add_argument("--out", type=Path, required=True, help="folder for the objects, script, ELF and DOL")
+    c = add("link", help="Link the original back together from delinked and compiled objects and check it against "
+                         "the original: with the project's CodeWarrior linker (GameCube DOL), or by placing every "
+                         "compiled section where the original holds it (Switch NSO, segment hashes); the units it "
+                         "proves are marked linked in the report")
+    c.add_argument("--out", type=Path, required=True, help="folder for the objects, script, ELF and DOL, or the NSO")
     c.add_argument("--compiled", choices=("none", "units", "functions"), default="functions",
                    help="none: every unit delinked; units: compiled objects of complete units; functions (default): "
                         "also every exact function of the other units")
     c.add_argument("--splits", type=Path, help="default: the target's splits file")
     c.add_argument("--build", type=Path, help="the build.ninja holding the link command (default: the repository's)")
+    c.add_argument("--no-mark", action="store_true", help="Switch: leave the report as objdiff wrote it")
     c = add("asmfile", help="An assembly file of original functions for a decompiler (m2c): references as symbols, "
                             "labels, and the data they read (GameCube)")
     c.add_argument("addresses", nargs="+", help="addresses or names of functions")
@@ -266,7 +269,8 @@ def build_parser() -> argparse.ArgumentParser:
                                                            "decomp-permuter; Switch: LLVM, the project's clang), "
                                                            "each checked against its SHA-256 or commit")
     c = add("build", help="Build the project: target objects from the original, every unit with a source in src/, "
-                          "the objdiff report, and (GameCube) the relinked executable checked against the original")
+                          "the objdiff report, and the relinked executable checked against the original (GameCube: "
+                          "the DOL's SHA-1; Switch: the NSO's segment SHA-256s, marking the units it proves linked)")
     c.add_argument("targets", nargs="*", help="ninja targets (default: everything; also objects, compile, report, "
                                               "link, or one object)")
     c.add_argument("-j", "--jobs", type=int)
@@ -747,6 +751,12 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         return data, "\n".join(lines)
     if command == "link":
         from . import link
+        from .platform import for_target
+        if for_target(project.target(target)).name == "switch":
+            from . import nxlink
+            data = nxlink.link(project, target, args.out.expanduser().resolve(), args.compiled,
+                               args.splits.expanduser().resolve() if args.splits else None, not args.no_mark)
+            return data, render.nxlink(data)
         data = link.link(project, target, args.out.expanduser().resolve(), args.compiled,
                          args.splits.expanduser().resolve() if args.splits else None,
                          args.build.expanduser().resolve() if args.build else None)

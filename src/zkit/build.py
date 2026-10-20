@@ -413,11 +413,11 @@ def configure(project: Project, repository: str | None = None, only: str | None 
         summary[name] = {"units": len(units), "compiled": len(compiled), "objects": len(objects), "dir": paths.dir,
                          "report": report, "link": bool(linked), "objdiff": str(objdiff), "objdiff_written": wrote,
                          "notes": notes}
-    if groups["report"]:  # the browsable page of every report, current after each build
+    if groups["report"]:  # the browsable page of every report, current after each build (and link: it marks)
         reported = [name for name in names if summary[name]["report"]]
         ninja.rule("page", _command(zkit) + " report --out build/progress --targets " + _command(reported),
                    description="PAGE $out")
-        ninja.build([PAGE], "page", implicit=groups["report"])
+        ninja.build([PAGE], "page", implicit=groups["report"] + groups["link"])
         groups["progress"] = [PAGE]
         defaults.append(PAGE)
     # A source added or removed changes its folder's time: ninja then reconfigures before building.
@@ -539,8 +539,22 @@ def write_objdiff(path: Path, root: Path, units: list[str], compiled: set[str], 
 
 def _link(ninja: Ninja, project: Project, name: str, target: dict[str, Any], config: dict[str, Any], root: Path,
           paths: Layout, inputs: list[str], notes: list[str], zkit: list[str]) -> list[str]:
-    """The GameCube link and its check: `zkit link` relinks the executable from delinked and compiled objects
-    with the project's mwld, then the DOL's SHA-1 is compared with the pinned one. [DOL, check stamp], or []."""
+    """The link and its check. GameCube: `zkit link` relinks the executable from delinked and compiled objects
+    with the project's mwld, then the DOL's SHA-1 is compared with the pinned one ([DOL, check stamp]). Switch:
+    `zkit link` places the compiled objects into the original module, proves it identical (segment SHA-256s) and
+    marks the units it proves linked in the report ([NSO, its link.json]). [] when there is nothing to link."""
+    if config["platform"] == "switch":
+        if not paths.report or not any(i == paths.report for i in inputs):
+            notes.append("no link: it reads the report, and there is none")
+            return []
+        module = target.get("module") or name
+        ninja.rule("zkit_nxlink", _command(zkit) + " --target $target link --out $outdir",
+                   description="ZKIT LINK $target")
+        nso, record = f"{paths.link}/{module}.nso", f"{paths.link}/link.json"
+        splits = _relative(project.file(target["repository"], target["splits"]), root)
+        ninja.build([nso], "zkit_nxlink", implicit=[splits, *inputs], implicit_outputs=[record],
+                    variables={"target": name, "outdir": _command([paths.link])})
+        return [nso]
     if config["platform"] != "gamecube":
         return []
     if not has_link():
@@ -636,8 +650,12 @@ def build(project: Project, repository: str | None = None, only: str | None = No
             row["progress"] = {key: measures.get(key) for key in (
                 "matched_code_percent", "matched_data_percent", "matched_functions", "total_functions",
                 "complete_units", "total_units")}
-        stamp = root / row["dir"] / "ok"
+        stamp, record = root / row["dir"] / "ok", root / row["dir"] / "link" / "link.json"
         row["identical"] = stamp.is_file() if row["link"] else None
+        if row["link"] and record.is_file():   # Switch: the link's own record
+            linked = json.loads(record.read_text(encoding="utf-8"))
+            row["identical"] = linked.get("identical")
+            row["linked_units"] = len(linked.get("linked_units", []))
     return {**configured, "ok": code == 0, "ninja_exit": code, "downloaded": fetched}
 
 
@@ -653,7 +671,11 @@ def render(data: dict[str, Any]) -> str:
             lines.append(f"  matched: code {progress['matched_code_percent'] or 0:.2f}%, data "
                          f"{progress['matched_data_percent'] or 0:.2f}%, functions {progress['matched_functions'] or 0}"
                          f" of {progress['total_functions'] or 0}")
-        if row.get("identical") is not None:
+        if row.get("identical") is not None and "linked_units" in row:
+            lines.append("  rebuilt module: " + ("identical to the original (segment SHA-256s checked)"
+                                                 if row["identical"] else "NOT identical (see the link step above)")
+                         + f"; {row['linked_units']} units linked from source")
+        elif row.get("identical") is not None:
             lines.append("  relinked executable: " + ("identical to the original (SHA-1 checked)" if row["identical"]
                                                       else "not checked identical (see the link step above)"))
     if "ninja_exit" in data:

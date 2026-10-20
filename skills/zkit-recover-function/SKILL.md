@@ -27,8 +27,11 @@ The rules are `zkit contract decomp`; this is the loop. objdiff's report decides
 5. **Bank only what is identical and debt-free**, through the repo's banking tool, one tree build at a time.
 6. **Name on evidence** (the contract's "Names" rules). One inherited slot keeps one name across all overrides; a
    rename changes every spelling, callers included.
-7. **Link.** A unit is done when it links: `zkit unit --blocked` lists exact units that don't, with the
-   cross-unit data holding them.
+7. **Link.** A unit is done when it links: `zkit build` relinks the executable (GameCube: mwld and the DOL's
+   SHA-1; Switch: every compiled section placed into the module, its segment hashes checked) and marks the units
+   it proves. `zkit unit --blocked` lists exact units that don't, with the link's reasons or the cross-unit data
+   holding them. A link catches what a per-function match cannot: a `__FILE__` string that differs, a function
+   the object defines outside its unit.
 8. **Report the truth.** `zkit progress --since session` gives the session's real delta by address. Report
    matched, placed, named and linked separately; a byte match alone does not finish a class.
 

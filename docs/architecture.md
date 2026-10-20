@@ -15,7 +15,8 @@ answers      bridge.py (lookup, refs, port-plan, check) · inspect_dol.py (asm, 
              progress.py (reports, baselines, page) · quality.py · hygiene.py · session.py · activity.py
              native.py · fidelity.py · tiers.py · architecture.py · coverage.py (ports)
                 │
-structure    delink.py (objects per unit) · link.py (the original relinked) · units.py (unit boundaries)
+structure    delink.py (objects per unit) · link.py (a DOL relinked) · nxlink.py (a Switch module rebuilt)
+             units.py (unit boundaries)
              vtables.py · classes.py (classes)
              analyze.py (all of it into a folder) · score.py · mwmap.py (CodeWarrior maps) · cwnames.py (names)
              mapalign.py (a map of another build of the same code, where it lines up)
@@ -82,6 +83,20 @@ section (gap units for what no unit claims, fill symbols over bytes no symbol co
 to it), one link order agrees with every section's address order, and each delinked section takes the smallest
 alignment that lands it on its original address. A combined function whose compiled relocations reach other
 addresses than the original's stays delinked: the report can call a function exact whose calls go elsewhere.
+
+`nxlink.py` rebuilds a Switch module the same way without its linker, whose dynamic tables, GOT and import stubs
+could not be made to come out identical: each compiled section goes where the original holds it (by the name it
+defines, the unit's own copy when a name has several; a section no name places where the original's code reaches
+it; a template's COMDAT copy only in the unit that kept it), each literal of a mergeable section where the
+original's reference finds the same bytes, and each relocation resolves as the module's linker resolved it (a
+call to an import through its stub, a GOT load through the slot whose dynamic relocation holds the target, a
+pointer in data only where the original carries a dynamic relocation to the same address). The rebuilt module
+must equal the original and, on an NSO, each segment must hash to its header's SHA-256. A unit whose functions all
+match is linked when its object covers every byte of its ranges, alignment padding aside, and all of it linked
+identically; the build then marks it complete in objdiff's report, with its data matched (objdiff cannot pair a
+unit's string literals, which clang merges with every other unit's; the link places each one), keeping objdiff's
+own data counts under `zkit_link` for when it stops linking. The link catches what objdiff's per-function view
+cannot: a `__FILE__` that differs from the original's string, a function the object defines outside its unit.
 
 ### Units, classes and names
 
@@ -199,7 +214,7 @@ The contracts (`zkit contract decomp|port`) are the rules agents follow; the ski
   against what the tools zkit replaces produce; a change that scores worse does not ship.
 - **Read-only by default.** Only `handoff`, `report`, `delink`, `link`, `analyze`, `objects --save` and
   `cache --prune` write, and only to zkit's own folders or the folder named (`link` runs the project's linker
-  there). Builds, banking and emulators stay with each repo's own tools and the user's permission model.
+  there; on Switch it also marks the units it proves in the report). Builds, banking and emulators stay with each repo's own tools and the user's permission model.
 - **Downloads on request, pinned, per platform.** Only `--download` uses the network. Each tool is pinned to a
   hash or commit, and a target fetches only the tools its platform runs (GameCube: CodeWarrior, wibo, binutils,
   m2c, decomp-permuter; Switch: LLVM and the project's own clang; both: objdiff-cli). A new tool is added to the
