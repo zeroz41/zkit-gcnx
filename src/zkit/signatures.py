@@ -312,6 +312,8 @@ class Donor:
     built: str = ""
     layout: list[str | None] = field(default_factory=list)              # an original's shapes, function by function
     platform: str = ""                                                   # gamecube or switch (empty: unknown)
+    weak: list[str] = field(default_factory=list)                        # data keys that are weak (an inline's
+                                                                         # static, a template's member or table)
 
 
 def _units(rows: list[tuple[int, int, str]]):
@@ -373,6 +375,8 @@ def add_program(donor: Donor, program: Program, units: list[tuple[int, int, str]
                     token = ("n", name, target - holder.address)
                     if holder.size:
                         donor.sizes[name] = holder.size
+                    if (holder.address in weak or holder.scope == "weak") and name not in donor.weak:
+                        donor.weak.append(name)
                 else:
                     text = text_at(program.read, target)
                     token = ("s", text) if text is not None else None
@@ -580,7 +584,7 @@ def save(donor: Donor) -> Path:
              s.weak] for s in donor.signatures]
     data = {"version": VERSION, "name": donor.name, "built": donor.built, "sources": donor.sources,
             "images": donor.images, "tables": donor.tables, "sizes": donor.sizes, "layout": donor.layout,
-            "platform": donor.platform, "functions": rows}
+            "platform": donor.platform, "functions": rows, "weak": donor.weak}
     temporary = path.with_name(path.name + ".partial")
     with gzip.open(temporary, "wt", encoding="utf-8") as stream:
         json.dump(data, stream, separators=(",", ":"))
@@ -601,7 +605,7 @@ def load(name: str) -> Donor:
                             unit, data["name"], before, after, place, code, bool(weak and weak[0]))
                   for shape, k, size, unit, before, after, refs, place, code, *weak in data["functions"]]
     return Donor(data["name"], signatures, data["tables"], data["sizes"], data["images"], data["sources"],
-                 data["built"], data["layout"], data["platform"])
+                 data["built"], data["layout"], data["platform"], data.get("weak", []))
 
 
 def listed() -> list[str]:
@@ -665,6 +669,7 @@ class Matcher:
         self.tables: dict[str, list[list[str | None]]] = collections.defaultdict(list)
         self.sizes: dict[str, set[int]] = collections.defaultdict(set)
         same = _canonical(donors)
+        self.weak = {same.get(name, name) for donor in donors for name in donor.weak}
         for donor in donors:
             for signature in donor.signatures:
                 if same or any(r.token and r.token[0] == "s" and DRIVE.match(r.token[1]) for r in signature.references):
@@ -947,7 +952,8 @@ class _State:
                                            next(iter(sizes)) if len(sizes) == 1 else 0,
                                            tuple(sorted({s.donor for s in entries})),
                                            next(iter(units)) if len(units) == 1 else "", source, agreed,
-                                           kind == "function" and bool(entries) and all(s.weak for s in entries))
+                                           kind == "function" and bool(entries) and all(s.weak for s in entries)
+                                           or kind == "object" and named in self.m.weak)
         self.changed = True
         return True
 
@@ -1396,8 +1402,8 @@ def renamed(program: Program, proposals: list[Proposal]) -> Program:
     out = Program(program.platform, program.image,
                   [replace(f, name=names[f.address], scope="weak" if f.address in weak else f.scope)
                    if f.address in names and placeholder(f.name) else f for f in program.functions],
-                  [replace(o, name=names[o.address]) if o.address in names and placeholder(o.name) else o
-                   for o in program.objects], program.sda)
+                  [replace(o, name=names[o.address], scope="weak" if o.address in weak else o.scope)
+                   if o.address in names and placeholder(o.name) else o for o in program.objects], program.sda)
     out.labels, out.sections = program.labels, program.sections
     return out
 

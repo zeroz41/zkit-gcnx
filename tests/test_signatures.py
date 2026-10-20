@@ -339,6 +339,8 @@ int twin() { return 7; }
 __attribute__((noinline)) int inner(int x) { return x * 21 + 4; }
 __attribute__((noinline, visibility("default"))) inline int shared(int x) { return x * 41 + 9; }
 int user(int x) { return shared(x) + 1; }
+__attribute__((noinline, visibility("default"))) inline int &tally() { static int s_tally = 5; return s_tally; }
+int bump(int x) { return tally() += x * 3; }
 """
 # 3.0 of the same file: four functions changed, one added, one the linker no longer keeps
 SWITCH_TARGET = SWITCH_DONOR
@@ -541,10 +543,12 @@ class SwitchSignatureTests(unittest.TestCase):
         self.assertRegex(text, rf"(?m)^g_counter = \.data:0x{at['g_counter']:08X}; // type:object size:0x4 ")
         self.assertRegex(text, rf"(?m)^_Z6sharedi = \.text:0x{at['_Z6sharedi']:08X}; // .* scope:weak")  # inline
         self.assertRegex(text, rf"(?m)^_Z4useri = \.text:0x{at['_Z4useri']:08X}; // .* scope:global")
+        self.assertRegex(text, rf"(?m)^_ZZ5tallyvE7s_tally = \.\w+:0x{at['_ZZ5tallyvE7s_tally']:08X}; // .* scope:weak")
         addresses = [int(line.split(":0x")[1][:8], 16) for line in text.splitlines()]
         self.assertEqual(addresses, sorted(addresses))
         splits = (self.root / "analysis" / "splits.txt").read_text()
-        self.assertRegex(splits, rf"\.data +start:0x[0-9A-F]+ end:0x{at['g_counter'] + 4:08X}\n")  # its unit's
+        last = max(at['g_counter'], at['_ZZ5tallyvE7s_tally'])                      # and the inline's static
+        self.assertRegex(splits, rf"\.data +start:0x[0-9A-F]+ end:0x{last + 4:08X}\n")  # its unit's
 
     def test_a_weak_function_has_no_unit(self):
         """An inline function is the copy the linker kept from whichever unit came first, so the donor's unit

@@ -61,6 +61,15 @@ class UnitBoundsTests(unittest.TestCase):
         ev.pairs = {third: ("a.cpp", "lib/x.cpp")}
         self.assertEqual(units._stated(ev), [third, stated])
 
+    def test_weak_data_goes_where_the_order_allows(self):
+        """An inline's static (weak) is the first using unit's copy, where its claim fits the order of the
+        others; it never displaces one (the unit that kept the copy may not refer to it any more)."""
+        order = {"a": 0, "b": 1, "c": 2}
+        kept = [(0x10, 0x14, "a", ".bss"), (0x20, 0x24, "c", ".bss")]
+        soft = [(0x18, 0x1C, "b", ".bss"), (0x30, 0x34, "a", ".bss"), (0x40, 0x44, "c", ".bss")]
+        self.assertEqual(units._fitting(kept, soft, order, set(order), set(), []),
+                         [(0x18, 0x1C, "b", ".bss"), (0x40, 0x44, "c", ".bss")])   # a's after c's: not a's
+
     def test_claims_against_link_order_are_dropped(self):
         rows = [(0x10, 0x14, "a", ".data"), (0x14, 0x18, "c", ".data"), (0x18, 0x1C, "b", ".data"),
                 (0x1C, 0x20, "b", ".data"), (0x20, 0x24, "c", ".data")]
