@@ -148,8 +148,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--threads", type=int)
     c = add("data", help="Typed reads of original data (f32, u32, ptr, str, tables) by address or symbol")
     c.add_argument("address", nargs="+", help="address(es) or symbol name(s) (lbl_*, jumptable_*, __vt__*)")
-    c.add_argument("--type", default="u32", help="u8 s8 u16 s16 u32 s32 u64 s64 f32 f64 ptr str "
-                                              "(also string, hex, bytes, float, double, int, pointer)")
+    c.add_argument("--type", help="u8 s8 u16 s16 u32 s32 u64 s64 f32 f64 ptr str (also string, hex, bytes, float, "
+                                  "double, int, pointer); default u32, ptr where a 64-bit module relocates the words")
     c.add_argument("--count", type=int, help="elements, records or strings (default: the symbol's extent, else 16)")
     c.add_argument("--size", type=lambda v: int(v, 0), help="bytes to cover instead of --count")
     c.add_argument("--fields", help="Record layout, e.g. u32,f32,ptr,pad4")
