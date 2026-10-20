@@ -315,7 +315,8 @@ def lookup(data: dict) -> str:
     if data["recipes"]:
         out.append("fidelity recipes: " + ", ".join(data["recipes"]))
     if data.get("decompile"):
-        out.append(f"m2c's C: zkit m2c {f['address']} (MCP zkit_m2c); Ghidra's: zkit decompile {f['address']}")
+        out.append(f"m2c's C: zkit m2c {f['address']} (MCP zkit_m2c); Ghidra's: zkit decompile {f['address']}"
+                   if data.get("m2c", True) else f"Ghidra's C: zkit decompile {f['address']} (MCP zkit_decompile)")
     if data.get("body"):
         lo, hi = data["body_lines"]
         out.append(f"body ({f.get('source')}:{lo}-{hi}):")
