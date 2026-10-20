@@ -63,6 +63,32 @@ class LookupToolTests(unittest.TestCase):
             resolve_address(self.project, "TEnemy::upd")
         self.assertTrue(lookup(self.project, "TEnemy::upd")["ambiguous"])
 
+    def test_a_member_defined_inside_its_namespace_block(self):
+        import subprocess
+        from zkit.bridge import lookup, readiness_of, refs
+        from zkit.index import connect, containing
+        self.add_function("build__Q22gf4FlagFRCQ22gf5Param", "gf::Flag::build(gf::Param const&)", TEXT + 0x24, 4)
+        (self.decomp / "src/Enemy.cpp").write_text(
+            "void TEnemy::update() {\n}\nnamespace other {\nvoid Flag::build(const Param& param) {\n}\n}\n"
+            "namespace gf {\nvoid Flag::build(int a, int b) {\n}\n\nvoid Flag::build(const Param& param) {\n"
+            "    make(param);\n}\n}  // namespace gf\n", encoding="utf-8")
+        (self.decomp / "src/Flag.h").write_text("namespace gf {\nclass Flag {\npublic:\n"
+                                                "    static void build(const Param& param);\n};\n}\n", encoding="utf-8")
+        (self.decomp / "src/Other.h").write_text("class Other {\n    void build();\n};\n", encoding="utf-8")
+        (self.decomp / "docs/BUILD.md").write_text("Run the build first. Flag::build makes the flags.\n",
+                                                   encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(self.decomp)], check=True)
+        subprocess.run(["git", "-C", str(self.decomp), "add", "-A"], check=True)
+        data = lookup(self.project, "0x80003024", body=True)
+        self.assertEqual((data["function"]["source_line"], data["body_lines"]), (11, [11, 13]))
+        self.assertTrue(data["body"].startswith("void Flag::build(const Param& param) {"))
+        row = containing(connect(self.project), "t", TEXT + 0x24)
+        self.assertEqual(readiness_of(self.project, "t", row)["definition"], "src/Enemy.cpp:11")
+        found = {r["ref"]: r["kind"] for r in refs(self.project, "gf::Flag::build")["rows"]}
+        # the overload is the same name; other::Flag::build, Other::build and "the build" are not
+        self.assertEqual(found, {"decomp:src/Enemy.cpp:8": "definition", "decomp:src/Enemy.cpp:11": "definition",
+                                 "decomp:src/Flag.h:4": "declaration", "decomp:docs/BUILD.md:1": "use"})
+
     def test_pasted_queries_and_floor_of_near_misses(self):
         from zkit.bridge import split_queries, status_word
         self.assertEqual(split_queries("`0x80003000`,"), ["0x80003000"])

@@ -229,7 +229,8 @@ def check(project: Project, target: str, query: str, candidate: Path, force: boo
     repo = project.target(target)["repository"]
     catalog = quality.patterns(project, repo)
     lines = text.splitlines()
-    span = bridge.find_definition(lines, bridge.definition_names(row["name"], row["demangled"]))
+    span = bridge.find_definition(lines, bridge.definition_names(row["name"], row["demangled"]),
+                                  params=bridge.parameter_count(row["demangled"]))
     body = "\n".join(lines[span[0]:span[1] + 1]) if span else text
     out["judged"] = "the function's definition" if span else "the whole candidate (definition not found)"
     debt = quality.findings(body, catalog)

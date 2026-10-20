@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import bisect
 import collections
+import functools
 import hashlib
 import json
 import marshal
@@ -448,10 +449,12 @@ def _name_call(text: str, name: str) -> tuple[int, int] | None:
     return None
 
 
-def find_definition(lines: list[str], names: list[str], code: list[str] | None = None) -> tuple[int, int] | None:
+def find_definition(lines: list[str], names: list[str], code: list[str] | None = None,
+                    params: int | None = None) -> tuple[int, int] | None:
     """(first, last) 0-based line indexes of the first real definition of any of names.
 
-    Skips comments, declarations (`...;`), extern lines and call sites; the body is brace matched."""
+    Skips comments, declarations (`...;`), extern lines and call sites; the body is brace matched. When none is
+    found, a qualified name is looked for inside its namespace and class blocks (scoped_definition)."""
     code = code if code is not None else _code_lines(lines)
     plain = [n for n in names if n]
     for i, text in enumerate(code):
@@ -484,7 +487,33 @@ def find_definition(lines: list[str], names: list[str], code: list[str] | None =
                     if seen and depth == 0:
                         return i, k
         return i, min(len(code) - 1, i + 4000)
-    return None
+    return scoped_definition(lines, names, params)
+
+
+@functools.lru_cache(maxsize=16)
+def _qualified_definitions(text: str) -> dict[str, list]:
+    from .cxx import definitions
+    out = collections.defaultdict(list)
+    for definition in definitions(text):
+        out[definition.qualified].append(definition)
+    return dict(out)
+
+
+def scoped_definition(lines: list[str], names: list[str], params: int | None = None) -> tuple[int, int] | None:
+    """(name line, closing line) of a definition whose enclosing namespaces and classes and spelled name make one of
+    the qualified names: `void Flag::build() {` inside `namespace gf {` defines gf::Flag::build, not
+    other::Flag::build. Of several (overloads), the first declaring `params` parameters."""
+    from .cxx import arity
+    wanted = [n for n in names if n and "::" in n]
+    text = "\n".join(lines) if wanted else ""
+    if not any(n.rsplit("::", 1)[-1] in text for n in wanted):  # most misses never spell the name: no parse
+        return None
+    index = _qualified_definitions(text)
+    found = [d for n in wanted for d in index.get(n, [])]
+    if not found:
+        return None
+    best = next((d for d in found if params is None or arity(d.params) == params), found[0])
+    return best.line, best.end
 
 
 _SOURCES: collections.OrderedDict[str, tuple[tuple[int, int], list[str], list[str]]] = collections.OrderedDict()
@@ -513,6 +542,19 @@ def _source_text(path: Path) -> tuple[list[str], list[str]]:
     return cached[1], cached[2]
 
 
+def parameter_count(demangled: str | None) -> int | None:
+    """How many parameters a demangled signature lists; None for a bare name."""
+    from .cxx import arity
+    if not demangled or "(" not in demangled:
+        return None
+    text, depth = demangled.split("(", 1)[1], 1
+    for index, char in enumerate(text):
+        depth += (char == "(") - (char == ")")
+        if depth == 0:
+            return arity(text[:index])
+    return None
+
+
 def definition_names(name: str | None, demangled: str | None) -> list[str]:
     names = [name] if name else []
     if demangled:
@@ -534,7 +576,7 @@ def source_definition(project: Project, repo: str, source: str | None, name: str
     if not path.is_file():
         return None
     lines, code = _source_text(path)
-    found = find_definition(lines, definition_names(name, demangled), code)
+    found = find_definition(lines, definition_names(name, demangled), code, parameter_count(demangled))
     if not found:
         return None
     first, last = found
@@ -582,15 +624,16 @@ def header_definition(project: Project, repo: str, name: str | None, demangled: 
     except sqlite3.Error:
         return None
     declaration = re.compile(rf"^\s*(?:class|struct)\s+(?:\w+\s+)*{re.escape(owner_name)}\b(?!\s*;)")
-    # An out-of-line definition in another file (a TU's #included .inc fragment): `Class::method(` anywhere.
+    # An out-of-line definition in another file (a TU's #included .inc fragment): `Class::method(` anywhere, also
+    # inside a namespace block.
     qualified = f"{owner}::{method}"
     try:
-        elsewhere = files(qualified) if "<" not in owner else set()
+        elsewhere = files(f"{owner_name}::{method}") if "<" not in owner else set()
     except sqlite3.Error:
         elsewhere = set()
     for path in sorted(elsewhere):
         lines, code = _source_text(project.file(repo, path))
-        found = find_definition(lines, [qualified], code)
+        found = find_definition(lines, [qualified], code, parameter_count(demangled))
         if found:
             return {"path": path, "line": found[0] + 1, "end": found[1] + 1,
                     "body": "\n".join(lines[found[0]:found[1] + 1])}
@@ -1861,10 +1904,34 @@ def reuse(project: Project, repo: str, terms: list[str] | None = None, min_files
 # ----------------------------------------------------------------------------
 # References in source: where a function or global is defined, declared and used.
 
+def _spellings(name: str) -> set[str]:
+    """A qualified name and each shorter tail of it: gf::Flag::build, Flag::build (as defined inside
+    `namespace gf {`) and build."""
+    if "<" in name:
+        return {name, name.rsplit("::", 1)[-1]}
+    parts = name.split("::")
+    return {"::".join(parts[i:]) for i in range(len(parts))}
+
+
+def _scope_spans(path: Path, scope: str) -> list[tuple[int, int]]:
+    """(first, last) 0-based lines of a C/C++ file inside the namespace or class `scope` (or one whose name ends
+    with it) or inside the body of a member of it: where a name it qualifies may be spelled without `scope::`."""
+    from .cxx import scan
+    try:
+        found, blocks = scan(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return []
+    same = lambda name: name == scope or name.endswith("::" + scope)
+    return [(b.open, b.end) for b in blocks if b.kind != "extern" and b.name and same(b.name)] + \
+        [(d.start, d.end) for d in found if "::" in d.qualified and same(d.qualified.rsplit("::", 1)[0])]
+
+
 def refs(project: Project, query: str, target: str | None = None, repo: str | None = None,
          limit: int = 60) -> dict[str, Any]:
-    """Every source line that spells a function or data symbol (mangled name, Class::method, the bare method name
-    beside its class, or the address in a placeholder name), classified as definition, declaration or use."""
+    """Every source line that spells a function or data symbol (mangled name, qualified name, a shorter tail of it
+    where the qualifier it leaves out is in scope, the bare name also beside its class, or the address in a
+    placeholder name), classified as definition, declaration or use."""
+    from . import quality
     target = default_target(project, target) if project.config.get("targets") else None
     repos = [repo] if repo else list(project.config["repositories"])
     spellings: set[str] = set()
@@ -1880,17 +1947,19 @@ def refs(project: Project, query: str, target: str | None = None, repo: str | No
                 spellings.add(row["name"])
                 base = (row["demangled"] or "").split("(")[0].strip()
                 if base:
-                    spellings.add(base)
-                    spellings.add(base.rsplit("::", 1)[-1])
+                    spellings |= _spellings(base)
             else:
                 symbol = _symbol_lookup(project, target, found[0])
                 if symbol:
                     spellings.add(symbol["name"])
             spellings.add(address_text(found[0])[2:] if found[0] < 1 << 32 else f"{found[0] & 0xFFFFFFFF:X}")
     if not spellings:
-        spellings.add(query.strip())
-    method = next((s.rsplit("::", 1)[-1] for s in spellings if "::" in s), None)
-    owner = next((s.rsplit("::", 1)[0].rsplit("::", 1)[-1] for s in spellings if "::" in s), None)
+        spellings |= _spellings(query.strip())
+    qualified = max((s for s in spellings if "::" in s), key=len, default="")
+    method, owner = qualified.rsplit("::", 1)[-1], qualified.rpartition("::")[0].rsplit("::", 1)[-1]
+    left_out = {s: qualified[:-len(s) - 2] for s in spellings if qualified.endswith("::" + s)}  # tail -> qualifier
+    member = re.compile(rf"(?:->|\.)\s*{re.escape(method)}\b")
+    spans: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
     rows, total = [], 0
     for name in repos:
         config = project.config["repositories"][name]
@@ -1909,8 +1978,18 @@ def refs(project: Project, query: str, target: str | None = None, repo: str | No
                    or s in text and "::" in s]
             if not hit:
                 continue
-            if method and hit == [method] and owner and owner not in text and "->" not in text and "." not in text:
-                continue  # the bare method name, with no sign of its class: another class's member
+            if all(s in left_out for s in hit):  # only tails: is the qualifier each leaves out in scope here?
+                source = Path(path).suffix.lower() in quality.SOURCE_SUFFIXES
+                for s in hit:
+                    if s == method and (owner in text or member.search(text)) or not source and "::" in s:
+                        break
+                    if source:
+                        if (name, path, left_out[s]) not in spans:
+                            spans[name, path, left_out[s]] = _scope_spans(root / path, left_out[s])
+                        if any(first <= int(number) - 1 <= last for first, last in spans[name, path, left_out[s]]):
+                            break
+                else:
+                    continue  # another class's or namespace's name
             total += 1
             stripped = text.strip()
             kind = "use"
