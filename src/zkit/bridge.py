@@ -1615,11 +1615,12 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
         if decomp_gate and decomp_gate != "off" and quality._keep(rel, exclude) and any(
                 rel == r or rel.startswith(r.rstrip("/") + "/") for r in roots):
             removed_text = "\n".join(old for lines_added, removed in (hunks.get(rel) or []) for old in removed)
-            had = quality.count(removed_text, catalog)
+            header = Path(rel).suffix.lower() in quality.HEADER_SUFFIXES
+            had = quality.count(removed_text, catalog, header=header)
             for number, line in enumerate(text_lines, 1):
                 if added is not None and number not in added:
                     continue
-                for found in quality.findings(line, catalog):
+                for found in quality.findings(line, catalog, header=header):
                     stats["debt_added"] += 1
                     old = had[found["key"]] > 0
                     if old:

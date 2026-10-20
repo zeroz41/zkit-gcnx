@@ -80,5 +80,15 @@ class ItaniumClassTests(unittest.TestCase):
         self.assertNotIn("virtual int get", header)                      # inherited: not redeclared
 
 
+class HeaderDebtTests(unittest.TestCase):
+    def test_a_header_declares_virtuals_a_source_file_must_not(self):
+        from zkit import quality
+        line = "    virtual void update(fw::UpdateInfo const&);"
+        keys = {f["key"] for f in quality.findings(line, quality.DEFAULT_PATTERNS)}
+        self.assertIn("local_virtual", keys)                              # in a .cpp: a stand-in class
+        keys = {f["key"] for f in quality.findings(line, quality.DEFAULT_PATTERNS, header=True)}
+        self.assertNotIn("local_virtual", keys)                           # in its class's header: the class
+
+
 if __name__ == "__main__":
     unittest.main()
