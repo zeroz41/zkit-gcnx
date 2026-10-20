@@ -99,5 +99,39 @@ class ModuleDataTests(unittest.TestCase):
                           if row["section"] in (".dynamic", ".eh_frame", ".dynsym")])  # the linker's, nobody's
 
 
+GOT_SOURCE = """extern int g_ext;
+int g_local = 3;
+void report();
+void *g_table[] = {(void *)&report, (void *)&g_local};
+int use() { report(); return g_ext + g_local; }
+"""
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class GotTests(unittest.TestCase):
+    def test_the_got_holds_no_data_and_code_reaching_through_it_refers_to_what_it_holds(self):
+        """Default visibility: lld writes a .got right after .dynamic, and use() loads g_local's address from it."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "got.cpp").write_text(GOT_SOURCE, encoding="utf-8")
+            flags = [f for f in FLAGS if f != "-fvisibility=hidden"]
+            subprocess.run([CLANG, *flags, str(root / "got.cpp"), "-o", str(root / "got.o")], check=True,
+                           capture_output=True)
+            subprocess.run([LLD, "-shared", "--no-relax", "--unresolved-symbols=ignore-all", str(root / "got.o"),
+                            "-o", str(root / "got.elf")], check=True, capture_output=True)
+            elf, module = Elf.load(root / "got.elf"), nx.load(root / "got.elf")
+        sections = {s.name: (s.address, s.address + s.size) for s in elf.sections if s.name}
+        self.assertEqual((module.tables[".got"], module.tables[".got.plt"]), (sections[".got"], sections[".got.plt"]))
+        at = {s.name: s for s in elf.symbols if s.name}
+        got = range(*sections[".got"])
+        pointers = list(Switch(0).data_pointers(module))
+        self.assertFalse([h for h, _ in pointers if h in got])
+        self.assertIn((at["g_table"].value + 8, at["g_local"].value), pointers)   # a table's pointer is still data
+        refs = Switch(0).addresses(module, at["_Z3usev"].value, at["_Z3usev"].size, {})
+        self.assertIn(at["g_local"].value, [a for _, a, _ in refs])
+        self.assertFalse([a for _, a, _ in refs if a in got])
+        self.assertIn(".got", {section for _, _, section, _ in nxdata.linker_tables(module)})
+
+
 if __name__ == "__main__":
     unittest.main()

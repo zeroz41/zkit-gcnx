@@ -37,7 +37,7 @@ from .platform import GameCube, Platform, for_target
 from .project import Project
 
 SCHEMA = 7
-CALLS_VERSION = 2  # bump when the decoding of calls/xrefs changes (2: r2/r13 read from all of __init_registers)
+CALLS_VERSION = 3  # bump when the decoding of calls/xrefs changes (3: a Switch GOT slot refers to what it holds)
 TEXT_SUFFIXES = {".md", ".txt", ".c", ".h", ".cc", ".cpp", ".hpp", ".hh", ".inc", ".json", ".py",
                  ".s", ".cmake", ".toml", ".yaml", ".yml", ".lua", ".rs", ".cs", ".glsl", ".hlsl"}
 SKIP_DIRS = {"__pycache__", "node_modules"}
