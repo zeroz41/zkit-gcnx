@@ -25,9 +25,10 @@ compare without a drive letter (`evidence_text`). Code that differs from a donor
 (`gaps`), the functions of one shape, or of one such family, pair in order (or, more copies of one shape on one
 side, by their references), and what is left pairs as changed code: one on each side, the pair that shares by far
 the most of what it refers to, or, aligned in order, the pair whose code is by far the most alike. A
-function whose code changed still calls what it called: its one unnamed callee is its donors' one unclaimed callee
-(`calls`). Every name is then checked: an address two pieces of evidence name differently, and a name two addresses
-claim, are withdrawn, and the matching runs again without them.
+function whose code changed still calls what it called: its one unnamed callee is its donors' one unclaimed callee,
+and its calls pair with its donors' in order between the calls both name (`calls`, `call_order`). Every name is
+then checked: an address two pieces of evidence name differently, and a name two addresses claim, are withdrawn,
+and the matching runs again without them.
 
 On the Switch a shape clears what `aarch64.code_relocations` relocates (calls and branches out of the function,
 adrp pages and the low halves paired with them, adr and literal loads), and a class table is an Itanium `_ZTV`
@@ -1151,9 +1152,7 @@ class _State:
         was added). A gap whose matches would cross is left alone. What is left on both sides then pairs as changed code
         (`changed_code`)."""
         functions, index = self.m.program.functions, self.m.program.function_index
-        rows = sorted((a, a + max(max(self.m.sizes.get(k, {1})), 1), k) for a, k in self.known.items()
-                      if a not in index)
-        extents = ([r[0] for r in rows], rows)          # the data named so far, by its donors' size
+        extents = self.data_extents()
         anchors: dict[str, list[tuple[int, int]]] = collections.defaultdict(list)
         for address, named in self.known.items():
             if address not in index:
@@ -1325,11 +1324,15 @@ class _State:
 
     def calls(self) -> None:
         """A named function whose code changed still calls what its donors' code calls: when one function it
-        calls is unnamed and one function its donors call is unclaimed, they are one function (of a plausible
-        size), unless another caller says otherwise."""
+        calls is unnamed and one function its donors call is unclaimed, they are one function, and its calls pair
+        with its donors' in order (`call_order`). A caller one of whose pairings in order more callers contradict
+        (another name for its callee, or another callee for its name) is misaligned, an update having moved its
+        calls, and names nothing in order. Each pairing left needs no other caller saying otherwise, and a
+        plausible size or, where an update grew or split the callee, what it refers to (`still_refers`)."""
         from . import aarch64
         kinds = {ppc.REL24, aarch64.CALL26, aarch64.JUMP26}
         found: dict[int, dict[str, int]] = collections.defaultdict(dict)
+        ordered: dict[int, set[tuple[int, str]]] = {}              # caller -> its (callee, key) pairings in order
         for address, named in list(self.known.items()):
             shape, entries = self.m.shapes.get(address), self.m.by_key.get(named, ())
             if shape is None or not entries or any(e.shape == shape.shape for e in entries):
@@ -1341,11 +1344,80 @@ class _State:
                                 and r.token[1] not in self.banned_keys) for e in entries}
             if len(ours) == 1 and len(theirs) == 1 and len(next(iter(theirs))) == 1:
                 found[next(iter(ours))][next(iter(next(iter(theirs))))] = address
+            pairs = set(self.call_order(shape, entries, kinds))
+            if pairs:
+                ordered[address] = pairs
+        support = collections.Counter(pair for pairs in ordered.values() for pair in pairs)
+        names, targets = collections.defaultdict(dict), collections.defaultdict(dict)
+        for (target, key), count in support.items():
+            names[target][key], targets[key][target] = count, count
+        beaten = lambda t, k: any(n > support[(t, k)] for other, n in names[t].items() if other != k) or \
+            any(n > support[(t, k)] for other, n in targets[k].items() if other != t)
+        for address, pairs in ordered.items():
+            if not any(beaten(t, k) for t, k in pairs):
+                for target, key in pairs:
+                    found[target].setdefault(key, address)
+        extents = None
         for target, keys in found.items():
             if len(keys) == 1:
                 (named, source), = keys.items()
                 if self.plausible(target, named):
                     self.name(target, named, "function", "call", source)
+                    continue
+                if extents is None:
+                    extents = self.data_extents()
+                if self.still_refers(target, named, source, kinds, extents):
+                    self.name(target, named, "function", "call+references", source)
+
+    def data_extents(self):
+        """The data named so far, by its donors' size, as `target_uses` reads it."""
+        index = self.m.program.function_index
+        rows = sorted((a, a + max(max(self.m.sizes.get(k, {1})), 1), k) for a, k in self.known.items()
+                      if a not in index)
+        return [r[0] for r in rows], rows
+
+    def still_refers(self, target: int, named: str, source: int, kinds: set[int], extents) -> bool:
+        """A callee whose size changed past `plausible` is still its donors' function when it shares at least
+        `SHARED_BITS` of what it refers to with them and over twice what it shares with any other function its
+        caller's donors call: a caller's call site stays when an update replaces the callee with a new wrapper,
+        but the wrapper refers to other things. (On Xenoblade 2's 3.0.1 against 1.0.0, the callees this kept
+        that cite one source file cite the file their donor function cites, 11 of 11.)"""
+        ours = self.target_uses(target, extents)
+        shared = lambda key: max((sum(self.m.weight(u) for u in ours & self.m.uses(s))
+                                  for s in self.m.by_key.get(key, ())), default=0.0)
+        mine = shared(named)
+        if mine < SHARED_BITS:
+            return False
+        others = {r.token[1] for e in self.m.by_key.get(self.known.get(source), ()) for r in e.references
+                  if r.kind in kinds and r.token and r.token[0] == "n" and r.token[1] in self.m.by_key
+                  and r.token[1] != named}
+        return all(2 * shared(other) < mine for other in others)
+
+    def call_order(self, shape: Shape, entries: list[Signature], kinds: set[int]) -> list[tuple[int, str]]:
+        """(callee, key) pairs of a function whose code changed: its calls in order against its donors' (where
+        they agree), anchored where both name the same function (difflib's matching blocks); between two anchors
+        (or an anchor and an end), as many calls on both sides pair in order, an unnamed callee with an unclaimed
+        donor callee. An update that adds a call next to its neighbours' calls leaves the counts unequal there.
+        (On Xenoblade 2's 3.0.1 against 1.0.0, hiding half the callees named by their code, this named 1,475 of
+        them again in each of three draws and named 1 or 2 otherwise.)"""
+        import difflib
+        rows = {tuple(r.token[1] if r.token and r.token[0] == "n" and r.token[1] in self.m.by_key else None
+                      for r in e.references if r.kind in kinds) for e in entries}
+        if len(rows) != 1:
+            return []
+        theirs = next(iter(rows))
+        ours = [t for _, kind, t in shape.references if kind in kinds and t in self.m.extent]
+        a = [self.known.get(t) or ("?", i) for i, t in enumerate(ours)]
+        b = [k if k is not None else ("?", -1 - j) for j, k in enumerate(theirs)]
+        pairs, i0, j0 = [], 0, 0
+        for i1, j1, size in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+            if i1 - i0 == j1 - j0:
+                for t, named in zip(ours[i0:i1], theirs[j0:j1]):
+                    if named is not None and t not in self.known and t not in self.banned_addresses \
+                            and named not in self.owner and named not in self.banned_keys:
+                        pairs.append((t, named))
+            i0, j0 = i1 + size, j1 + size
+        return pairs
 
     def strings(self) -> None:
         """Functions whose shape matched nothing, by the exact set of texts they refer to, where one donor name

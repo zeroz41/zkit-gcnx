@@ -516,6 +516,48 @@ class SwitchSignatureTests(unittest.TestCase):
         self.assertEqual(found.get(at["_Z4sumAP1Si"]), ("_Z4sumAP1Si", "layout"))
         self.assertEqual(found.get(at["_Z4sumBP1Si"]), ("_Z4sumBP1Si", "layout"))
 
+    def test_calls_pair_in_order(self):
+        """An update changed a function and three it calls, and added a fourth call: nothing else places the
+        callees (four changed or new functions against three in one gap, too short to compare), so its calls name
+        them, in order between the calls both builds name. The new call and the one after it pair with nothing
+        (one side has two calls there, the other one); once its neighbours are named, its place names the last."""
+        bodies = ("{ int t = 1; for (int i = 0; i < n; i++) t = t * 31 + (v[i] >> 2) - i;\n"
+                  "  for (int i = n - 1; i >= 0; i--) t ^= v[i] * (i + 3); return t ^ 0x1234; }\n",
+                  "{ int t = 9; for (int i = 0; i < n; i++) t = t * 17 - (v[i] << 3) + i;\n"
+                  "  for (int i = 0; i < n; i++) t += v[i] * v[i]; return t ^ 0x4321; }\n",
+                  "{ int t = 5, u = 9; for (int i = 0; i < n; i++) { t = t * 37 + (v[i] ^ 0x15) - (i << 2);\n"
+                  "  u += t >> 3; } for (int i = 0; i < n; i += 2) u ^= v[i] * 11; return t + u * 7 + n; }\n",
+                  "{ for (int i = 1; i < n; i++) { int j = (v[i] * 7 + i) % n; int x = v[i]; v[i] = v[j];\n"
+                  "  v[j] = x + 5; } int s = 0; for (int i = 0; i < n; i++) s = s * 13 + v[i]; return s; }\n")
+        # clang lays functions out as it first meets them: anchor, mid, first, driver, then driver's callees
+        source = ("#define NI __attribute__((noinline))\n"
+                  "NI int anchor(int *v, int n) " + bodies[2] + "NI int mid(int *v, int n) " + bodies[3] +
+                  "int first(int *v, int n) " + bodies[0] +
+                  "NI int alpha(int x); NI int beta(int x); NI int gamma_(int x); NI int extra(int x);\n"
+                  "int driver(int *v, int n) { int t = anchor(v, n); t += alpha(t); t ^= beta(t); t += mid(v, t);\n"
+                  "  @EXTRA@ t -= gamma_(t); return t * 9; }\n"
+                  "int last(int *v, int n) " + bodies[1] +
+                  "NI int alpha(int x) { return @A@; }\nNI int beta(int x) { return @B@; }\n"
+                  "@NEW@NI int gamma_(int x) { return @C@; }\n@OLD@")
+        alpha, beta, gamma = ("((x * 3 + 1) ^ (x >> 7)) - (x & 0x3C) * (x | 5)",
+                              "((x ^ (x >> 5)) * 7 - (x >> 9)) | ((x << 3) + 11)",
+                              "(((x << 4) - x / 3) & (x >> 2)) + x % 13")
+        earlier = (source.replace("@EXTRA@", "").replace("@A@", alpha).replace("@B@", beta).replace("@C@", gamma)
+                   .replace("@NEW@", "").replace("@OLD@", "NI int dropped(int x) { return x % 7 + (x & 12); }\n"))
+        later = (source.replace("@EXTRA@", "t += extra(t);").replace("@A@", alpha + " + 9")
+                 .replace("@B@", beta + " - 4").replace("@C@", gamma + " - 2")
+                 .replace("@NEW@", "NI int extra(int x) { return x / 9 - (x << 1); }\n").replace("@OLD@", ""))
+        elf, symbols, _ = self.module("donor", earlier, hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        elf, symbols, at = self.module("target", later, hide=True)
+        found = {p.address: (p.name, p.evidence)
+                 for p in signatures.propose(Program.from_symbols(Switch(), elf, symbols), [donor])}
+        self.assertEqual(found.get(at["_Z6driverPii"]), ("_Z6driverPii", "layout+code"))
+        self.assertEqual(found.get(at["_Z5alphai"]), ("_Z5alphai", "call"))
+        self.assertEqual(found.get(at["_Z4betai"]), ("_Z4betai", "call"))
+        self.assertNotIn(at["_Z5extrai"], found)
+        self.assertEqual(found.get(at["_Z6gamma_i"]), ("_Z6gamma_i", "layout+code"))
+
     def test_aligned_slots(self):
         same = signatures.aligned(list("abcdef"), list("abcdef"))
         self.assertEqual(same, [(i, i) for i in range(6)])
