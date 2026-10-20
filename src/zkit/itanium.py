@@ -141,9 +141,15 @@ def _parts(qualified: str) -> list[str]:
 def _groups(program: Program, address: int, size: int) -> list[Group]:
     """A table's groups. Its symbol's size can stop short (an address inside it started another object), so
     slots run on while they are functions, and groups while their offset-to-top is not zero: the next table's
-    first group has a zero one."""
+    first group has a zero one. Never into an object a symbol names past its end (a table of member function
+    pointers after it holds functions too)."""
+    from .score import placeholder
     from .signatures import itanium_slots
     image, starts = program.image, program.function_index
+    named = program.cache.get("named object starts")
+    if named is None:
+        named = program.cache["named object starts"] = {o.address for o in program.objects
+                                                         if not placeholder(o.name)}
     out, at = [], 0
     while True:
         start = address + 8 * at
@@ -158,6 +164,8 @@ def _groups(program: Program, address: int, size: int) -> list[Group]:
         slots: list[int | str] = []
         index = at + 2
         while True:
+            if 8 * index >= size and address + 8 * index in named:
+                break                                  # another object's start
             slot = itanium_slots(image, address + 8 * (index - 2), 1, starts)
             if not slot or slot[0][0] == "other":
                 break
