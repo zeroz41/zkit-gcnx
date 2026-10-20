@@ -5,9 +5,15 @@ that fact holds:
 - **file strings** (every platform): code citing one source path (`__FILE__` in asserts and logs) belongs to that
   file's unit; functions between two of the same file belong to it too; a function only one unit calls, placed
   beside it, is that unit's static helper. A header path is an inline compiled into its user, never an anchor.
+- **classes** (a module whose symbol table marks inlines and template instances weak): a class's strong functions
+  are compiled in the one file its cited functions cite, so they count like that file's string beside its
+  citations.
 - **another build** (the signatures of a build of the same code with units): a function matched there is in the
   unit that build put it in, where it cites no file itself, and counts like a file string. The linker keeps one
-  order, so its units come out as runs here too.
+  order, so its units come out as runs here too. Its boundaries yield to the code's own between the same two
+  files, never where it puts a third file between them.
+- **reach**: a file's evidence reaches through the data its code shares and a short way past it; a longer run tied
+  to neither of two files is a unit of its own (a library no string names), not either file's.
 - **separation** (compilers that give every unit its own literals: CodeWarrior): two copies of one constant are
   in two units, so a boundary lies between the functions using them.
 - **join**: data only a tight run of functions uses belongs to one unit, so no boundary falls inside that run.
@@ -15,7 +21,7 @@ that fact holds:
 - **order**: a boundary between functions is one in each data section too, so it goes where the fewest
   references would land on the wrong side; among equal places, where it splits the fewest classes' own
   functions and the fewest short calls (a static helper sits beside its callers).
-- **classes**: a unit with no file string is named after the class its functions belong to.
+- **names**: a unit with no file string is named after the class its functions belong to.
 On a decomp in progress, the same evidence finds folds (two units using one copy of a unit's data), splits (one
 unit holding two copies of one literal) and claims (data in no unit that one unit's code alone uses, a class's
 table whose constructors are in one unit). Everything is a proposal with its evidence.
@@ -58,6 +64,10 @@ class Evidence:
     inlines: dict[int, str] = field(default_factory=dict)      # function index -> header it cites (inline)
     names: dict[int, str] = field(default_factory=dict)        # function index -> `Class::method` it cites
     placed: set[int] = field(default_factory=set)              # function indexes whose file is another build's unit
+    classed: set[int] = field(default_factory=set)             # function indexes whose file is their class's
+    pairs: dict[tuple[int, int, str], tuple[str, str]] = field(default_factory=dict)  # separation -> its files
+    edges: dict[tuple[int, int, str], int] = field(default_factory=dict)   # where a file's evidence ends or
+                                                                           # starts -> the side it is on
     roots: list[str] = field(default_factory=list)
 
     def joined(self, count: int, joins: list[tuple[int, int, str]] | None = None) -> list[bool]:
@@ -162,6 +172,7 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
         if len(longer) == 1:
             full[short] = longer[0]
     ev.files = {index: full.get(name, name) for index, name in ev.files.items()}
+    _class_files(program, ev)
     # A unit's code is one run in the link: one function another build put in X between two that agree on Y is
     # no evidence for X there (an inline that build kept from X, code that moved, other code that compiles alike).
     anchors = sorted(ev.files.items())
@@ -179,10 +190,81 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
                     ev.cited.append(ev.joins[-1])
         else:
             ev.separations.append((a + 1, b, f"{file_a} then {file_b}"))
+            ev.pairs[ev.separations[-1]] = (file_a, file_b)
             if a not in ev.placed and b not in ev.placed:
                 ev.direct.add(ev.separations[-1])
             else:
                 ev.borrowed.add(ev.separations[-1])
+    _untied(program, ev, anchors)
+
+
+def _untied(program: Program, ev: Evidence, anchors: list[tuple[int, str]]) -> None:
+    """A file's evidence reaches through the data its code shares with the code after it, and a short way past
+    that (`FILL_*`, as far as a gap between two of its citations is filled). Between two files, a longer run of
+    code tied to neither is neither's: a library no string names, or files that cite nothing. It is a unit of its
+    own, with a boundary within reach of each file's evidence, until evidence names it."""
+    count, starts = len(program.functions), [f.address for f in program.functions]
+    right, left = list(range(count)), list(range(count))   # the furthest function a join reaches from each one
+    for lo, hi, _ in ev.joins:
+        right[lo], left[hi] = max(right[lo], hi), min(left[hi], lo)
+    for p in range(1, count):
+        right[p] = max(right[p], right[p - 1])
+    for p in range(count - 2, -1, -1):
+        left[p] = min(left[p], left[p + 1])
+    for (a, file_a), (b, file_b) in zip(anchors, anchors[1:]):
+        if file_a == file_b:
+            continue
+        end = a                                     # the last function tied to file_a's
+        while right[end] > end and end < b - 1:
+            end = min(right[end], b - 1)
+        start = b                                   # the first tied to file_b's
+        while left[start] < start and start > end + 1:
+            start = max(left[start], end + 1)
+        first = end + 1
+        if start - first <= FILL_FUNCTIONS and starts[start] - starts[first] <= FILL_BYTES:
+            continue
+        hi = first
+        while hi + 1 < start and hi + 1 - first <= FILL_FUNCTIONS and starts[hi + 1] - starts[first] <= FILL_BYTES:
+            hi += 1
+        lo = start
+        while lo - 1 > first and start - (lo - 1) <= FILL_FUNCTIONS and starts[start] - starts[lo - 1] <= FILL_BYTES:
+            lo -= 1
+        for row, side in (((first, hi, f"{file_a}'s evidence ends"), first),
+                          ((lo, start, f"{file_b}'s evidence starts"), start)):
+            ev.separations.append(row)
+            ev.pairs[row], ev.edges[row] = (file_a, file_b), side
+            (ev.direct if a not in ev.placed and b not in ev.placed else ev.borrowed).add(row)
+
+
+def _class_files(program: Program, ev: Evidence) -> None:
+    """A class's own functions are compiled in its file: where the module marks its inlines and template
+    instances weak, a strong function of a class whose cited functions cite one file is that file's, ahead of
+    another build's unit, when the citation nearest it on either side is that file's too. A class can define a
+    method in another file (`GfComBehaviorPc::callbackBattle`, among the battle code): there the citations around
+    it are that other file's, and the class says nothing."""
+    weak, bound = set(getattr(program.image, "weak", ())), getattr(program.image, "symbols", None) or {}
+    strong = {f.address for f in program.functions if f.address in bound and f.address not in weak}
+    if not weak or not strong:        # only the module's own symbol table tells a class's own functions from the
+        return                        # inlines other units kept; a function it does not list is either
+    members: dict[str, list[int]] = collections.defaultdict(list)
+    for index, cls in _function_classes(program).items():
+        if program.functions[index].address in strong:
+            members[cls].append(index)
+    cited = sorted((i, name) for i, name in ev.files.items() if i not in ev.placed)
+    keys = [i for i, _ in cited]
+    for indexes in members.values():
+        files = {ev.files[i] for i in indexes if i in ev.files and i not in ev.placed}
+        if len(files) != 1:
+            continue
+        file = files.pop()
+        for index in indexes:
+            if index in ev.files and index not in ev.placed:
+                continue
+            at = bisect.bisect_left(keys, index)
+            if (at and cited[at - 1][1] == file) or (at < len(cited) and cited[at][1] == file):
+                ev.files[index] = file
+                ev.placed.discard(index)
+                ev.classed.add(index)
 
 
 def _roots(paths: list[str]) -> list[str]:
@@ -311,9 +393,12 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     def cost(p: int) -> tuple:
         if p not in crossings:
             crossings[p] = _crossings(program, ev, p)
-        return crossings[p], classes[p], calls[p], p
+        return crossings[p], classes[p], calls[p]
     chosen: list[Boundary] = []
-    for lo, hi, because in _minimal(_stated(ev)):
+    stated = _minimal(_stated(ev))      # where a file's evidence ends: met by any boundary within its reach
+    for row in [r for r in stated if r not in ev.edges] + [r for r in stated if r in ev.edges]:
+        lo, hi, because = row
+        toward = ev.edges.get(row, lo)  # among equal places, the one nearest the evidence (else the earliest)
         if any(lo <= c.position <= hi for c in chosen):
             continue
         candidates = [p for p in range(lo, hi + 1) if not joined[p]]
@@ -322,15 +407,16 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
                                                                            # table, an inline's static)
         if not candidates:
             continue
-        best = min(candidates, key=cost)
+        best = min(candidates, key=lambda p: (*cost(p), abs(p - toward)))
         chosen.append(Boundary(best, (candidates[0], candidates[-1]), crossings[best], because))
     return sorted(chosen, key=lambda c: c.position)
 
 
 def _stated(ev: Evidence) -> list[tuple[int, int, str]]:
-    """The separations, less those only another build's units give (`borrowed`) where the code itself states a
-    boundary (another cited file, a static initializer) between the same two functions citing their files: that
-    build's units are evidence where the code says nothing, not against it. Every other separation stands."""
+    """The separations, less those only another build's units give (`borrowed`) between the same two files as the
+    citations around them where the code itself states a boundary (another cited file, a static initializer)
+    between those citations: that build's units are evidence where the code says nothing, not against it. One
+    that puts a third file between them stands: the code's boundary can be that file's end."""
     cited = sorted(i for i in ev.files if i not in ev.placed)
     direct = sorted(lo for lo, _, _ in ev.direct)
     out = []
@@ -342,7 +428,8 @@ def _stated(ev: Evidence) -> list[tuple[int, int, str]]:
             right = bisect.bisect_left(cited, hi)
             before = cited[right] if right < len(cited) else len(ev.files) + (1 << 30)   # the first after it
             first = bisect.bisect_right(direct, after)
-            if first < len(direct) and direct[first] <= before:
+            around = {ev.files.get(after), ev.files.get(before)}
+            if first < len(direct) and direct[first] <= before and set(ev.pairs.get(row, around)) == around:
                 continue
         out.append(row)
     return out
@@ -418,7 +505,8 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
             name, how = held[(first, end)]["unit"], held[(first, end)]["how"]
         elif files:
             name = files.most_common(1)[0][0]
-            how = "file string" if any(ev.files.get(i) == name and i not in ev.placed for i in span) \
+            own = [i for i in span if ev.files.get(i) == name and i not in ev.placed]
+            how = "file string" if any(i not in ev.classed for i in own) else "class's file" if own \
                 else "another build"
         else:
             name, how = _unnamed(program, class_of, first, end)
@@ -852,13 +940,15 @@ def check(program: Program, splits: list[tuple[str, str, int, int]], limit: int 
             folds[tuple(homes)].append(because)
     splits_needed: dict[str, list] = collections.defaultdict(list)
     for lo, hi, because in ev.separations:
+        if (lo, hi, because) in ev.edges:     # where evidence stops reaching, not what contradicts a unit
+            continue
         inside = {unit_of[i] for i in range(lo - 1, hi + 1)}
         if len(inside) == 1 and None not in inside:
             splits_needed[next(iter(inside))].append((lo, hi, because))
     claims = []
     for o, fs in ev.local.items():
         homes = {unit_of[i] for i in fs} - {None}
-        if len(homes) == 1 and units.at(o.address) is None:
+        if len(homes) == 1 and units.at(o.address) is None and o.section not in LINKER_SECTIONS:
             claims.append({"object": o.name, "address": text(o.address), "section": o.section, "size": o.size,
                            "unit": next(iter(homes)), "used_by": len(fs)})
     if program.platform.name == "gamecube":
