@@ -193,6 +193,22 @@ void Node::visit() {}
 void Leaf::visit() { hook(); }
 Tip::~Tip() { hook(); }
 Node *makeTip() { return new Tip(); }
+namespace game { namespace menu { struct menu : Single<game::menu::menu> { menu(); ~menu(); int open; }; } }
+game::menu::menu::menu() : open(0) {}
+game::menu::menu::~menu() {}
+game::menu::menu *makeMenu() { return new game::menu::menu(); }
+template <class T> struct List : Single<List<T> > { List(); ~List(); T *head; };
+template <class T> List<T>::List() : head(0) {}
+template <class T> List<T>::~List() {}
+struct Ev { int id; };
+struct Se { int id; };
+List<Ev> *makeEvents() { return new List<Ev>(); }
+List<Se> *makeSounds() { return new List<Se>(); }
+template <class T, unsigned long N> struct Box { T items[N]; };
+struct Driver { virtual ~Driver(); virtual void report(Box<int, 4ul> &a, Box<char, 8ul> &b); };
+Driver::~Driver() { hook(); }
+void Driver::report(Box<int, 4ul> &a, Box<char, 8ul> &b) { a.items[0] = b.items[0]; }
+Driver *makeDriver() { return new Driver(); }
 """
 
 
@@ -239,6 +255,12 @@ class StoredBaseModuleTests(unittest.TestCase):
         self.assertEqual(result["differences"], [])
         self.assertIn("class Fade : public ::Single<Fade> {",
                       (self.root / "proof" / "include" / "classes" / "Fade.h").read_text())
+        # a class named like its namespace, a template whose base names its instance, two instances of one
+        # template in a signature: each compiles to its table too
+        self.assertIn("class menu : public ::Single< ::game::menu::menu> {",
+                      (self.root / "proof" / "include" / "classes" / "game" / "menu" / "menu.h").read_text())
+        self.assertIn("class List : public ::Single<List<T0>> {",
+                      (self.root / "proof" / "include" / "classes" / "List.h").read_text())
 
 
 class HeaderDebtTests(unittest.TestCase):

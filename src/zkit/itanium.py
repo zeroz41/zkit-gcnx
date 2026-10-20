@@ -762,7 +762,7 @@ def declarations(program: Program, classes: dict[str, ItClass]) -> dict[str, Dec
                 defines.append(f"void {name}::{m.name}({m.params}){suffix} {{}}")
         lines += _padding(name, layout, sizes, every)
         head = f"class {'::'.join(path)}" + (" : " + ", ".join(
-            f"public {b if b in placeholders else '::' + b}" for _, b in layout.get(name, [])) if layout.get(name)
+            f"public {b if b in placeholders else _rooted(b)}" for _, b in layout.get(name, [])) if layout.get(name)
             else "") + " {"
         table = program.platform.text(cls.table) if cls.table is not None else "none (its derived classes')"
         unknown = [f"base at 0x{o:X} unknown ({b})" for o, b in layout.get(name, []) if b in placeholders]
@@ -784,11 +784,18 @@ def declarations(program: Program, classes: dict[str, ItClass]) -> dict[str, Dec
     return out
 
 
+def _rooted(name: str) -> str:
+    """A class's name as a base clause spells it: from the global namespace, its template arguments too (inside
+    `minigame::tora`, `minigame::tora::minigame` would name the class's own member)."""
+    rooted = re.sub(r"(?<![\w:])(?=[A-Za-z_]\w*::)", "::", name)
+    return ("::" + rooted if not rooted.startswith("::") else rooted).replace("<::", "< ::")
+
+
 def _generalize(text: str, args: list[str]) -> str:
     """An instance's text with its template arguments spelled as the template's parameters (a type nested in
     one is a dependent name: `typename T0::Inner`)."""
     for index, arg in sorted(enumerate(args), key=lambda row: -len(row[1])):
-        text = re.sub(r"(?<![\w:])" + re.escape(arg) + r"(?![\w])", f"T{index}", text)
+        text = re.sub(r"(?<![\w:])(?:::)?" + re.escape(arg) + r"(?![\w])", f"T{index}", text)
     return re.sub(r"(?<![\w:])(T\d+::[A-Za-z_]\w*)", r"typename \1", text)
 
 
@@ -806,7 +813,10 @@ def _template_declaration(stem: str, rows: list, classy: set[str]) -> Declared |
     for row in rows:
         name, args, before, head, lines, includes, types, unknown = row
         instance = _parts(name)[-1]
-        body = _generalize("\n".join([*before, head, "public:", *lines, "};"]).replace(instance, plain), args)
+        own, _, bases = head.partition(" : ")      # its bases name the instance in full: no injected name yet
+        head = own.replace(instance, plain) + (" : " + bases if bases else "")
+        body = _generalize("\n".join([*(b.replace(instance, plain) for b in before), head, "public:",
+                                      *(line.replace(instance, plain) for line in lines), "};"]), args)
         votes[body] += 1
         bodies.setdefault(body, []).append(row)
     body = votes.most_common(1)[0][0]
@@ -1223,8 +1233,12 @@ def check(program: Program, compile, scratch: Path, class_filter: str | None = N
             stem = t.split("<", 1)[0]
             if stem in built.declared:
                 lines.append(f'#include "{built.declared[stem].header}"')
+        stems = set()                                  # one template, two instances: declared once
         for t in sorted(needed):
             stem = t.split("<", 1)[0]
+            if stem in stems:
+                continue
+            stems.add(stem)
             namespaces, path = _split_namespaces(stem, classy)
             if len(path) > 1:                          # a nested type: its enclosing class declares it
                 enclosing = "::".join(namespaces + path[:-1])
