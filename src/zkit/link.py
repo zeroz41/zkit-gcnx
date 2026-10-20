@@ -806,4 +806,9 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
     difference = _difference(dol, original, units, symbols)
     if difference:
         result["first_difference"] = difference
+    if dol == original and config.get("report"):   # the units linked from their compiled objects, in the report
+        from .progress import apply_link
+        report = project.file(repository, config["report"])
+        if report.is_file():
+            result["report_updated"] = apply_link(report, [name.rsplit(".", 1)[0] for name in elves])
     return result
