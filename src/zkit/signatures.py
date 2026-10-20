@@ -26,7 +26,8 @@ compare without a drive letter (`evidence_text`). Code that differs from a donor
 side, by their references), and what is left pairs as changed code: one on each side, the pair that shares by far
 the most of what it refers to, or, aligned in order, the pair whose code is by far the most alike. A
 function whose code changed still calls what it called: its one unnamed callee is its donors' one unclaimed callee,
-and its calls pair with its donors' in order between the calls both name (`calls`, `call_order`). Every name is
+and its calls pair with its donors' in order between the calls both name (`calls`, `call_order`); its other
+references pair the same way and name the data, tables and functions they point into (`data_order`). Every name is
 then checked: an address two pieces of evidence name differently, and a name two addresses claim, are withdrawn,
 and the matching runs again without them.
 
@@ -1369,6 +1370,54 @@ class _State:
                 if self.still_refers(target, named, source, kinds, extents):
                     self.name(target, named, "function", "call+references", source)
 
+    def data_order(self) -> None:
+        """A named function whose code changed still uses what its donors' code uses, in order: its references
+        other than calls pair with its donors' (where they agree) between two that name the same thing (a text, or
+        a function or data named so far), as many on both sides, and each pairing names what it points into at
+        the donors' offset into theirs: data, a table, a function whose address it takes. A name another function
+        gives otherwise is withdrawn. (On Xenoblade 2's 3.0.1 against 1.0.0, hiding half the data named by code
+        that is its donors', this named 416 to 433 of them again in each of three draws and one otherwise.)"""
+        import difflib
+        from . import aarch64
+        calls = {ppc.REL24, aarch64.CALL26, aarch64.JUMP26}
+        starts, rows = self.data_extents()
+
+        def named_at(target: int) -> str | None:
+            if target in self.known:
+                return self.known[target]
+            i = bisect.bisect_right(starts, target) - 1
+            return rows[i][2] if i >= 0 and target < rows[i][1] else None
+        found: dict[int, dict[str, int]] = collections.defaultdict(dict)
+        for address, named in list(self.known.items()):
+            shape, entries = self.m.shapes.get(address), self.m.by_key.get(named, ())
+            if shape is None or not entries or any(e.shape == shape.shape for e in entries):
+                continue
+            theirs = {tuple(r.token for r in e.references if r.kind not in calls) for e in entries}
+            if len(theirs) != 1:
+                continue
+            theirs = next(iter(theirs))
+            ours = [t for _, kind, t in shape.references if kind not in calls]
+            a = []
+            for i, t in enumerate(ours):
+                text, known = self.m.text(t), named_at(t)
+                a.append(("s", text) if text is not None else ("n", known) if known else ("?", i))
+            b = [token[:2] if token else ("?", -1 - j) for j, token in enumerate(theirs)]
+            i0 = j0 = 0
+            for i1, j1, size in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+                if i1 - i0 == j1 - j0:
+                    for t, token in zip(ours[i0:i1], theirs[j0:j1]):
+                        if not token or token[0] != "n":
+                            continue
+                        start = t - token[2]
+                        if start not in self.known and start not in self.banned_addresses \
+                                and token[1] not in self.owner and token[1] not in self.banned_keys:
+                            found[start].setdefault(token[1], address)
+                i0, j0 = i1 + size, j1 + size
+        for start, keys in found.items():
+            if len(keys) == 1:
+                (named, source), = keys.items()
+                self.vote(start, named, source, "order")
+
     def data_extents(self):
         """The data named so far, by its donors' size, as `target_uses` reads it."""
         index = self.m.program.function_index
@@ -1448,6 +1497,9 @@ class _State:
                 self.drain()
             if not self.changed:
                 self.calls()
+            if not self.changed:
+                self.data_order()
+                self.drain()
             if not self.changed:
                 return
 

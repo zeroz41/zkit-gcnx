@@ -558,6 +558,32 @@ class SwitchSignatureTests(unittest.TestCase):
         self.assertNotIn(at["_Z5extrai"], found)
         self.assertEqual(found.get(at["_Z6gamma_i"]), ("_Z6gamma_i", "layout+code"))
 
+    def test_data_pairs_in_order(self):
+        """An update changed the only function that uses three globals and added a fourth use: its data
+        references, in order against its donor's between the ones both name (a text here), name the globals before
+        the text; after it, the new global's use leaves the counts unequal and both stay unnamed."""
+        bodies = ("{ int t = 1; for (int i = 0; i < n; i++) t = t * 31 + (v[i] >> 2) - i;\n"
+                  "  for (int i = n - 1; i >= 0; i--) t ^= v[i] * (i + 3); return t ^ 0x1234; }\n",
+                  "{ int t = 9; for (int i = 0; i < n; i++) t = t * 17 - (v[i] << 3) + i;\n"
+                  "  for (int i = 0; i < n; i++) t += v[i] * v[i]; return t ^ 0x4321; }\n")
+        source = ("int g_alpha = 3; int g_beta = 5; @NEW@int g_gamma = 7; void report(const char *text);\n"
+                  "int first(int *v, int n) " + bodies[0] +
+                  "int mix(int x) { int t = g_alpha * x; t ^= g_beta + (x >> 3); report(\"mixing values\");\n"
+                  "  @USE@ t -= g_gamma * 11; return t @OP@ 9; }\n"
+                  "int last(int *v, int n) " + bodies[1])
+        earlier = source.replace("@NEW@", "").replace("@USE@", "").replace("@OP@", "*")
+        later = source.replace("@NEW@", "int g_added = 2; ").replace("@USE@", " t += g_added;").replace("@OP@", "+")
+        elf, symbols, _ = self.module("donor", earlier, hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        elf, symbols, at = self.module("target", later, hide=True)
+        found = {p.address: (p.name, p.evidence)
+                 for p in signatures.propose(Program.from_symbols(Switch(), elf, symbols), [donor])}
+        self.assertEqual(found.get(at["_Z3mixi"]), ("_Z3mixi", "layout"))
+        self.assertEqual(found.get(at["g_alpha"]), ("g_alpha", "order"))
+        self.assertEqual(found.get(at["g_beta"]), ("g_beta", "order"))
+        self.assertNotIn(at["g_added"], found)
+        self.assertNotIn(at["g_gamma"], found)
+
     def test_aligned_slots(self):
         same = signatures.aligned(list("abcdef"), list("abcdef"))
         self.assertEqual(same, [(i, i) for i in range(6)])
