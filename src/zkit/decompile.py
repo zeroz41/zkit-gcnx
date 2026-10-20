@@ -48,6 +48,9 @@ LIMITS = ("Ghidra's reading of the original bytes at the symbols' boundaries, wi
           "Read it next to m2c for any unmatched function and start from whichever shape fits: its loops and "
           "branches are closer where m2c fails or emits goto, m2c's switches and calls usually are elsewhere. "
           "Retype it before compiling (undefined4, param_N); it is not evidence of runtime parity.")
+LIMITS_SWITCH = ("Ghidra's reading of the original bytes at the symbols' boundaries, without auto-analysis or types: "
+                 "the seed to match from (m2c reads PowerPC only). Retype it before compiling (undefined8, param_N, "
+                 "mangled callee names), as a member of its class; it is not evidence of runtime parity.")
 DEFAULT_THREADS = 8
 HEAP_MB = (512, 4096)
 # Estimates for the budget, above the measured peaks: JVM 750-860 MB (512 MB-2 GB heap ceilings), each decompiler
@@ -479,7 +482,8 @@ def decompile(project: Project, target: str, addresses: list[int] | None, thread
     store.close()
     if every:
         return {"target": target, "functions": len(wanted), "decompiled_now": len(missing),
-                "seconds": round(time.monotonic() - started, 1), "worker": timing, "limits": LIMITS}
+                "seconds": round(time.monotonic() - started, 1), "worker": timing,
+                "limits": LIMITS_SWITCH if current.name == "switch" else LIMITS}
     rename = _namer(project, target, db)
     results = []
     for address in wanted:
@@ -495,4 +499,4 @@ def decompile(project: Project, target: str, addresses: list[int] | None, thread
                             "cached": address not in missing})
     return {"target": target, "engine": f"Ghidra {info['version']} decompiler, {Path(info['language']).stem}",
             "results": results, "decompiled_now": len(missing), "seconds": round(time.monotonic() - started, 2),
-            "limits": LIMITS}
+            "limits": LIMITS_SWITCH if current.name == "switch" else LIMITS}

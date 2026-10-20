@@ -920,6 +920,7 @@ def lookup(project: Project, query: str, target: str | None = None, fresh: bool 
         "mentions": mentions,
         "recipes": recipes,
         "decompile": not info["exact"] and row["address"] < 1 << MODULE_SHIFT and _decompile_available(),
+        "m2c": project.target(target).get("platform", "gamecube") == "gamecube",
         "limits": "Callers are direct `bl` calls; data_refs are pointers in data (vtable slots, tables). Match/link "
                   "state is the current report (report_age_h); a cite means the address is mentioned, not that "
                   "behavior was verified.",
