@@ -453,11 +453,20 @@ def _switch(project: Project, target: str, platform) -> Image:
     from .bridge import _symbol_table
     from .index import connect, refresh
     from .inspect_dol import _dol
-    refresh(project)
     module = _dol(project, target)
-    functions = [Entry(a, s, n) for a, s, n in connect(project).execute(
-        "SELECT address, size, name FROM functions WHERE target=? AND address<? ORDER BY address", (target, 1 << 32))]
-    data = [Entry(s.address, s.size, s.name) for s in _symbol_table(project, target)[0] if s.type != "function"]
+    table = _symbol_table(project, target)[0]
+    config = project.target(target)
+    if config.get("symbols") and project.file(config["repository"], config["symbols"]).is_file():
+        # the symbols file names the functions: the index takes them from the last report, which these very
+        # objects made, so a name the file changed would never reach them
+        functions = sorted((Entry(s.address, s.size, s.name) for s in table if s.type == "function" and s.size
+                            and s.address < 1 << 32), key=lambda e: e.address)
+    else:
+        refresh(project)
+        functions = [Entry(a, s, n) for a, s, n in connect(project).execute(
+            "SELECT address, size, name FROM functions WHERE target=? AND address<? ORDER BY address",
+            (target, 1 << 32))]
+    data = [Entry(s.address, s.size, s.name) for s in table if s.type != "function"]
     text = lambda address: platform.text(address)[2:]
     symbols = Symbols(functions, data, text)
     in_image = lambda address: module.segment_at(address) is not None
