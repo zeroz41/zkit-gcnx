@@ -139,6 +139,41 @@ class UnitEvidenceTests(unittest.TestCase):
         units._untied(code, ev, [(10, "a.cpp"), (150, "b.cpp")])
         self.assertEqual(sorted(ev.edges.values()), [81, 150])     # over 40-41 (unknown, among inlines), not 81
 
+    def test_a_weak_function_is_in_its_earliest_user_s_unit(self):
+        """Weak 6 is called by 2 and 8, so it is in 2's unit; weak 7 is in a weak table 3 refers to; weak 5 only in
+        a table with a key function (emitted with that function alone); weak 4 is used only after it (a global's
+        constructor), 9 by 8 before it, strong 1 by 0. No weak marks (GameCube): nothing."""
+        code = _Code(10, weak=[4, 5, 6, 7, 9])
+        at = {f.address: i for i, f in enumerate(code.functions)}
+        weak_table = DataObject(0x9000, 0x20, "_ZTV1W", ".data", "weak")
+        key_table = DataObject(0x9100, 0x20, "_ZTV1K", ".data")
+        address = lambda i: code.functions[i].address
+        code.calls = {0: [1], 2: [6], 8: [6, 9], 6: [4]}
+        code.refs = {3: [(0, 0x9010, "addr")], 1: [(0, 0x9110, "addr")]}
+        code.pointers = [(0x9010, address(7)), (0x9110, address(5))]
+        code.function_index = at
+        code.object_at = lambda a: weak_table if 0x9000 <= a < 0x9020 else key_table if 0x9100 <= a < 0x9120 \
+            else None
+        code.users = lambda: {weak_table: {3}, key_table: {1}}
+        self.assertEqual([(lo, hi) for lo, hi, _ in units._first_users(code)], [(2, 6), (3, 7), (8, 9)])
+        from zkit.platform import GameCube
+        code.platform = GameCube()
+        self.assertEqual(units._first_users(code), [])
+
+    def test_another_build_s_unit_yields_to_the_code_s_joins(self):
+        """Another build put 2-3 in a.cpp and 5 in b.cpp, but data only 2-5 use joins them: 5 is a.cpp's too, as
+        most of that build's run says. 12 cites c.cpp itself and so outweighs that build's d.cpp for 10 in its
+        join; 20-30 has an initializer ending a unit at 25 (shared data), and 40-42 own citations of two files
+        (one including the other): neither says anything."""
+        ev = units.Evidence({}, [(2, 5, "data"), (10, 12, "data"), (20, 30, "data"), (40, 42, "data")], [])
+        ev.files = {2: "a.cpp", 3: "a.cpp", 5: "b.cpp", 10: "d.cpp", 12: "c.cpp", 20: "e.cpp", 30: "f.cpp",
+                    40: "g.cpp", 41: "x.cpp", 42: "h.cpp"}
+        ev.placed = {2, 3, 5, 10, 20, 30, 41}
+        units._joined_placements(ev, [25])
+        self.assertEqual(ev.files, {2: "a.cpp", 3: "a.cpp", 12: "c.cpp", 20: "e.cpp", 30: "f.cpp", 40: "g.cpp",
+                                    41: "x.cpp", 42: "h.cpp"})
+        self.assertEqual(ev.placed, {2, 3, 20, 30, 41})
+
     def test_the_module_s_start_and_end_bound_its_first_and_last_files(self):
         """Code before the first file's evidence, or after the last's, tied to neither and longer than its reach,
         is a unit of its own too (a start-up object, a library at the end); a boundary at the module's own start

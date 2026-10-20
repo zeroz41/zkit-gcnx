@@ -11,13 +11,16 @@ that fact holds:
 - **another build** (the signatures of a build of the same code with units): a function matched there is in the
   unit that build put it in, where it cites no file itself, and counts like a file string. The linker keeps one
   order, so its units come out as runs here too. Its boundaries yield to the code's own between the same two
-  files, never where it puts a third file between them.
+  files, never where it puts a third file between them; its unit for a function yields where the code joins that
+  function to another file's.
 - **reach**: a file's evidence reaches through the data its code shares and a short way past it; a longer run tied
   to neither of two files is a unit of its own (a library no string names), not either file's.
 - **separation** (compilers that give every unit its own literals: CodeWarrior): two copies of one constant are
   in two units, so a boundary lies between the functions using them.
 - **join**: data only a tight run of functions uses belongs to one unit, so no boundary falls inside that run.
   Writable statics count everywhere; literals only where they are per unit (clang shares them across units).
+- **first use** (an ELF module marking inlines and template instances weak): every unit using one compiles it
+  after its first use there and the linker keeps the first unit's copy, so it is in its earliest user's unit.
 - **order**: a boundary between functions is one in each data section too, so it goes where the fewest
   references would land on the wrong side; among equal places, where it splits the fewest classes' own
   functions and the fewest short calls (a static helper sits beside its callers).
@@ -106,11 +109,54 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
                 if local[b][0] > local[a][-1]:
                     separations.append((local[a][-1] + 1, local[b][0],
                                         f"two copies of one constant: {text(a.address)} and {text(b.address)}"))
-    ev = Evidence(local, joins, separations)
+    ev = Evidence(local, joins + _first_users(program), separations)
     _file_evidence(program, ev, placed)
     _initializer_ends(program, ev)
     _start_up_object(program, ev)
     return ev
+
+
+def _first_users(program: Program) -> list[tuple[int, int, str]]:
+    """An ELF module whose symbols mark inlines and template instances weak: clang compiles one into every unit
+    whose code still calls it or takes its address, or that emits a weak table holding it, after the code that
+    first refers to it there, and the linker keeps the copy of the unit it links first. So a weak function is in
+    the unit of the earliest code referring to it: no boundary falls between the two. A table with a key function
+    is emitted in that function's unit alone, and so are the inline virtuals only it holds: only weak tables
+    count. Code after the function (a global's constructor run by its unit's static initializer) says nothing."""
+    if program.platform.name != "switch":
+        return []
+    functions, index = program.functions, program.function_index
+    weak = set(getattr(program.image, "weak", ())) | {f.address for f in functions if f.scope == "weak"}
+    if not weak:
+        return []
+    first: dict[int, int] = {}
+
+    def use(target: int, user: int) -> None:
+        if user < first.get(target, target) and functions[target].address in weak:
+            first[target] = user
+    for user, callees in program.calls.items():
+        for target in callees:
+            use(target, user)
+    for user, rows in program.refs.items():
+        for _, address, _ in rows:
+            target = index.get(address)
+            if target is not None:
+                use(target, user)
+    held: dict[DataObject, set[int]] = collections.defaultdict(set)    # weak table -> the weak functions in it
+    for holder, pointee in program.pointers:
+        target = index.get(pointee)
+        if target is not None and functions[target].address in weak:
+            table = program.object_at(holder)
+            if table is not None and (table.scope == "weak" or table.address in weak):
+                held[table].add(target)
+    if held:
+        for table, users in program.users().items():
+            for target in held.get(table, ()):
+                for user in users:
+                    use(target, user)
+    text = program.platform.text
+    return [(user, target, f"{functions[target].name} is first used by {functions[user].name} "
+                           f"({text(functions[user].address)})") for target, user in sorted(first.items())]
 
 
 SDK_MARKER = "__nnDetailNintendoSdk"   # NintendoSDK's own objects: `__nnDetailNintendoSdkRuntimeObjectFile`, ...
@@ -138,18 +184,27 @@ def _initializer_ends(program: Program, ev: Evidence) -> None:
     """An ELF's static initializers: clang compiles a unit's own one (no guard to test) after its other code, so a
     unit ends right after it. One that tests a guard first initializes a template's static member, kept from
     whichever unit came first, and ends nothing."""
+    for index in _initializers(program):
+        ev.separations.append((index + 1, index + 1,
+                               f"{program.platform.text(program.functions[index].address)} is its unit's static "
+                               "initializer"))
+        ev.direct.add(ev.separations[-1])
+
+
+def _initializers(program: Program) -> list[int]:
+    """The function indexes of the units' own static initializers (`_initializer_ends`), each its unit's last."""
     if program.platform.name != "switch":
-        return
+        return []
     from .aarch64 import guarded
+    out = []
     for address in getattr(program.image, "init_array", ()):
         index = program.function_index.get(address)
         if index is None or index + 1 >= len(program.functions):
             continue
         function = program.functions[index]
         if not guarded(program.platform.words(program.image, address, min(function.size, 64))):
-            ev.separations.append((index + 1, index + 1,
-                                   f"{program.platform.text(address)} is its unit's static initializer"))
-            ev.direct.add(ev.separations[-1])
+            out.append(index)
+    return sorted(out)
 
 
 PIECE = re.compile(r"_[0-9A-Fa-f]{8,16}(?=\.\w+$)")   # `file_<address>.cpp`: a later piece of one file
@@ -203,6 +258,7 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
         if index in ev.placed and before == after != unit:
             del ev.files[index]
             ev.placed.discard(index)
+    _joined_placements(ev, _initializers(program))
     anchors = sorted(ev.files.items())
     starts = [f.address for f in program.functions]
     for (a, file_a), (b, file_b) in zip(anchors, anchors[1:]):
@@ -219,6 +275,31 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
             else:
                 ev.borrowed.add(ev.separations[-1])
     _untied(program, ev, anchors)
+
+
+def _joined_placements(ev: Evidence, ends: list[int]) -> None:
+    """Nor is another build's unit evidence for a function the code joins to another file's (data only that run
+    of code uses, a weak function and its earliest user): the run is one unit, of the one file its own citations
+    name, else of the file that build gives most of it. Where its own citations name several files (one file
+    including another), the run says nothing about which; nor does one with a unit's static initializer (`ends`)
+    before its last function: data that run uses is shared by several units (a class's static member its
+    subclasses' initializers refer to)."""
+    for lo, hi, _ in list(ev.joins):            # the code's joins: no file run has been joined yet
+        if bisect.bisect_left(ends, lo) < bisect.bisect_left(ends, hi):
+            continue
+        inside = [i for i in range(lo, hi + 1) if i in ev.files]
+        if len({ev.files[i] for i in inside}) < 2:
+            continue
+        own = {ev.files[i] for i in inside if i not in ev.placed}
+        if len(own) > 1:
+            continue
+        votes = collections.Counter(ev.files[i] for i in inside if i in ev.placed)
+        keep = next(iter(own)) if own else max(votes, key=lambda f: (votes[f], -min(i for i in inside
+                                                                                if ev.files[i] == f)))
+        for i in inside:
+            if i in ev.placed and ev.files[i] != keep:
+                del ev.files[i]
+                ev.placed.discard(i)
 
 
 def _untied(program: Program, ev: Evidence, anchors: list[tuple[int, str]]) -> None:
