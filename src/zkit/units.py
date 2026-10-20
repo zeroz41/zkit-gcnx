@@ -22,6 +22,9 @@ that fact holds:
   A global holds its users together wrongly where several files use it: two functions citing different files
   themselves are in different units whatever data joins them, unless the files' citations interleave (one file
   includes the other).
+- **merged literals** (a linker keeping one copy of each literal for the module: clang's strings and constants):
+  each kind is one block, the first unit's copy of each literal in it, so a literal is its first user's and a
+  unit owns a range in each block (strings, constants, other read-only data).
 - **first use** (an ELF module marking inlines and template instances weak): every unit using one compiles it
   after its first use there and the linker keeps the first unit's copy, so it is in its earliest user's unit.
 - **order**: a boundary between functions is one in each data section too, so it goes where the fewest
@@ -828,8 +831,10 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
             if program.section_of(program.functions[index].address) != ".init":
                 ordered.add(owner[index])
     weak = set(getattr(program.image, "weak", ()))
+    merged = not program.platform.literals_per_unit   # one copy of each literal for the whole module
     claims: list[tuple[int, int, str, str]] = []
-    soft: list[tuple[int, int, str, str]] = []       # weak data: the first unit using it, where the order allows
+    soft: list[tuple[int, int, str, str]] = []       # weak data, merged literals: the first unit using it, where
+                                                     # the order allows
     for o, fs in program.users().items():              # however far apart its users are: they are one unit's
         homes = {owner.get(i) for i in fs} - {None}
         if o.name in LINKER_OBJECTS or o.section in TABLES + ARRAYS + LINKER_SECTIONS:   # the linker's, or a
@@ -838,7 +843,8 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
             continue
         if len(homes) == 1:
             claims.append((o.address, o.address + max(o.size, 1), next(iter(homes)), o.section))
-        elif homes and (o.scope == "weak" or o.address in weak) and homes <= ordered:
+        elif homes and (o.scope == "weak" or o.address in weak or merged and o.section in MERGED_SECTIONS) \
+                and homes <= ordered:
             soft.append((o.address, o.address + max(o.size, 1), min(homes, key=order.__getitem__), o.section))
     if program.platform.name == "gamecube":
         from .classes import recover
@@ -854,17 +860,22 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     if program.platform.name == "gamecube":
         claims += _initializer_tables(program, owner)
     claims += _initializer_arrays(program, owner)
-    by_section: dict[tuple[str, int], list] = collections.defaultdict(list)
+    blocks = _literal_blocks(program, claims + soft, order, ordered) if merged else {}
+
+    def place(row) -> tuple:
+        key = (row[3], _instance(program, row[0]))
+        return (*key, bisect.bisect_right(blocks.get(key, ()), row[0]))
+    by_section: dict[tuple, list] = collections.defaultdict(list)
     for claim in claims:
-        by_section[(claim[3], _instance(program, claim[0]))].append(claim)
+        by_section[place(claim)].append(claim)
     pinned = {row: FIRM if row[2] in firm else FIXED for row in fixed}
     for row in pinned:
-        by_section[(row[3], _instance(program, row[0]))].append(row)
-    by_soft: dict[tuple[str, int], list] = collections.defaultdict(list)
+        by_section[place(row)].append(row)
+    by_soft: dict[tuple, list] = collections.defaultdict(list)
     for claim in soft:
-        by_soft[(claim[3], _instance(program, claim[0]))].append(claim)
-        by_section.setdefault((claim[3], _instance(program, claim[0])), [])
-    for (section, instance), rows in by_section.items():
+        by_soft[place(claim)].append(claim)
+        by_section.setdefault(place(claim), [])
+    for (section, instance, _block), rows in by_section.items():
         rows = sorted(r if r in pinned else _whole_symbols(program, [r])[0] for r in rows)
         if section in TABLES and len(rows) > 1 and rows[0] not in pinned and rows[0][2] in order and \
                 order[rows[0][2]] > min(order.get(r[2], 0) for r in rows[1:]):
@@ -878,8 +889,8 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
         fixed_units = {r[2] for r in stand}
         kept = [r for r in kept if r not in pinned and r[2] not in fixed_units
                 and not any(a < r[1] and r[0] < b for a, b, _, _ in stand)]
-        kept += _fitting(kept, _whole_symbols(program, by_soft.get((section, instance), [])), order, ordered,
-                         fixed_units, stand)
+        kept += _fitting(kept, _whole_symbols(program, by_soft.get((section, instance, _block), [])), order,
+                         ordered, fixed_units, stand)
         spans: dict[str, list[int]] = {}
         for start, stop, unit, _ in kept:
             span = spans.setdefault(unit, [start, stop])
@@ -893,6 +904,58 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
             last = row
     out.sort()
     return out
+
+
+MERGED_SECTIONS = (".rodata",)   # where a linker merging literals keeps one copy of each, the first unit's
+
+
+def _literal_blocks(program: Program, rows: list[tuple[int, int, str, str]], order: dict[str, int],
+                    ordered: set[str]) -> dict[tuple[str, int], list[int]]:
+    """{(section, instance): addresses where a block starts}. A linker that merges literals (clang's strings and
+    4, 8 and 16-byte constants: one copy for the module) puts each kind in one block where the first unit's goes,
+    the first unit's copy of each, so in a block the units come in link order again: a unit owns a range in each
+    block (its strings, its constants, its other read-only data). A block starts where the claims' units go
+    back in link order and a cut there lets at least half the claims on its smaller side stand in that order (a
+    claim out of place, data another unit defines, lets a few)."""
+    groups: dict[tuple[str, int], list[tuple[int, int]]] = collections.defaultdict(list)
+    for start, _, unit, section in rows:
+        if section in MERGED_SECTIONS and unit in ordered:
+            groups[(section, _instance(program, start))].append((start, order[unit]))
+    out = {}
+    for key, seq in groups.items():
+        seq.sort()
+        values = [v for _, v in seq]
+        cuts = _cuts(values)
+        if cuts:
+            out[key] = [seq[k][0] for k in cuts]
+    return out
+
+
+def _cuts(values: list[int]) -> list[int]:
+    """Indexes where `values` (units' places in link order) start again: cut greedily, the best gain first."""
+    def run(part: list[int]) -> int:             # the longest run that never goes back
+        tails: list[int] = []
+        for v in part:
+            k = bisect.bisect_right(tails, v)
+            tails[k:k + 1] = [v]
+        return len(tails)
+    top = max(values, default=0) + 1
+    candidates = [k for k in range(1, len(values)) if values[k - 1] - values[k] > top // 4]
+    cuts: list[int] = []
+    while True:
+        bounds = [0, *sorted(cuts), len(values)]
+        best = None
+        for k in candidates:
+            if k in cuts:
+                continue
+            i = bisect.bisect_right(bounds, k)
+            s, e = bounds[i - 1], bounds[i]
+            gain = run(values[s:k]) + run(values[k:e]) - run(values[s:e])
+            if gain >= max(4, (min(k - s, e - k) + 1) // 2) and (best is None or gain > best[0]):
+                best = (gain, k)
+        if best is None:
+            return sorted(cuts)
+        cuts.append(best[1])
 
 
 def _fitting(kept: list[tuple[int, int, str, str]], soft: list[tuple[int, int, str, str]], order: dict[str, int],
