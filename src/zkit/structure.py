@@ -21,6 +21,7 @@ from typing import Any
 from .bridge import HEX, _status, _symbol_table, default_target, resolve, status_word
 from .gc import read_splits
 from .index import address_text, connect, containing, refresh
+from .platform import for_target
 from .project import Project
 
 CODE_SECTIONS = {".text", ".init"}
@@ -193,15 +194,18 @@ def unit(project: Project, query: str, target: str | None = None, limit: int = 4
                            "after": after[0] if after else None, "gap_after": after[2] - end if after else None})
 
     shared = [d for d in data if d["refs_outside"]]
+    platform = for_target(project.target(target))
+    literals = ("A literal in another unit's .sdata2/.rodata used by this unit's code usually means the compiled "
+                "source will emit its own copy there" if platform.literals_per_unit else
+                "A literal in another unit's .rodata may be the one copy the linker kept for several units")
     return {"query": query, "found": True, "target": target, "unit": name, "sections": sections,
             "functions": dict(counts), "pending": pending[:limit], "pending_total": len(pending),
             "data": data[:limit * 3], "data_total": len(data), "shared_data": len(shared),
             "outgoing": out_rows[:limit], "neighbours": neighbours,
-            "limits": "Ranges are splits.txt; references are straight-line lis/addi and r2/r13 forms decoded from the "
-                      "original plus data pointers, so register-passed and indexed accesses are missed. A literal in "
-                      "another unit's .sdata2/.rodata used by this unit's code usually means the compiled source will "
-                      "emit its own copy there; whether to fold, merge or move the boundary is the decomp's own rule. "
-                      "Link state comes from the current objdiff report."}
+            "limits": f"Ranges are splits.txt; references are {platform.references} decoded from the original plus "
+                      f"data pointers, so register-passed and indexed accesses are missed. {literals}; whether to "
+                      "fold, merge or move the boundary is the decomp's own rule. Link state comes from the current "
+                      "objdiff report."}
 
 
 def blocked(project: Project, target: str | None = None, limit: int = 40) -> dict[str, Any]:

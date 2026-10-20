@@ -18,7 +18,7 @@ DEFAULT_BASE = 0x7100000000
 R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE = 257, 1025, 1026, 1027
 DT_NULL, DT_PLTRELSZ, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ, DT_STRSZ, DT_JMPREL = 0, 2, 5, 6, 7, 8, 10, 23
 DT_INIT_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAY, DT_FINI_ARRAYSZ = 25, 27, 26, 28
-DT_HASH, DT_GNU_HASH = 4, 0x6FFFFEF5
+DT_HASH, DT_GNU_HASH, DT_PLTGOT = 4, 0x6FFFFEF5, 3
 DT_RELRSZ, DT_RELR = 35, 36
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
@@ -375,6 +375,44 @@ def _read_dynamic(module: Module, dynamic: int) -> None:
     start, size = tags.get(DT_INIT_ARRAY), tags.get(DT_INIT_ARRAYSZ)
     if start is not None and size:
         module.init_array = [module.u64(start + i * 8) for i in range(size // 8)]
+    if tags.get(DT_PLTGOT) is not None:              # three reserved words, then a slot per jump-slot relocation
+        start = tags[DT_PLTGOT]
+        module.tables[".got.plt"] = (start, start + 8 * (3 + (tags.get(DT_PLTRELSZ) or 0) // 24))
+    _got(module, dynamic)
+
+
+def _got(module: Module, dynamic: int) -> None:
+    """`.got`: the slots code loads addresses from, every one relocated, up to the first word no relocation fills
+    or the next of the linker's tables. It follows `.dynamic` (lld), or, led by a word holding `.dynamic`'s own
+    address, precedes `.got.plt` (GNU ld, whose spare dynamic entries part it from `.dynamic`) or follows it
+    (Nintendo's linker)."""
+    taken = list(module.tables.values())
+
+    def word(at: int) -> int | None:
+        segment = module.section_at(at)
+        return module.u64(at) if segment is not None and at + 8 <= segment.offset + segment.size else None
+
+    def slot(at: int) -> bool:
+        return word(at) is not None and (at in module.pointers or at in module.imports) \
+            and not any(a <= at < b for a, b in taken)
+
+    def after(start: int, led: bool) -> tuple[int, int] | None:
+        end = first = start + 8 if word(start) == dynamic else start
+        if led and first == start:
+            return None
+        while slot(end):
+            end += 8
+        return (start, end) if end > first else None
+
+    def before(end: int) -> tuple[int, int] | None:
+        start = end
+        while slot(start - 8):
+            start -= 8
+        return (start - 8, end) if start < end and word(start - 8) == dynamic else None
+    plt = module.tables.get(".got.plt")
+    found = after(module.tables[".dynamic"][1], False) or (plt and (before(plt[0]) or after(plt[1], True)))
+    if found:
+        module.tables[".got"] = found
 
 
 def _encoded(module: Module, position: int, encoding: int, data_base: int = 0) -> tuple[int, int]:

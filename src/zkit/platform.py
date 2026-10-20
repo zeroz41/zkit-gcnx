@@ -37,6 +37,8 @@ class Platform:
     # Where a unit's data may start: CodeWarrior aligns every object's sections to a word; clang's string sections
     # are byte-aligned, so a unit's strings start anywhere.
     unit_alignment = 1
+    # The code forms references are decoded from (said in the limits of what lists them).
+    references = "straight-line address forms"
 
     def open(self, path: Path):
         raise NotImplementedError
@@ -97,6 +99,7 @@ class GameCube(Platform):
     ghidra_language = "PowerPC:BE:32:Gekko_Broadway"
     literals_per_unit = True
     unit_alignment = 4
+    references = "straight-line lis/addi and r2/r13 forms"
     IMAGE = (0x80000000, 0x81800000)
 
     def open(self, path: Path):
@@ -146,6 +149,8 @@ class Switch(Platform):
     endian = "<"
     digits = 10
     ghidra_language = "AARCH64:LE:64:v8A"
+    references = ("straight-line adrp/add, adrp/ldr/str and literal-load forms (a load through a GOT slot refers "
+                  "to what the slot holds)")
 
     def __init__(self, base: int = 0x7100000000):
         self.base = base
@@ -172,10 +177,12 @@ class Switch(Platform):
             words = image.words(start, size)
         except ValueError:
             return []
-        out = []
+        out, got = [], _got(image)
         for pc, (address, kind) in track_addresses(words, start, image.pointers.get).items():
-            out.append((pc, address, kind))
-            # A load from a pointer slot (the GOT, a vtable reference) also refers to what the slot holds.
+            # A load from a pointer slot (a vtable reference) also refers to what the slot holds; from a GOT slot,
+            # the linker's and no data of the program's, only to that (to nothing in the module for an import).
+            if not (kind == "load" and any(a <= address < b for a, b in got)):
+                out.append((pc, address, kind))
             if kind == "load" and address in image.pointers:
                 out.append((pc, image.pointers[address], "addr"))
         return out
@@ -188,7 +195,8 @@ class Switch(Platform):
             return 0
 
     def data_pointers(self, image) -> Iterable[tuple[int, int]]:
-        return image.pointers.items()
+        got = _got(image)                              # code reaching through a GOT slot refers to what it holds
+        return [(h, p) for h, p in image.pointers.items() if not any(a <= h < b for a, b in got)]
 
     def in_image(self, image, value: int) -> bool:
         return 0 <= value < len(image.image)
@@ -196,6 +204,12 @@ class Switch(Platform):
     def cite_pattern(self) -> str:
         high = f"{self.base >> 32:X}"
         return rf"(?<![0-9A-Fa-f])(?:0x)?({high}[0-9A-Fa-f]{{8}})(?![0-9A-Fa-f])"
+
+
+def _got(image) -> list[tuple[int, int]]:
+    """A module's global offset table (`.got`, `.got.plt`): slots the linker fills with addresses for code."""
+    tables = getattr(image, "tables", {})
+    return [tables[name] for name in (".got", ".got.plt") if name in tables]
 
 
 def demangle_itanium(names: list[str]) -> list[str | None]:

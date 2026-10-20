@@ -1092,14 +1092,16 @@ def xrefs(project: Project, address: int | str, target: str | None = None, size:
     for function, n in per_function.most_common(40):  # over every reference, not just the rows shown
         row = containing(db, target, function)
         functions[(row["demangled"] or row["name"]) if row else address_text(function)] += n
+    from .platform import for_target
     row = containing(db, target, address)
     return {"address": address_text(address), "size": size, "symbol": symbol, "code": code, "data": data,
             "data_total": pointers[0], "data_to_start": pointers[1] or 0,
             "function": (row["demangled"] or row["name"]) if row and row["address"] == address else None,
             "kinds": dict(kinds), "functions": functions.most_common(40), "total": sum(kinds.values()),
             "modules": modules.most_common(),
-            "limits": "Code refs are straight-line lis/addi and r2/r13 forms decoded from the original; pointers "
-                      "passed in registers from elsewhere and indexed accesses past the symbol are not followed."}
+            "limits": f"Code refs are {for_target(project.target(target)).references} decoded from the original; "
+                      "pointers passed in registers from elsewhere and indexed accesses past the symbol are not "
+                      "followed."}
 
 
 def names(project: Project, queries: list[str] | None = None, target: str | None = None, regex: str | None = None,
