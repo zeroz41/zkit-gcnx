@@ -313,8 +313,9 @@ class SwitchBuildTests(unittest.TestCase):
     def test_link_rebuilds_the_module_and_marks_the_units_it_proves(self):
         """`zkit link` on Switch: both units' objects placed where the original holds them, every relocation
         resolved as the module's linker did (calls, a string literal, a merged constant, a GOT load), the module
-        identical; the report then marks both linked. A unit whose data differs from the original's is caught
-        even when the report calls its code matched."""
+        identical; the report then marks both linked. A function the original lacks and nothing calls (one its
+        linker's --gc-sections dropped) is left out, and the unit still links. A unit whose data differs from the
+        original's is caught even when the report calls its code matched."""
         from zkit import nxlink
         from zkit.elf import Elf
         with tempfile.TemporaryDirectory() as temp:
@@ -342,11 +343,11 @@ class SwitchBuildTests(unittest.TestCase):
             manifest.write_text(json.dumps(data), encoding="utf-8")
             report = game / "build/test/report.json"
 
-            def built(b_cpp: str) -> dict:
+            def built(b_cpp: str, identical: bool = True) -> dict:
                 (game / "src/a.cpp").write_text(A_CPP, encoding="utf-8")
                 (game / "src/b.cpp").write_text(b_cpp, encoding="utf-8")
                 # with objdiff-cli the build links too, and a link that is not identical fails it
-                self.assertEqual(build.build(Project.load(manifest), quiet=True)["ok"], b_cpp == B_CPP or not OBJDIFF)
+                self.assertEqual(build.build(Project.load(manifest), quiet=True)["ok"], identical or not OBJDIFF)
                 units = []
                 for unit in ("a", "b"):   # what objdiff would say: every function exact
                     functions = [{"name": s.name, "size": str(s.size), "fuzzy_match_percent": 100.0,
@@ -368,7 +369,11 @@ class SwitchBuildTests(unittest.TestCase):
             self.assertEqual([u["metadata"].get("complete") for u in marked["units"]], [True, True])
             self.assertEqual(marked["measures"]["complete_units"], 2)
             self.assertEqual(marked["units"][1]["measures"]["matched_data"], "4")
-            bad = built(B_CPP.replace("g_counter = 3", "g_counter = 4"))
+            self.assertEqual(good["collected"], 0)
+            dropped = built(B_CPP + '__attribute__((section(".text.unused"))) int unused(int v) { return v - 1; }\n')
+            self.assertTrue(dropped["identical"], dropped)
+            self.assertEqual((dropped["linked_units"], dropped["collected"]), (["a.cpp", "b.cpp"], 1))
+            bad = built(B_CPP.replace("g_counter = 3", "g_counter = 4"), identical=False)
             self.assertFalse(bad["identical"])
             self.assertEqual(bad["linked_units"], [])
             self.assertTrue(any("differs" in p for p in bad["problems"]), bad["problems"])
