@@ -297,9 +297,10 @@ def audit_project(project, target: str | None = None, class_filter: str | None =
     from .bridge import default_target
     target = default_target(project, target)
     config = project.target(target)
-    if (config.get("platform") or "gamecube").lower() not in ("gamecube", "wii", "gc"):
-        raise ValueError("Class recovery reads CodeWarrior tables (GameCube and Wii); Switch classes come from "
-                         "RTTI (`zkit lookup` on _ZTV/_ZTI names)")
+    if (config.get("platform") or "gamecube").lower() in ("switch", "nx"):
+        from . import itanium                         # Itanium tables, read without RTTI
+        return {"target": target, "platform": "switch",
+                **itanium.audit(Program.from_project(project, target), class_filter, limit)}
     return {"target": target, **audit(Program.from_project(project, target), class_filter, limit)}
 
 
@@ -655,6 +656,9 @@ def prove(project, target: str | None = None, class_filter: str | None = None, l
     the table pointer, and the class's size."""
     import subprocess
     from .bridge import default_target
+    if (project.target(default_target(project, target)).get("platform") or "gamecube").lower() in ("switch", "nx"):
+        from . import itanium
+        return itanium.prove(project, target, class_filter=class_filter, limit=limit)
     from .candidate import _restage, compile_command
     from .elf import Elf
     from .objects import objdiff_units
@@ -783,6 +787,12 @@ def write_headers(project, target: str | None, folder: Path, types_include: str 
     """One header per recovered class (its base's header included), for a decomp that has none yet."""
     from .bridge import default_target
     target = default_target(project, target)
+    if (project.target(target).get("platform") or "gamecube").lower() in ("switch", "nx"):
+        from . import itanium                         # proven first: an unproven header says so
+        program = Program.from_project(project, target)
+        proof = itanium.prove(project, target, program, limit=0)
+        return {"target": target, **itanium.write_headers(program, folder, proof["unproven"]),
+                "proof": proof["counts"]}
     program = Program.from_project(project, target)
     tables = find(program)
     found = recover(program, tables)

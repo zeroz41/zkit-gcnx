@@ -948,6 +948,8 @@ def blocked_units(data: dict) -> str:
 
 
 def classes(data: dict) -> str:
+    if data.get("platform") == "switch":
+        return _itanium_classes(data)
     c = data.get("counts", {})
     out = [f"{data['classes']} classes recovered from the code ({data['named_tables']} with a __vt__ symbol)"]
     sections = [
@@ -976,7 +978,27 @@ def classes(data: dict) -> str:
     return "\n".join(out)
 
 
+def _itanium_classes(data: dict) -> str:
+    c = data["counts"]
+    out = [f"{data['classes']} classes from Itanium tables: " + ", ".join(f"{v:,} {k}" for k, v in sorted(c.items()))]
+    for r in data["rows"]:
+        bases = ", ".join(f"{b['base']} at 0x{b['offset']:X}" for b in r["bases"]) or "no base"
+        tied = "; tied: " + ", ".join(", ".join(t["candidates"]) for t in r["tied"]) if r["tied"] else ""
+        out.append(f"  {r['class']} (table {r['table'] or 'none'}, slots {r['slots']}): {bases}{tied}")
+    return "\n".join(out)
+
+
 def classes_proof(data: dict) -> str:
+    if data.get("platform") == "switch":
+        c = data["counts"]
+        out = [f"{data['classes']} declarations, {data['headers']} headers compiled: "
+               + ", ".join(f"{v:,} {k}" for k, v in sorted(c.items(), key=lambda kv: -kv[1]))]
+        for row in data["differences"]:
+            detail = {k: v for k, v in row.items() if k not in ("class", "problem")}
+            out.append(f"  {row['class']}: {row['problem']} {detail if detail else ''}".rstrip())
+        out += [f"  problem: {p}" for p in data.get("problems", [])]
+        out.append("limits: " + data["limits"])
+        return "\n".join(out)
     c = data["counts"]
     out = [f"{data['classes']} classes compiled: tables {c.get('table_equal', 0)} equal, "
            f"{c.get('table_differs', 0) + c.get('table_missing', 0)} different; pointer offsets "
