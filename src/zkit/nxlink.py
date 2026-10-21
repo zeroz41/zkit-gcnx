@@ -502,8 +502,8 @@ def _value(linker: Linker, obj: _Object, symbol: Symbol, r, pc: int, hint, hints
         raise ValueError("relocation against an unnamed undefined symbol")
     found = linker.by_name(symbol.name, hint, obj.ranges)
     if found is None:
-        if r.type in GOT and symbol.name in linker.imported:
-            return -1, []                 # an import: its slot is found by name
+        if (r.type in GOT or r.type == ABS64) and symbol.name in linker.imported:
+            return -1, []                 # an import: its slot (a GOT's, a table's) holds it by name
         raise ValueError(f"{symbol.name} is not in the symbols")
     return found + r.addend, []
 
@@ -544,7 +544,7 @@ def _apply(linker: Linker, item: Placed, r, value: int, symbol: Symbol) -> None:
         # the module's loader writes this word: the original must carry a dynamic relocation to the same place
         expected = linker.module.pointers.get(pc)
         imported = linker.module.imports.get(pc)
-        if value == -1 or (expected is None and imported is None):
+        if value == -1 and imported is None or expected is None and imported is None:
             raise ValueError(f"no dynamic relocation at {linker.platform.text(pc)} for {symbol.name or 'a pointer'}")
         if expected is not None and expected != value:
             raise ValueError(f"points at {linker.platform.text(value)}, the original at {linker.platform.text(expected)}")
