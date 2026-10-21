@@ -495,6 +495,47 @@ class SwitchSignatureTests(unittest.TestCase):
         self.assertEqual(found.get(at["_Z5checkPii"]), ("_Z5checkPii", "shape+references"))
         self.assertEqual(signatures.evidence_text("C:\\proj\\a.cpp"), "\\proj\\a.cpp")
 
+    def test_a_function_citing_another_file_is_not_the_donors(self):
+        """An update replaced a function with another file's code at its place between two matched ones: it reads
+        like the donor's, but its `__FILE__` is another file, so it takes no name. Cited from another drive, the
+        same file is the same function."""
+        def gap(path: str, factor: int) -> str:
+            return GAP_DONOR.replace("int mixing(int *v, int n) { int t = 5, u = 9;",
+                                     "void report(const char *file, int line);\n"
+                                     f"int mixing(int *v, int n) {{ if (n < 0) report(\"{path}\", 3); int t = 5, u = 9;"
+                                     ).replace("t * 37 + (v[i] ^ 0x15)", f"t * {factor} + (v[i] ^ 0x15)")
+        elf, symbols, _ = self.module("donor", gap("C:/proj/src/mixing.cpp", 37), hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        for path, named in (("D:/proj/src/timer.cpp", False), ("D:/proj/src/mixing.cpp", True)):
+            elf, symbols, at = self.module("target", gap(path, 41), hide=True)
+            found = {p.address: p.name for p in
+                     signatures.propose(Program.from_symbols(Switch(), elf, symbols), [donor])}
+            self.assertEqual(found.get(at["_Z6mixingPii"]) == "_Z6mixingPii", named, path)
+            self.assertEqual(found.get(at["_Z5firstPii"]), "_Z5firstPii")
+
+    def test_a_class_table_whose_slots_cite_another_file(self):
+        """An update put a new class where the donor had another: `make` builds it with the same code, and its
+        one-call `fin` reads like the donor class's, so both would name its table the donor class's; but its
+        `init` cites another file than the donor class's `init`, so the table and `fin` take no name."""
+        def source(cls: str, path: str, init: str) -> str:
+            return (GAP_DONOR.replace("int mixing(", "int mixing_unused(")
+                    .replace("int last(", "void report(const char *file, int line);\n"
+                             "struct Obj { virtual ~Obj(); virtual void init(); virtual void fin(); int v; };\n"
+                             f"struct {cls} : Obj {{ void init() override; void fin() override; }};\n"
+                             "Obj::~Obj() {}\nvoid Obj::init() { v = 1; }\nvoid Obj::fin() { v = 0; }\n"
+                             f"void {cls}::init() {{ {init} if (v < 0) report(\"{path}\", 9); }}\n"
+                             f"void {cls}::fin() {{ Obj::fin(); }}\n"
+                             f"Obj *make() {{ return new {cls}(); }}\nint last("))
+        elf, symbols, _ = self.module("donor", source("Box", "C:/proj/src/box.cpp", "v = v * 3 + 1;"), hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        elf, symbols, at = self.module("target", source("Timer", "D:/proj/src/timer.cpp",
+                                                        "for (int i = 0; i < 9; i++) v = v * 5 + i;"), hide=True)
+        found = {p.address: p.name for p in signatures.propose(Program.from_symbols(Switch(), elf, symbols), [donor])}
+        self.assertEqual(found.get(at["_Z4makev"]), "_Z4makev")       # the same code, building another class
+        self.assertEqual(found.get(at["_ZN3Obj4initEv"]), "_ZN3Obj4initEv")
+        self.assertNotIn("_ZTV3Box", found.values())
+        self.assertNotIn(at["_ZN5Timer3finEv"], found)
+
     def test_code_that_reads_like_its_twin(self):
         """A field added before two others moves both: the update's `sumA` reads the offset the first build's
         `sumB` read, so its code is exactly that `sumB`'s. Code that differs from a sibling in one immediate is

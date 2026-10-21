@@ -29,7 +29,10 @@ function whose code changed still calls what it called: its one unnamed callee i
 and its calls pair with its donors' in order between the calls both name (`calls`, `call_order`); its other
 references pair the same way and name the data, tables and functions they point into (`data_order`). Every name is
 then checked: an address two pieces of evidence name differently, and a name two addresses claim, are withdrawn,
-and the matching runs again without them.
+and the matching runs again without them. A function's own `__FILE__` (a path its code points at the start of)
+names the file it was compiled in, so a name whose donor functions cite only other files is refuted for that
+address, and so is a class table's name where a slot's function cites another file than the donor class's function
+in that slot, with that class's own names in its slots; the address may still take another name.
 
 On the Switch a shape clears what `aarch64.code_relocations` relocates (calls and branches out of the function,
 adrp pages and the low halves paired with them, adr and literal loads), and a class table is an Itanium `_ZTV`
@@ -258,12 +261,19 @@ def small_data(program: Program) -> dict[int, int]:
 
 
 DRIVE = re.compile(r"^[A-Za-z]:(?=[/\\])")
+SOURCE = re.compile(r"[^/\\]+\.(?:c|cc|cpp|cxx)$", re.IGNORECASE)    # a `__FILE__`: the file code was compiled in
 
 
 def evidence_text(text: str | None) -> str | None:
     """A text as evidence: a source path without its drive letter, which is the build machine's (one build's
     `D:/...` is another's `C:/...` for the same file)."""
     return DRIVE.sub("", text) if text else text
+
+
+def source_file(text: str | None) -> str | None:
+    """The source file a path names (case folded), or None for any other text."""
+    found = SOURCE.search(text) if text and ("/" in text or "\\" in text) else None
+    return found.group().casefold() if found else None
 
 
 def text_at(read, address: int) -> str | None:
@@ -803,6 +813,18 @@ class Matcher:
         key = ("family", hash(tuple(skeleton(w, switch) for w in self.code(self.shapes[address]))))
         return key if key in self._families else self.shapes[address].shape
 
+    def sources(self, address: int) -> set[str]:
+        """The source files a target function's code cites: the paths that start where it points (an address
+        inside a string is another literal's tail, merged into it)."""
+        shape, strings = self.shapes.get(address), self.program.strings()
+        return {f for _, _, t in shape.references if t in strings and (f := source_file(strings[t]))} if shape \
+            else set()
+
+    def donor_sources(self, key: str) -> set[str]:
+        """The source files the donors' functions of a key cite."""
+        return {f for e in self.by_key.get(key, ()) for r in e.references
+                if r.token and r.token[0] == "s" and (f := source_file(r.token[1]))}
+
     def text(self, address: int) -> str | None:
         if address not in self._texts:
             self._texts[address] = evidence_text(text_at(self.program.read, address))
@@ -876,21 +898,25 @@ class Matcher:
         """Proposals, after withdrawing every name some evidence contradicts and matching again without it."""
         banned_addresses: set[int] = set()
         banned_keys: set[str] = set()
+        refuted: set[tuple[int, str]] = set()
         for _ in range(rounds):
-            state = _State(self, banned_addresses, banned_keys)
+            state = _State(self, banned_addresses, banned_keys, refuted)
             state.settle(strings)
-            addresses, keys = state.conflicts()
-            if addresses <= banned_addresses and keys <= banned_keys:
+            addresses, keys, pairs = state.conflicts()
+            if addresses <= banned_addresses and keys <= banned_keys and pairs <= refuted:
                 break
             banned_addresses |= addresses
             banned_keys |= keys
+            refuted |= pairs
         return sorted(state.proposals.values(), key=lambda p: p.address)
 
 
 class _State:
-    def __init__(self, matcher: Matcher, banned_addresses: set[int], banned_keys: set[str]):
+    def __init__(self, matcher: Matcher, banned_addresses: set[int], banned_keys: set[str],
+                 refuted: set[tuple[int, str]] = frozenset()):
         self.m = matcher
         self.banned_addresses, self.banned_keys = banned_addresses, banned_keys
+        self.refuted = refuted                         # (address, key): that address is not that key
         self.known: dict[int, str] = {}                # address -> key
         self.owner: dict[str, int] = {}                # key -> address
         self.proposals: dict[int, Proposal] = {}
@@ -936,7 +962,8 @@ class _State:
 
     def name(self, address: int, named: str, kind: str, evidence: str, source: int | None = None,
              entries: list[Signature] = (), agreed: int = 0) -> bool:
-        if address in self.banned_addresses or named in self.banned_keys or self.known.get(address) == named:
+        if address in self.banned_addresses or named in self.banned_keys or self.known.get(address) == named \
+                or (address, named) in self.refuted:
             return False
         if address in self.known:
             self.contradicted.add(address)
@@ -969,7 +996,7 @@ class _State:
         return not size or not sizes or min(sizes) * 3 <= size * 4 and size * 3 <= max(sizes) * 4
 
     def vote(self, address: int, named: str, source: int, evidence: str = "reference", checked: bool = False) -> None:
-        if address in self.banned_addresses:
+        if address in self.banned_addresses or (address, named) in self.refuted:
             return
         if not checked and not self.plausible(address, named):
             self.regrown.append((address, named, source, evidence))   # what it refers to decides (`calls`)
@@ -1052,7 +1079,8 @@ class _State:
                 (named, (agreed, _)), = options.items() if len(options) == 1 else [(None, ((0, 0), []))]
                 if named in self.owner and sum(agreed):
                     self.clashes.add(named)                  # the evidence points at a name already elsewhere
-                viable[address] = {k: o for k, o in options.items() if k not in self.owner}
+                viable[address] = {k: o for k, o in options.items() if k not in self.owner
+                                   and (address, k) not in self.refuted}
             for address in open_:
                 best = second = None
                 for item in viable[address].items():
@@ -1516,9 +1544,31 @@ class _State:
             if not self.changed:
                 return
 
-    def conflicts(self) -> tuple[set[int], set[str]]:
-        """Addresses two pieces of evidence name differently, and keys two addresses claim."""
-        return {a for a, keys in self.votes.items() if len(keys) > 1} | self.contradicted, set(self.clashes)
+    def conflicts(self) -> tuple[set[int], set[str], set[tuple[int, str]]]:
+        """Addresses two pieces of evidence name differently, keys two addresses claim, and names an address is
+        not. A `__FILE__` names the file code was compiled in, so a function whose code cites source files that
+        none of its name's donor functions cite is not theirs (a name its place or its calls moved onto other
+        code), and a class table one of whose slots holds a function citing a file that the donor class's function
+        there does not is not that class's, and neither are its slots named as that class's own methods (a wrapper
+        any class has may have named the table, and a constructor whose code differs only in the class it builds
+        does). Those names are refuted, not the addresses: each may still be named otherwise."""
+        addresses = {a for a, keys in self.votes.items() if len(keys) > 1} | self.contradicted
+        pairs = {(a, named) for a, named in self.known.items() if self.miscited(a, named)}
+        tables = self.m.itanium_tables() if self.m.program.platform.name == "switch" else {}
+        for address, named in list(self.known.items()):
+            slots = tables.get(address) if named.startswith("_ZTV") else None
+            rows = [(i, kind, v, row[i]) for row in self.m.tables.get(named, ()) if slots
+                    for i, (kind, v) in enumerate(slots) if kind == "function" and i < len(row) and row[i]]
+            if any(self.miscited(v, key) for _, _, v, key in rows):
+                pairs.add((address, named))
+                pairs |= {(v, key) for i, _, v, key in rows
+                          if self.known.get(v) == key and self.m.slot_classes().get((i, key)) == {named}}
+        return addresses, set(self.clashes), pairs
+
+    def miscited(self, address: int, key: str) -> bool:
+        ours = self.m.sources(address)
+        theirs = self.m.donor_sources(key) if ours else set()
+        return bool(theirs) and not ours & theirs
 
 
 def propose(program: Program, donors: list[Donor], strings: bool = True) -> list[Proposal]:
