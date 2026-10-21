@@ -66,6 +66,25 @@ class ItaniumClassTests(unittest.TestCase):
         self.assertEqual([b for _, b in classes["Multi"].bases], ["Mid", "Iface"])   # Iface::pong inherited
         self.assertEqual(classes["Multi"].groups[1].offset, classes["Multi"].bases[1][0])
 
+    def test_slots_name_the_overrides(self):
+        """With Leaf::get and Multi::more unnamed, the others in their slots name them again (a const method too);
+        a parameter naming the class the name moves to is left (a mangler would substitute it)."""
+        from dataclasses import replace
+        from zkit.program import Program
+        hidden = {"_ZNK4Leaf3getEv", "_ZN5Multi4moreEv"}
+        program = self.program
+        anonymous = Program(program.platform, program.image,
+                            [replace(f, name=f"fn_{f.address:X}") if f.name in hidden else f for f in program.functions],
+                            program.objects, program.sda)
+        anonymous.labels, anonymous.sections = program.labels, program.sections
+        names = itanium.override_names(anonymous)
+        at = {f.name: f.address for f in program.functions}
+        self.assertEqual(names, {at["_ZNK4Leaf3getEv"]: "_ZNK4Leaf3getEv", at["_ZN5Multi4moreEv"]: "_ZN5Multi4moreEv"})
+        self.assertEqual(itanium.override_names(program, every=True).get(at["_ZNK4Leaf3getEv"]), "_ZNK4Leaf3getEv")
+        self.assertEqual(itanium._swapped("_ZN2gf4Base3setEi", ["2gf", "4Base"], ["3btl", "4Leaf"]),
+                         "_ZN3btl4Leaf3setEi")
+        self.assertIsNone(itanium._swapped("_ZN2gf4Base3useEPN3btl1XE", ["2gf", "4Base"], ["3btl", "4Leaf"]))
+
     def test_headers_compile_to_the_same_tables(self):
         def compile(source, obj, include):
             return subprocess.run([CLANG, "--target=aarch64-none-elf", "-fno-rtti", "-fno-exceptions", "-std=gnu++14",

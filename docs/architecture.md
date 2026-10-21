@@ -163,7 +163,11 @@ keeps its placeholder until its parameters are known, because a mangled name cla
 `itanium.py` reads the classes from a module's `_ZTV` tables without RTTI: a primary base is a table that is a
 prefix of the class's own, or the nearest ancestor whose table the class's constructors, destructors and
 new-expressions store at offset 0 of the object before (after, in a destructor) its own, where no other class
-could stand between them. Each base names the evidence that proved it.
+could stand between them. Each base names the evidence that proved it. A function only one class's table holds
+is named by its slot: in its base's destructor slots it is the class's destructor (`D1`, then `D0`, where its code
+proves it is not a base's folded into it), elsewhere the method every named function in that slot below the
+class that declares it is, spelled for its own class. On Xenoblade 2 both name every function 1.0.0's exports
+name exactly (3,133 destructors, 5,502 overrides), and the overrides every hidden 3.0.1 name (3 seeds of half).
 
 `score.py` measures a proposed split against a reference (another split or a CodeWarrior linker map): function
 starts and sizes, names, unit boundaries, vtables and data ownership, with the reference's fully matched units
