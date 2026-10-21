@@ -92,6 +92,26 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown setting"):
             build.settings({"build": {"units": {"*": {"cflag": "-O2"}}}})
 
+    def test_a_library_built_elsewhere_has_its_own_source_root(self):
+        """A library the game linked prebuilt cites the folder it was built in, not the game's: a `units` pattern
+        gives its units their own `source_root`, and each compiles as `<its root>/<unit>` from the same folder,
+        where both roots link to src/."""
+        config = build.settings({"platform": "switch", "build": {
+            "compiler": "clang++", "source_root": "D:/game/prog",
+            "units": {"libs/mm/*": {"source_root": "C:/Lib/prog"}}}})
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src").mkdir()
+            paths, notes = build.layout("t", {}), []
+            game, library = (build._compile(root, build.unit_settings(config, unit), unit, paths, {}, notes)
+                             for unit in ("app/main.cpp", "libs/mm/thread.cpp"))
+            self.assertEqual(game["variables"]["source"], "D:/game/prog/app/main.cpp")
+            self.assertEqual(library["variables"]["source"], "C:/Lib/prog/libs/mm/thread.cpp")
+            self.assertEqual(game["variables"]["folder"], library["variables"]["folder"])
+            folder = Path(game["variables"]["folder"])
+            for original in ("D:/game/prog", "C:/Lib/prog"):
+                self.assertEqual((folder / original).resolve(), (root / "src").resolve())
+
     def test_layout(self):
         self.assertEqual(build.layout("t", {"report": "build/GAME01/report.json"}).obj, "build/GAME01/obj")
         self.assertEqual(build.layout("t", {"build": {"dir": "out/x/"}}).src, "out/x/src")
