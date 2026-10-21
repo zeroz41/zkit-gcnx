@@ -1182,8 +1182,10 @@ class _State:
         donor's functions of that shape between the donor's two, in order where both sides have as many, else by their
         references (`agreeing`). Both builds link in one order and the linker only dropped what it did not need, so the
         code between two placed functions is the code between them in the donor, less what was dropped (and plus what
-        was added). A gap whose matches would cross is left alone. What is left on both sides then pairs as changed code
-        (`changed_code`)."""
+        was added). A gap whose matches would cross is left alone. A short copy paired by its references alone (copies
+        more on one side, or in an order a reference of one pair contradicts), a thin wrapper of a call every class
+        makes, needs a neighbour with its donor neighbour's code: an update that replaced a class keeps its wrappers'
+        calls. What is left on both sides then pairs as changed code (`changed_code`)."""
         functions, index = self.m.program.functions, self.m.program.function_index
         extents = self.data_extents()
         anchors: dict[str, list[tuple[int, int]]] = collections.defaultdict(list)
@@ -1216,13 +1218,18 @@ class _State:
                     group = self.m.group(signature=signature, shape=layout[q]) if signature else layout[q]
                     if group in ours and (signature is None or signature.key not in self.owner):
                         theirs[group].append(signature)
-                matches = []
+                matches, by_references = [], set()
                 for group, targets in ours.items():
                     candidates = theirs.get(group, [])
                     if len(candidates) == len(targets):          # as many on both sides: in order
-                        matches += [(t, s) for t, s in zip(targets, candidates) if s is not None]
+                        pairs = [(t, s) for t, s in zip(targets, candidates) if s is not None]
+                        matches += pairs
+                        if any(self.support(s, self.m.shapes[t]) is None for t, s in pairs):
+                            by_references |= {t for t, _ in pairs}   # the order refuted: each by its references
                     elif candidates and not isinstance(group, tuple):
-                        matches += self.agreeing(targets, [s for s in candidates if s is not None])
+                        found = self.agreeing(targets, [s for s in candidates if s is not None])
+                        matches += found
+                        by_references |= {t for t, _ in found}
                 matches.sort(key=lambda m: m[0])
                 if any(m[1].place > n[1].place for m, n in zip(matches, matches[1:])):
                     continue
@@ -1232,6 +1239,9 @@ class _State:
                     agreed = self.support(signature, self.m.shapes[t])
                     if agreed is None:
                         continue
+                    if t in by_references and self.m.shapes[t].size // 4 < MINIMUM_WORDS and agreed[0] < CONFIRMING \
+                            and not agreed[1] and not self.alike_neighbour(t, signature):
+                        continue     # a thin wrapper whose one call any copy makes, where the code around it is other code
                     if signature.shape == self.m.shapes[t].shape:
                         self.accept(t, signature.key, (agreed[0], max(agreed[1], 1)), [signature])
                     else:                                        # a sibling in a family whose immediates moved
@@ -1242,6 +1252,11 @@ class _State:
                         and s.key not in self.owner and s.key not in self.banned_keys]
                 for t, signature, evidence in self.changed_code(rest, left, extents):
                     self.name(t, signature.key, "function", evidence, None, [signature])
+
+    def alike_neighbour(self, address: int, signature: Signature) -> bool:
+        """A target function's neighbour, named or not, has the code of the donor function's neighbour there."""
+        return any(n in self.m.shapes and key and self.m.shapes[n].shape == self.donor_code(key)
+                   for n, key in zip(self.m.neighbours[address], (signature.before, signature.after)))
 
     def agreeing(self, targets: list[int], candidates: list[Signature]) -> list[tuple[int, Signature]]:
         """Copies of one shape, more on one side than the other: a target copy takes the one donor copy whose
