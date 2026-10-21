@@ -67,6 +67,18 @@ class ObjectTests(unittest.TestCase):
             unit = objects.unit_diff(original, changed)
             self.assertEqual((unit["exact"], unit["total"]), (1, 2))
 
+    def test_a_structor_called_by_its_other_variant_is_the_same_call(self):
+        """A destructor calls its base's D2, the original module names that function D1: the same function under
+        the ABI's two names. Another class's destructor is not."""
+        call = "void {0}(void);\nvoid fin(void) {{ {0}(); }}\n"
+        original = build(self.root, "dtor-o", call.format("_ZN4BaseD1Ev"), TARGETS["aarch64"])
+        same = objects.function_diff(original, build(self.root, "dtor-s", call.format("_ZN4BaseD2Ev"),
+                                                     TARGETS["aarch64"]), "fin")
+        self.assertTrue(same["exact"], same)
+        other = objects.function_diff(original, build(self.root, "dtor-x", call.format("_ZN5OtherD2Ev"),
+                                                      TARGETS["aarch64"]), "fin")
+        self.assertTrue(other["reloc_only"] and not other["exact"], other)
+
     def test_literals_compare_by_value(self):
         # A writable .sdata2 (MWCC marks it so) still holds constants, compared by bytes when one side is unnamed;
         # relocations spelled alike (a merge section + 0) to different constants are a difference.
