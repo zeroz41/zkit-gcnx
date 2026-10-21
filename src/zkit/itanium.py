@@ -141,20 +141,25 @@ def _parts(qualified: str) -> list[str]:
 def _groups(program: Program, address: int, size: int) -> list[Group]:
     """A table's groups. Its symbol's size can stop short (an address inside it started another object), so
     slots run on while they are functions, and groups while their offset-to-top is not zero: the next table's
-    first group has a zero one. Never into an object a symbol names past its end (a table of member function
-    pointers after it holds functions too)."""
+    first group has a zero one. Past its end, never into another object, one a symbol names or something refers
+    to (a table of function pointers after it holds functions too), except at a group's first slot, where code
+    takes the group's address; a label nothing refers to is no object."""
     from .score import placeholder
     from .signatures import itanium_slots
     image, starts = program.image, program.function_index
-    named = program.cache.get("named object starts")
-    if named is None:
-        named = program.cache["named object starts"] = {o.address for o in program.objects
-                                                         if not placeholder(o.name)}
+    objects = program.cache.get("referred object starts")
+    if objects is None:
+        pointed = set(image.pointers.values())
+        objects = {o.address for o in program.objects if not placeholder(o.name) or o.address in pointed}
+        objects |= {o.address for o in program.users()}
+        program.cache["referred object starts"] = objects
     out, at = [], 0
     while True:
         start = address + 8 * at
         if image.section_at(start) is None or image.section_at(start + 16) is None:
             break
+        if 8 * at >= size and start in objects:
+            break                                      # another object's start
         if start in image.pointers or start + 8 in image.pointers or image.u64(start + 8):
             break                                      # no RTTI: the typeinfo word is zero
         top = image.u64(start)
@@ -164,8 +169,8 @@ def _groups(program: Program, address: int, size: int) -> list[Group]:
         slots: list[int | str] = []
         index = at + 2
         while True:
-            if 8 * index >= size and address + 8 * index in named:
-                break                                  # another object's start
+            if 8 * index >= size and index > at + 2 and address + 8 * index in objects:
+                break                                  # another object's start, not a group's first slot
             slot = itanium_slots(image, address + 8 * (index - 2), 1, starts)
             if not slot or slot[0][0] == "other":
                 break
