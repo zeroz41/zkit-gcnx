@@ -29,6 +29,7 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
     current = {f.address: f.name for f in program.functions} | {o.address: o.name for o in program.objects}
     named = [p for p in proposals if p.kind != "label" and _placeholder(current.get(p.address))]
     if program.platform.name != "gamecube":
+        named += _destructors(program, named)
         symbols = {p.address: (p.name, "function" if p.kind == "function" else "object", 0) for p in named}
         sizes = {p.address: p.size for p in named if p.kind == "object" and p.size}
         weak = {p.address for p in named if p.weak}
@@ -56,6 +57,25 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
     result["classes"] = {"graph": classes.graph(program, tables, found), "declared": declared, "found": found}
     result["symbols"] = symbols
     return result
+
+
+def _destructors(program: Program, named: list) -> list:
+    """Itanium destructors the class tables name (`itanium.destructor_names`) once the signatures' names are in:
+    weak where their class's table is (an inline destructor, a template's)."""
+    from . import itanium, signatures
+    if program.platform.name != "switch":
+        return []
+    renamed = signatures.renamed(program, named)
+    weak = {o.address for o in renamed.objects if o.scope == "weak"} | set(getattr(program.image, "weak", ()))
+    classes = itanium.recover(renamed)
+    table_of = {}
+    for cls in classes.values():
+        for group in cls.groups[:1]:
+            for slot in group.slots:
+                if isinstance(slot, int):
+                    table_of.setdefault(slot, cls.table)
+    return [signatures.Proposal(address, name, "function", "destructor slot", weak=table_of.get(address) in weak)
+            for address, name in itanium.destructor_names(renamed, classes).items()]
 
 
 def _placeholder(name: str | None) -> bool:

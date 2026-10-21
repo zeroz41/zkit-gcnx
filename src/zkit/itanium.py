@@ -210,6 +210,85 @@ def recover(program: Program) -> dict[str, ItClass]:
     return classes
 
 
+def destructor_names(program: Program, classes: dict[str, ItClass] | None = None,
+                     every: bool = False) -> dict[int, str]:
+    """{function address: Itanium name} for destructors no name says are one: a class whose primary base has a
+    virtual destructor has its own in the same two slots of its table (the complete object's, then the deleting
+    one), and so does every instance of a template where one instance has it. A function only one class's
+    destructor slot holds is that class's (`D1`, or `D2` where the template's other instances are named so, and
+    `D0`); one several tables hold (a destructor folded into an identical one) is left. `every`: also functions
+    that have a name (to check the rule against a build that names them all)."""
+    from .score import placeholder
+    classes = classes if classes is not None else recover(program)
+    named = methods(program)
+    names = {f.address: f.name for f in program.functions}
+
+    def kind(slot) -> str | None:
+        m = named.get(slot) if isinstance(slot, int) else None
+        if m is None or not m.name.startswith("~"):
+            return None
+        return "D0" if names[slot].endswith("D0Ev") else "D2" if names[slot].endswith("D2Ev") else "D1"
+    slots: dict[str, dict[int, str]] = {name: {k: d for k, s in enumerate(cls.groups[0].slots) if (d := kind(s))}
+                                        for name, cls in classes.items()}
+    stems: dict[str, list[str]] = collections.defaultdict(list)
+    for name in classes:
+        if "<" in name:
+            stems[name.split("<", 1)[0]].append(name)
+    for _ in range(8):
+        changed = False
+        for name, cls in classes.items():
+            base = next((b for o, b in cls.bases if o == 0), None)
+            for k, d in (slots.get(base, {}) if base else {}).items():
+                if k < len(cls.groups[0].slots) and k not in slots[name]:
+                    slots[name][k] = "D0" if d == "D0" else "D1"
+                    changed = True
+        for members in stems.values():
+            union: dict[int, str] = {}
+            for name in members:
+                union.update(slots[name])
+            for name in members:
+                for k, d in union.items():
+                    if k < len(classes[name].groups[0].slots) and k not in slots[name]:
+                        slots[name][k] = d
+                        changed = True
+        if not changed:
+            break
+    holders: dict[int, set] = collections.defaultdict(set)
+    for cls in classes.values():
+        for group in cls.groups:
+            for s in group.slots:
+                if isinstance(s, int):
+                    holders[s].add(cls.name)
+    objects = {o.address: o for o in program.objects}
+    out = {}
+    for name, cls in classes.items():
+        table = objects.get(cls.table) if cls.table is not None else None
+        if table is None or not table.name.startswith("_ZTV"):
+            continue
+        complete = next((cls.groups[0].slots[k] for k, d in slots[name].items() if d != "D0"), None)
+        for k, d in slots[name].items():
+            s = cls.groups[0].slots[k]
+            if not isinstance(s, int) or holders[s] != {name} or not (every or placeholder(names.get(s, ""))):
+                continue
+            # its code says so too: it stores its class's table, or (deleting) calls the complete one, or the
+            # base's own destructor is another function: a base's destructor folded into this class's identical
+            # one (the base's table dropped) does none of these
+            index = program.function_index.get(s)
+            refers = index is not None and any(table.address <= a < table.address + table.size
+                                               for _, a, _ in program.refs.get(index, ()))
+            calls = index is not None and d == "D0" and program.function_index.get(complete) in \
+                program.calls.get(index, ())
+            base = next((b for o, b in cls.bases if o == 0), None)
+            theirs = classes[base].groups[0].slots[k] if base in classes and \
+                k < len(classes[base].groups[0].slots) else None
+            other = isinstance(theirs, int) and theirs != s   # the base's own is another function: not folded
+            if not (refers or calls or other):
+                continue
+            nested = table.name[4:]
+            out[s] = f"_Z{nested[:-1]}{d}Ev" if nested.startswith("N") else f"_ZN{nested}{d}Ev"
+    return out
+
+
 def _plain(qualified: str) -> str:
     """A class's own name, less its qualifiers and template arguments."""
     last = _parts(qualified)[-1]
