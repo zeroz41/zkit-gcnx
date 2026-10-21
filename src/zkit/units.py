@@ -474,7 +474,8 @@ def _class_files(program: Program, ev: Evidence) -> None:
     method in another file (`GfComBehaviorPc::callbackBattle`, among the battle code): there the citations around
     it are that other file's, and the class says nothing; nor does it across another class's functions whose own
     citations name another file (one file including another: their classes' functions alternate), nor further
-    than a file's evidence reaches (`FILL_FUNCTIONS`)."""
+    than a file's evidence reaches (`FILL_FUNCTIONS`). A class nested in another (`Menu::Listener`) whose own
+    functions cite nothing is its enclosing class's file's, on the same terms."""
     from .score import placeholder
     weak, bound = set(getattr(program.image, "weak", ())), getattr(program.image, "symbols", None) or {}
     weak |= {f.address for f in program.functions if f.scope == "weak"}
@@ -484,9 +485,10 @@ def _class_files(program: Program, ev: Evidence) -> None:
               (f.address in bound or f.scope == "global" and not placeholder(f.name))}
     if not weak or not strong:
         return
+    folded = _folded_destructors(program)
     members: dict[str, list[int]] = collections.defaultdict(list)
     for index, cls in _function_classes(program, qualifiers=True).items():
-        if program.functions[index].address in strong:
+        if program.functions[index].address in strong and index not in folded:
             members[cls].append(index)
     cited = sorted((i, name) for i, name in ev.files.items() if i not in ev.placed)
     keys = [i for i, _ in cited]
@@ -495,6 +497,13 @@ def _class_files(program: Program, ev: Evidence) -> None:
         files = {ev.files[i] for i in indexes if i in ev.files and i not in ev.placed}
         if len(files) == 1:
             file_of[cls] = files.pop()
+    for cls, indexes in members.items():                # a nested class citing nothing: its enclosing class's
+        enclosing = cls
+        while cls not in file_of and "/" in enclosing and not any(i in ev.files and i not in ev.placed
+                                                                   for i in indexes):
+            enclosing = enclosing.rsplit("/", 1)[0]
+            if enclosing in file_of:
+                file_of[cls] = file_of[enclosing]
     owner = {i: file_of[cls] for cls, indexes in members.items() if cls in file_of for i in indexes}
     for cls, indexes in members.items():
         if cls not in file_of:
@@ -510,6 +519,19 @@ def _class_files(program: Program, ev: Evidence) -> None:
                 ev.files[index] = file
                 ev.placed.discard(index)
                 ev.classed.add(index)
+
+
+def _folded_destructors(program: Program) -> set[int]:
+    """Destructors several classes' tables hold: no class inherits another's destructor, so the linker folded
+    identical ones into one function, and the name it carries is any of theirs, not its file's evidence."""
+    tables: dict[int, set[str]] = collections.defaultdict(set)
+    for holder, pointee in getattr(program, "pointers", ()):
+        index = program.function_index.get(pointee)
+        found = program.object_at(holder) if index is not None else None
+        if found is not None and found.name.startswith(("_ZTV", "__vt__")):
+            tables[index].add(found.name)
+    return {index for index, names in tables.items() if len(names) > 1
+            and re.search(r"D[012]Ev$", program.functions[index].name)}
 
 
 def _roots(paths: list[str]) -> list[str]:
