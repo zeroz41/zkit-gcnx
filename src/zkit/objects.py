@@ -175,6 +175,14 @@ def _same_alias(a: Elf, xa: tuple, b: Elf, xb: tuple) -> bool:
                                   for ia, aa, ib, ab in zip(xa[3], xa[2], xb[3], xb[2]))
 
 
+def _same_structor(xa: tuple, xb: tuple) -> bool:
+    """Relocations to a constructor's or destructor's two variants (C1 and C2, D1 and D2), which clang emits as one
+    function under both names: a module that names it once is called by the other name from other units."""
+    from .nxlink import structor_partner
+    return xa[0] == xb[0] and xa[2] == xb[2] and all(
+        x == y or structor_partner(x) == y for x, y in zip(xa[1], xb[1]))
+
+
 def _branch(word: bytes) -> tuple[int, int] | None:
     """(instruction bits without the displacement, signed displacement) of a PowerPC b/bc."""
     value = int.from_bytes(word, "big")
@@ -321,6 +329,7 @@ def function_diff(target_path: Path, base_path: Path, name: str, base_name: str 
                          "original_reloc": _reloc_text(xa), "compiled_reloc": _reloc_text(xb)})
         elif xa and xb and (xa[1] != xb[1] or xa[2] != xb[2]):
             if _same_place(original, xa, built, xb) or _same_alias(original, xa, built, xb) \
+                    or _same_structor(xa, xb) \
                     or _same_literal(original, xa, built, xb, _access(machine, wa), labels) \
                     or _same_table(original, xa, built, xb):
                 literals += 1
