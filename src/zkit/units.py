@@ -199,6 +199,25 @@ def _initializer_ends(program: Program, ev: Evidence) -> None:
         ev.direct.add(ev.separations[-1])
 
 
+def _constructed(program: Program, owner: dict[int, str]) -> dict[int, set[str]]:
+    """{object address: the units whose own static initializer (`_initializers`) stores into it}."""
+    from .aarch64 import global_stores
+    out: dict[int, set[str]] = collections.defaultdict(set)
+    initializers = _initializers(program)                # the Switch's only
+    load64 = program.image.pointers.get if initializers else None
+    for index in initializers:
+        unit = owner.get(index)
+        if unit is None:
+            continue
+        function = program.functions[index]
+        words = program.platform.words(program.image, function.address, function.size)
+        for address in global_stores(words, function.address, load64):
+            found = program.object_at(address)
+            if found is not None:
+                out[found.address].add(unit)
+    return out
+
+
 def _initializers(program: Program) -> list[int]:
     """The function indexes of the units' own static initializers (`_initializer_ends`), each its unit's last."""
     if program.platform.name != "switch":
@@ -902,7 +921,9 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     linker map's) take part in that order as `FIXED` claims each (the `firm` units' never give way: they have a
     source); one that stands is kept as given, and no claim crosses it or adds to its unit in its section. Weak
     data (an inline's static, a template's member or table) is in every unit using it, and the linker keeps the
-    copy of the first in link order: it is that unit's."""
+    copy of the first in link order: it is that unit's. Data several units use is the unit's whose own static
+    initializer stores into it, when only one does: the unit defining a global runs its constructor (a class's
+    runtime type, a file's static vectors), however many others read it."""
     from .link import LINKER_OBJECTS
     order: dict[str, int] = {}                         # unit -> its place in link order (its first code)
     ordered = set()                                    # .init code says nothing of where its unit is linked
@@ -916,14 +937,18 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     claims: list[tuple[int, int, str, str]] = []
     soft: list[tuple[int, int, str, str]] = []       # weak data, merged literals: the first unit using it, where
                                                      # the order allows
+    constructed = _constructed(program, owner)
     for o, fs in program.users().items():              # however far apart its users are: they are one unit's
         homes = {owner.get(i) for i in fs} - {None}
         if o.name in LINKER_OBJECTS or o.section in TABLES + ARRAYS + LINKER_SECTIONS:   # the linker's, or a
             continue                                                                    # table entry (below)
         if program.in_code(o.address):                                  # data in code is in its unit's code range
             continue
+        definers = constructed.get(o.address, set())
         if len(homes) == 1:
             claims.append((o.address, o.address + max(o.size, 1), next(iter(homes)), o.section))
+        elif len(definers) == 1 and definers <= homes and o.scope != "weak" and o.address not in weak:
+            claims.append((o.address, o.address + max(o.size, 1), next(iter(definers)), o.section))
         elif homes and (o.scope == "weak" or o.address in weak or merged and o.section in MERGED_SECTIONS) \
                 and homes <= ordered:
             soft.append((o.address, o.address + max(o.size, 1), min(homes, key=order.__getitem__), o.section))
