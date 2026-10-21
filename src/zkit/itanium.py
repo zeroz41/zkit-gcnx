@@ -310,6 +310,103 @@ def destructor_names(program: Program, classes: dict[str, ItClass] | None = None
     return out
 
 
+def override_names(program: Program, classes: dict[str, ItClass] | None = None,
+                   every: bool = False) -> dict[int, str]:
+    """{function address: Itanium name} for the overrides no name says are one: a primary slot keeps one method
+    across the class that declares it and every class below it, so a function only one class's table holds, in a
+    slot where the others' names all agree, is that class's method of that name and parameters. The name is a
+    named member's with its class replaced, kept only where it demangles to the same method of this class and no
+    part of this class's name that the other's lacks recurs in the parameters (where a mangler would substitute
+    it). Destructors are `destructor_names`'. `every`: also functions that have a name."""
+    from .platform import demangle_itanium
+    from .score import placeholder
+    classes = classes if classes is not None else recover(program)
+    named = methods(program)
+    names = {f.address: f.name for f in program.functions}
+    objects = {o.address: o for o in program.objects}
+    holders: dict[int, set] = collections.defaultdict(set)
+    for cls in classes.values():
+        for group in cls.groups:
+            for s in group.slots:
+                if isinstance(s, int):
+                    holders[s].add(cls.name)
+    nested: dict[str, list[str]] = {}                 # class -> its name's source names, from its table's symbol
+    for name, cls in classes.items():
+        table = objects.get(cls.table) if cls.table is not None else None
+        if table is not None and table.name.startswith("_ZTV"):
+            text = table.name[4:]
+            tokens = _source_names(text[1:-1] if text.startswith("N") and text.endswith("E") else text)
+            if tokens:
+                nested[name] = tokens
+    family: dict[tuple[str, int], list[int]] = collections.defaultdict(list)
+    for name, cls in classes.items():
+        for index, slot in enumerate(cls.groups[0].slots):
+            if isinstance(slot, int):
+                family[(_introducer(classes, name, index), index)].append(slot)
+    candidates: dict[int, set[tuple[str, str]]] = collections.defaultdict(set)   # address -> (name, demangled)
+    for (_, index), slots in family.items():
+        members = {s: named[s] for s in set(slots) if s in named and not named[s].thunk}
+        signatures = {_signature(m) for m in members.values()}
+        if len(signatures) != 1 or next(iter(signatures))[0].startswith("~"):
+            continue
+        sources = [(s, m) for s, m in sorted(members.items()) if m.owner in nested]
+        for name, cls in classes.items():
+            s = cls.groups[0].slots[index] if index < len(cls.groups[0].slots) else None
+            if not isinstance(s, int) or s not in slots or holders[s] != {name} or name not in nested or \
+                    not (every or placeholder(names.get(s, ""))):
+                continue
+            for _, m in sorted(sources, key=lambda row: -_common(nested[row[1].owner], nested[name])):
+                symbol = _swapped(m.symbol, nested[m.owner], nested[name])
+                if symbol:
+                    candidates[s].add((symbol, f"{name}::{m.name}({m.params}){' const' if m.const else ''}"))
+                    break
+    rows = [(s, *next(iter(c))) for s, c in candidates.items() if len(c) == 1]
+    demangled = demangle_itanium([symbol for _, symbol, _ in rows])
+    return {s: symbol for (s, symbol, want), text in zip(rows, demangled) if text == want}
+
+
+def _source_names(text: str) -> list[str] | None:
+    """`2gf6Camera` -> ['2gf', '6Camera']; None for anything but a plain sequence of source names."""
+    out, at = [], 0
+    while at < len(text):
+        digits = re.match(r"[1-9]\d*", text[at:])
+        if not digits:
+            return None
+        end = at + len(digits.group()) + int(digits.group())
+        if end > len(text):
+            return None
+        out.append(text[at:end])
+        at = end
+    return out or None
+
+
+def _common(a: list[str], b: list[str]) -> int:
+    n = 0
+    while n < min(len(a), len(b)) and a[n] == b[n]:
+        n += 1
+    return n
+
+
+def _swapped(symbol: str, own: list[str], other: list[str]) -> str | None:
+    """A method symbol of the class named `own` as the same method of the class named `other`, or None where
+    the method or its parameters are not plainly spelled or would spell differently there."""
+    match = re.match(r"_ZN([rVK]*)", symbol)
+    body = symbol[match.end():] if match else ""
+    prefix = "".join(own)
+    if not match or not body.startswith(prefix):
+        return None
+    method = re.match(r"([1-9]\d*)", body[len(prefix):])
+    if not method:
+        return None
+    end = len(prefix) + len(method.group()) + int(method.group())
+    if not body[end:].startswith("E") or len(body) == end + 1:
+        return None
+    params = body[end + 1:]
+    if any(token in params for token in other[_common(own, other):]):
+        return None
+    return f"_ZN{match.group(1)}{''.join(other)}{body[len(prefix):end]}E{params}"
+
+
 def _plain(qualified: str) -> str:
     """A class's own name, less its qualifiers and template arguments."""
     last = _parts(qualified)[-1]

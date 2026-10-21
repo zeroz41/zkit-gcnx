@@ -8,7 +8,8 @@ evidence for the units too: it is in the unit that build put it in. A class tabl
 and a CodeWarrior destructor is `__dt__<class>Fv` (destructors never declare parameters), so both are named; a
 constructor or a virtual method keeps its `fn_` placeholder until its parameters are known, because a mangled
 name claims a signature. Classes are recovered from CodeWarrior's tables only; a Switch module's names come from
-the signatures alone.
+the signatures, then the destructors and overrides its class tables' slots prove (the method of a slot's other
+named functions, whose parameters it shares).
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
     current = {f.address: f.name for f in program.functions} | {o.address: o.name for o in program.objects}
     named = [p for p in proposals if p.kind != "label" and _placeholder(current.get(p.address))]
     if program.platform.name != "gamecube":
-        named += _destructors(program, named)
+        named += _slot_names(program, named)
         symbols = {p.address: (p.name, "function" if p.kind == "function" else "object", 0) for p in named}
         sizes = {p.address: p.size for p in named if p.kind == "object" and p.size}
         weak = {p.address for p in named if p.weak}
@@ -59,23 +60,28 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
     return result
 
 
-def _destructors(program: Program, named: list) -> list:
-    """Itanium destructors the class tables name (`itanium.destructor_names`) once the signatures' names are in:
-    weak where their class's table is (an inline destructor, a template's)."""
+def _slot_names(program: Program, named: list) -> list:
+    """Itanium destructors and overrides the class tables name (`itanium.destructor_names`, then
+    `itanium.override_names` with the destructors' names in) once the signatures' names are in: weak where their
+    class's table is (an inline, a template's; a strong table's inline virtuals are not told apart, and keep the
+    binding they had)."""
     from . import itanium, signatures
     if program.platform.name != "switch":
         return []
-    renamed = signatures.renamed(program, named)
-    weak = {o.address for o in renamed.objects if o.scope == "weak"} | set(getattr(program.image, "weak", ()))
-    classes = itanium.recover(renamed)
-    table_of = {}
-    for cls in classes.values():
-        for group in cls.groups[:1]:
-            for slot in group.slots:
-                if isinstance(slot, int):
-                    table_of.setdefault(slot, cls.table)
-    return [signatures.Proposal(address, name, "function", "destructor slot", weak=table_of.get(address) in weak)
-            for address, name in itanium.destructor_names(renamed, classes).items()]
+    out: list = []
+    for kind, find in (("destructor slot", itanium.destructor_names), ("override slot", itanium.override_names)):
+        renamed = signatures.renamed(program, named + out)
+        weak = {o.address for o in renamed.objects if o.scope == "weak"} | set(getattr(program.image, "weak", ()))
+        classes = itanium.recover(renamed)
+        table_of = {}
+        for cls in classes.values():
+            for group in cls.groups[:1]:
+                for slot in group.slots:
+                    if isinstance(slot, int):
+                        table_of.setdefault(slot, cls.table)
+        out += [signatures.Proposal(address, name, "function", kind, weak=table_of.get(address) in weak)
+                for address, name in find(renamed, classes).items()]
+    return out
 
 
 def _placeholder(name: str | None) -> bool:
