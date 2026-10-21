@@ -42,5 +42,17 @@ class RegisterUseTests(unittest.TestCase):
         self.assertEqual(aarch64.argument_reads([0x4EA01C08, 0xD65F03C0], 0), {V})
 
 
+class JoinTests(unittest.TestCase):
+    # cbz w0, else; adrp x8, page; ldr s0, [x8, #0x10]; b end; else: strb w9, [x8]; nop; end: ret
+    WORDS = [0x34000080, 0x90000028, 0xBD401100, 0x14000003, 0x39000109, 0xD503201F, 0xD65F03C0]
+
+    def test_a_register_after_a_jump_holds_what_the_branches_to_it_hold(self):
+        """The store is reached only from the cbz, before the adrp: x8 holds no page there, so it refers to
+        nothing, though straight-line reading would take it for a store into the page."""
+        self.assertEqual(sorted(aarch64.track_addresses(self.WORDS, 0x1000)), [0x1008])
+        relocations, _ = aarch64.code_relocations(self.WORDS, 0x1000, {})
+        self.assertEqual(sorted((r.offset, r.target) for r in relocations), [(0x1004, 0x5010), (0x1008, 0x5010)])
+        self.assertEqual(aarch64.global_stores(self.WORDS, 0x1000), set())
+
 if __name__ == "__main__":
     unittest.main()

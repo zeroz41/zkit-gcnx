@@ -78,6 +78,62 @@ def _ldst_scale(word: int) -> int:
     return size
 
 
+class _Joins:
+    """Where straight-line register tracking must meet other paths: an instruction after b, br or ret is reached only
+    by branches, so it holds what every branch to it agrees on; a branch target also meets what its forward branches
+    held; a loop head forgets the registers its loop writes."""
+
+    def __init__(self, words: list[int]):
+        count = len(words)
+        self.sources: dict[int, list[int]] = collections.defaultdict(list)
+        self.loops: dict[int, set[int]] = collections.defaultdict(set)
+        self.dead: set[int] = set()
+        for index, word in enumerate(words):
+            target = _local_target(word, index)
+            if word & 0xFC000000 == 0x14000000 or word & 0xFE000000 == 0xD6000000 and \
+                    word & 0xFFFFFC1F != 0xD63F0000:          # b, br, ret: nothing falls through
+                self.dead.add(index + 1)
+            if target is None or not 0 <= target < count:
+                continue
+            if target > index:
+                self.sources[target].append(index)
+            else:
+                for inner in range(target, index + 1):
+                    self.loops[target].update(written(words[inner]))
+        self.saved: dict[int, dict] = {}
+
+    def enter(self, index: int, state: dict) -> dict:
+        """The state at an instruction, from the one straight-line code reaches it with."""
+        incoming = [self.saved[s] for s in self.sources.get(index, ()) if s in self.saved]
+        if index in self.dead:
+            if not incoming:
+                state = {}
+            else:
+                state, incoming = dict(incoming[0]), incoming[1:]
+        if incoming:
+            state = {r: v for r, v in state.items() if all(other.get(r) == v for other in incoming)}
+        for register in self.loops.get(index, ()):
+            state.pop(register, None)
+        return state
+
+    def leave(self, index: int, word: int, state: dict) -> None:
+        """Remember what a forward branch carries to its target."""
+        target = _local_target(word, index)
+        if target is not None and target > index:
+            self.saved[index] = dict(state)
+
+
+def _local_target(word: int, index: int) -> int | None:
+    """The instruction index a branch inside the function goes to (b, b.cond, cbz/cbnz, tbz/tbnz), else None."""
+    if word & 0xFC000000 == 0x14000000:
+        return index + _sign(word & 0x3FFFFFF, 26)
+    if word & 0xFF000010 == 0x54000000 or word & 0x7E000000 == 0x34000000:
+        return index + _sign(word >> 5 & 0x7FFFF, 19)
+    if word & 0x7E000000 == 0x36000000:
+        return index + _sign(word >> 5 & 0x3FFF, 14)
+    return None
+
+
 def track_addresses(words: list[int], start: int, load64=None) -> dict[int, tuple[int, str]]:
     """{pc: (address, kind)} formed by straight-line code; kind is addr, load, store, f32 or f64.
 
@@ -87,7 +143,10 @@ def track_addresses(words: list[int], start: int, load64=None) -> dict[int, tupl
     reads when it is known (a relocated GOT or table slot), so `ldr x8, [got]; add x8, x8, #16` is followed."""
     pages: dict[int, int] = {}
     out: dict[int, tuple[int, str]] = {}
+    joins = _Joins(words)
     for index, word in enumerate(words):
+        pages = joins.enter(index, pages)
+        joins.leave(index, word, pages)
         pc = start + index * 4
         rd = word & 31
         if word & 0x9F000000 == 0x90000000:                       # adrp
@@ -145,6 +204,7 @@ def object_stores(words: list[int], start: int, load64=None) -> list[tuple]:
     held: dict[int, tuple] = {0: ("object", THIS, 0)}   # register -> ("address", value) / ("object", origin, offset)
     out: list[tuple] = []
     end = start + 4 * len(words)
+    joins = _Joins(words)
 
     def store(pc: int, value: int, base: int, offset: int) -> None:
         v, b = held.get(value), held.get(base)
@@ -158,6 +218,8 @@ def object_stores(words: list[int], start: int, load64=None) -> list[tuple]:
         else:
             held.pop(register, None)
     for index, word in enumerate(words):
+        held = joins.enter(index, held)
+        joins.leave(index, word, held)
         pc = start + 4 * index
         rd, rn = word & 31, word >> 5 & 31
         if word & 0x9F000000 == 0x90000000:                       # adrp
@@ -226,7 +288,10 @@ def global_stores(words: list[int], start: int, load64=None) -> set[int]:
     initializer stores into is what it constructs."""
     held: dict[int, int] = {}                                    # register -> the address it holds
     out: set[int] = set()
+    joins = _Joins(words)
     for index, word in enumerate(words):
+        held = joins.enter(index, held)
+        joins.leave(index, word, held)
         pc = start + 4 * index
         rd, rn = word & 31, word >> 5 & 31
         if word & 0x9F000000 == 0x90000000:                       # adrp
@@ -288,7 +353,11 @@ def code_relocations(words: list[int], start: int, pointers: dict[int, int],
     cleared: dict[int, int] = {}
     pages: dict[int, tuple[int, int]] = {}  # register -> (page, pc of the adrp)
     pending: dict[int, list[int]] = collections.defaultdict(list)  # adrp pc -> indices of its paired relocs
+    adrps: dict[int, int] = {}              # pc of every adrp -> its page
+    joins = _Joins(words)
     for index, word in enumerate(words):
+        pages = joins.enter(index, pages)
+        joins.leave(index, word, pages)
         pc = start + index * 4
         if word & 0x7C000000 == 0x14000000:                                   # b / bl
             target = pc + _sign(word & 0x03FFFFFF, 26) * 4
@@ -303,6 +372,7 @@ def code_relocations(words: list[int], start: int, pointers: dict[int, int],
         if word & 0x9F000000 == 0x90000000:                                   # adrp
             imm = _sign(((word >> 5 & 0x7FFFF) << 2) | (word >> 29 & 3), 21) << 12
             pages[rd] = ((pc & ~0xFFF) + imm, pc)
+            adrps[pc] = (pc & ~0xFFF) + imm
             cleared[pc] = word & ~((3 << 29) | (0x7FFFF << 5))
             continue
         if word & 0x9F000000 == 0x10000000:                                   # adr
@@ -351,8 +421,7 @@ def code_relocations(words: list[int], start: int, pointers: dict[int, int],
     for origin, members in pending.items():
         first = out[members[0]]
         out.append(Reloc(origin, ADR_GOT_PAGE if first.got else ADR_PREL_PG_HI21, first.target, first.got))
-    for register_page in pages.values():  # an adrp whose low half is outside this function: keep its page
-        page, origin = register_page
+    for origin, page in adrps.items():      # an adrp whose low half no path here reads: keep its page
         if origin not in pending:
             out.append(Reloc(origin, ADR_PREL_PG_HI21, page))
     out.sort(key=lambda r: r.offset)
