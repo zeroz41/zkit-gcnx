@@ -99,6 +99,52 @@ class ModuleDataTests(unittest.TestCase):
                           if row["section"] in (".dynamic", ".eh_frame", ".dynsym")])  # the linker's, nobody's
 
 
+# a global one file constructs and both files' code reads
+CONSTRUCTED = {
+    "a.cpp": """void report(const char *file, int line);
+struct Info { const char *name; const Info *base; int count; };
+const char *label(int v);
+Info g_info = {label(1), nullptr, 3};
+int countA(int v) { if (v > 99) report("C:/proj/src/game/a.cpp", 4); return g_info.count + v; }
+""",
+    "b.cpp": """void report(const char *file, int line);
+struct Info { const char *name; const Info *base; int count; };
+extern Info g_info;
+const char *nameB(int v) { if (v < 0) report("C:/proj/src/game/b.cpp", 3); return v ? g_info.name : "none"; }
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class ConstructedDataTests(unittest.TestCase):
+    def test_a_global_belongs_to_the_unit_whose_initializer_constructs_it(self):
+        """Both files' code reads `g_info`, so its users say nothing; the first file's static initializer stores
+        into it, so it is that file's."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in CONSTRUCTED.items():
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, str(root / name), "-o", str(root / name.replace(".cpp", ".o"))],
+                               check=True, capture_output=True)
+            link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                    str(root / "a.o"), str(root / "b.o")]
+            subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
+            subprocess.run([*link, "--strip-all", "-o", str(root / "main.elf")], check=True, capture_output=True)
+            at = {s.name: s for s in Elf.load(root / "full.elf").symbols}
+            module = nx.load(root / "main.elf")
+            functions = module.functions()
+            symbols = [Symbol(f"fn_{a:08X}", ".text", a, "function", s, "global") for a, s in functions]
+            symbols += [Symbol(f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section in nxdata.objects(module, functions)]
+            symbols += [Symbol(name or f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section, name in nxdata.linker_tables(module)]
+            proposal = units.propose(Program.from_symbol_list(Switch(), module, symbols))
+            info = at["g_info"].value
+            owners = [unit["unit"] for unit in proposal["units"] for row in unit["data"]
+                      if row["section"] == ".bss" and int(row["start_key"]) <= info < int(row["end_key"])]
+            self.assertEqual(owners, ["game/a.cpp"])
+
+
 GOT_SOURCE = """extern int g_ext;
 int g_local = 3;
 void report();
