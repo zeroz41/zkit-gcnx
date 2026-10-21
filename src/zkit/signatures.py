@@ -1030,6 +1030,11 @@ class _State:
                                            kind == "function" and bool(entries) and all(s.weak for s in entries)
                                            or kind == "object" and named in self.m.weak)
         self.changed = True
+        if kind == "function":                           # however it was named: with its donors' code, it names
+            shape = self.m.shapes.get(address)           # what it uses (`refer`)
+            same = [s for s in entries if shape is not None and s.shape == shape.shape]
+            if same:
+                self.later.append((address, same))
         return True
 
     def plausible(self, address: int, named: str) -> bool:
@@ -1050,11 +1055,7 @@ class _State:
         if len(self.votes[address]) == 1:
             kind = "function" if address in self.m.extent else "label" if self.m.program.in_code(address) else \
                 "object"
-            if self.name(address, named, kind, evidence, source) and kind == "function":
-                shape = self.m.shapes.get(address)
-                same = [s for s in self.m.by_key.get(named, ()) if shape is not None and s.shape == shape.shape]
-                if same:                                     # its code is the donors' too: it names what it uses
-                    self.later.append((address, same))
+            self.name(address, named, kind, evidence, source)
 
     def accept(self, address: int, named: str, agreed: tuple[int, int], entries: list[Signature]) -> None:
         evidence = "shape" + ("+references" if agreed[0] else "") + ("+layout" if agreed[1] else "")
