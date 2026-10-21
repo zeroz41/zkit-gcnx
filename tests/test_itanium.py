@@ -246,6 +246,25 @@ class StoredBaseModuleTests(unittest.TestCase):
         row = itanium.audit(self.program, "Fade")["rows"][0]
         self.assertTrue(row["bases"][0]["evidence"][0].startswith("constructor 0x"))
 
+    def test_destructor_slots_name_the_destructors(self):
+        """With Fade's and Leaf's destructors unnamed, their tables' destructor slots (where their bases' are) name
+        them again; named ones are left alone unless asked."""
+        from dataclasses import replace
+        from zkit.program import Program
+        hidden = {"_ZN4FadeD1Ev", "_ZN4FadeD2Ev", "_ZN4FadeD0Ev"}
+        program = self.program
+        anonymous = Program(program.platform, program.image,
+                            [replace(f, name=f"fn_{f.address:X}") if f.name in hidden else f for f in program.functions],
+                            program.objects, program.sda)
+        anonymous.labels, anonymous.sections = program.labels, program.sections
+        names = itanium.destructor_names(anonymous)
+        at = {f.name: f.address for f in program.functions}
+        complete = at.get("_ZN4FadeD1Ev", at.get("_ZN4FadeD2Ev"))
+        self.assertEqual(names.get(complete), "_ZN4FadeD1Ev")
+        self.assertEqual(names.get(at["_ZN4FadeD0Ev"]), "_ZN4FadeD0Ev")
+        self.assertNotIn(at["_ZN4NodeD0Ev"], names)                    # named already
+        self.assertEqual(itanium.destructor_names(program, every=True).get(at["_ZN4NodeD0Ev"]), "_ZN4NodeD0Ev")
+
     def test_headers_with_those_bases_compile_to_the_same_tables(self):
         def compile(source, obj, include):
             return subprocess.run([CLANG, "--target=aarch64-none-elf", "-fno-rtti", "-fno-exceptions", "-std=gnu++14",
