@@ -216,8 +216,9 @@ def destructor_names(program: Program, classes: dict[str, ItClass] | None = None
     virtual destructor has its own in the same two slots of its table (the complete object's, then the deleting
     one), and so does every instance of a template where one instance has it. A function only one class's
     destructor slot holds is that class's (`D1`, or `D2` where the template's other instances are named so, and
-    `D0`); one several tables hold (a destructor folded into an identical one) is left. `every`: also functions
-    that have a name (to check the rule against a build that names them all)."""
+    `D0`); one several tables hold (a destructor folded into an identical one) is left. A further base's group
+    holds the thunks to them (`_ZThn<offset>_`), each branching to its destructor. `every`: also functions that
+    have a name (to check the rule against a build that names them all)."""
     from .score import placeholder
     classes = classes if classes is not None else recover(program)
     named = methods(program)
@@ -286,6 +287,26 @@ def destructor_names(program: Program, classes: dict[str, ItClass] | None = None
                 continue
             nested = table.name[4:]
             out[s] = f"_Z{nested[:-1]}{d}Ev" if nested.startswith("N") else f"_ZN{nested}{d}Ev"
+        # a further base's group holds, in its base's destructor slots, the thunks that adjust `this` and branch to
+        # this class's destructors
+        own = {d: cls.groups[0].slots[k] for k, d in slots[name].items() if isinstance(cls.groups[0].slots[k], int)}
+        for group in cls.groups[1:]:
+            base = next((b for o, b in cls.bases if o == group.offset), None)
+            for k, d in (slots.get(base, {}) if base else {}).items():
+                if k >= len(group.slots) or not isinstance(group.slots[k], int):
+                    continue
+                s = group.slots[k]
+                target = own.get("D0" if d == "D0" else "D1", own.get("D2"))
+                index = program.function_index.get(s)
+                if target is None or index is None or holders[s] != {name} or \
+                        not (every or placeholder(names.get(s, ""))) or \
+                        program.function_index.get(target) not in program.calls.get(index, ()):
+                    continue
+                kind_name = names.get(target, "")
+                letter = "D0" if d == "D0" else ("D2" if kind_name.endswith("D2Ev") else "D1")
+                nested = table.name[4:]
+                body = f"{nested[:-1]}{letter}Ev" if nested.startswith("N") else f"N{nested}{letter}Ev"
+                out[s] = f"_ZThn{group.offset}_{body}"
     return out
 
 
