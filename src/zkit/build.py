@@ -55,7 +55,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
                    "-fno-exceptions", "-fno-rtti", "-fasynchronous-unwind-tables", "-std=gnu++17"],
         "includes": ["include", "src"]},
 }
-UNIT_KEYS = {"compiler", "cflags", "extra_cflags", "includes", "compiler_version"}
+UNIT_KEYS = {"compiler", "cflags", "extra_cflags", "includes", "compiler_version", "source_root"}
 
 
 def words(value: str | list[str] | None) -> list[str]:
