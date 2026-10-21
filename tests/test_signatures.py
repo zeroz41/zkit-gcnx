@@ -513,6 +513,23 @@ class SwitchSignatureTests(unittest.TestCase):
             self.assertEqual(found.get(at["_Z6mixingPii"]) == "_Z6mixingPii", named, path)
             self.assertEqual(found.get(at["_Z5firstPii"]), "_Z5firstPii")
 
+    def test_a_function_whose_parameters_an_update_changed(self):
+        """An update gave `mixing` a float parameter its code reads: between two matched neighbours it still reads
+        like the donor's `mixing(int*, int)`, but that name cannot fill s0, so it takes no name. The same change
+        without the new parameter keeps the name."""
+        elf, symbols, _ = self.module("donor", GAP_DONOR, hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        for source, named in (
+                (GAP_DONOR.replace("int mixing(int *v, int n) { int t = 5, u = 9;",
+                                   "int mixing(int *v, int n, float w) { int t = 5, u = (int)(w * 9.0f);"), False),
+                (GAP_DONOR.replace("t * 37 + (v[i] ^ 0x15)", "t * 41 + (v[i] ^ 0x15)"), True)):
+            elf, symbols, at = self.module("target", source, hide=True)
+            found = {p.address: p.name for p in
+                     signatures.propose(Program.from_symbols(Switch(), elf, symbols), [donor])}
+            mixing = next(a for n, a in at.items() if n.startswith("_Z6mixingPi"))
+            self.assertEqual(found.get(mixing) == "_Z6mixingPii", named, found.get(mixing))
+            self.assertEqual(found.get(at["_Z5firstPii"]), "_Z5firstPii")
+
     def test_a_class_table_whose_slots_cite_another_file(self):
         """An update put a new class where the donor had another: `make` builds it with the same code, and its
         one-call `fin` reads like the donor class's, so both would name its table the donor class's; but its

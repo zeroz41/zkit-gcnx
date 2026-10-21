@@ -329,3 +329,245 @@ def guarded(words: list[int]) -> bool:
                    for test in words[index + 1:index + 4]):
                 return True
     return False
+
+
+# Registers an instruction reads and writes, for argument liveness. General registers are 0-30 (31, the zero
+# register or sp, is left out), SIMD/FP registers 32-63 (v0 is 32). Where an encoding is not recognised the
+# instruction reads nothing and writes its rd field: that can hide a read, never invent one.
+V = 32
+CALL_CLOBBERED = frozenset(range(0, 19)) | frozenset(range(V, V + 8)) | frozenset(range(V + 16, V + 32))
+
+
+def _g(*fields: int) -> tuple[int, ...]:
+    return tuple(f for f in fields if f != 31)
+
+
+def register_use(word: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """(read, written) registers of one instruction. A call (bl, blr) writes the registers calls clobber."""
+    rd, rn, rm, ra = word & 31, word >> 5 & 31, word >> 16 & 31, word >> 10 & 31
+    op0 = word >> 25 & 0xF
+    if op0 in (0b1000, 0b1001):                                         # data processing, immediate
+        op1 = word >> 23 & 7
+        if op1 <= 1:                                                    # adr, adrp
+            return (), _g(rd)
+        if op1 == 0b101:                                                # move wide: movk keeps the other bits
+            return (_g(rd) if word >> 29 & 3 == 3 else ()), _g(rd)
+        if op1 == 0b110 and word >> 29 & 3 == 1:                        # bfm (bfi, bfxil) keeps rd's other bits
+            return _g(rn, rd), _g(rd)
+        if op1 == 0b111:                                                # extr
+            return _g(rn, rm), _g(rd)
+        return _g(rn), _g(rd)                                           # add/sub, logical, sbfm/ubfm
+    if op0 in (0b1010, 0b1011):                                         # branches, exceptions, system
+        if word & 0xFC000000 == 0x94000000:                             # bl
+            return (), tuple(CALL_CLOBBERED)
+        if word & 0xFFFFFC1F == 0xD63F0000:                             # blr
+            return _g(rn), tuple(CALL_CLOBBERED)
+        if word & 0xFE000000 == 0xD6000000:                             # br, ret
+            return _g(rn), ()
+        if word & 0x7C000000 == 0x34000000:                             # cbz, cbnz, tbz, tbnz
+            return _g(rd), ()
+        if word & 0xFFF00000 == 0xD5300000:                             # mrs
+            return (), _g(rd)
+        if word & 0xFFF00000 == 0xD5100000:                             # msr (register)
+            return _g(rd), ()
+        return (), ()
+    if op0 & 0b0101 == 0b0100:                                          # loads and stores
+        return _load_store(word)
+    if op0 & 0b0111 == 0b0101:                                          # data processing, register
+        if word >> 28 & 1 == 0:                                         # logical, add/sub (shifted, extended)
+            return _g(rn, rm), _g(rd)
+        op2 = word >> 21 & 0xF
+        if op2 == 0b0010:                                               # ccmp, ccmn: flags only
+            return (_g(rn) if word >> 11 & 1 else _g(rn, rm)), ()
+        if op2 & 0b1000:                                                # madd, msub, smaddl, umulh, ...
+            return _g(rn, rm, ra), _g(rd)
+        if op2 == 0b0110 and word >> 30 & 1:                            # one source: rbit, rev, clz
+            return _g(rn), _g(rd)
+        return _g(rn, rm), _g(rd)                                       # adc, csel, two sources
+    return _simd(word)
+
+
+def _load_store(word: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    rt, rn, rt2, rm = word & 31, word >> 5 & 31, word >> 10 & 31, word >> 16 & 31
+    vector = word >> 26 & 1
+    reg = (lambda r: (V + r,)) if vector else (lambda r: _g(r))
+    if word & 0x3B000000 == 0x18000000:                                 # load literal (and prfm literal)
+        return (), (() if not vector and word >> 30 == 3 else reg(rt))
+    if word & 0x3F000000 == 0x08000000:                                 # exclusive, acquire/release
+        load = word >> 22 & 1
+        pair = word >> 21 & 1
+        if load:
+            return _g(rn), _g(rt) + (_g(rt2) if pair else ())
+        status = _g(rm) if not word >> 23 & 1 else ()                   # stxr writes its status register
+        return _g(rn) + _g(rt) + (_g(rt2) if pair else ()), status
+    if word & 0x3A000000 == 0x28000000:                                 # pairs
+        load = word >> 22 & 1
+        index = word >> 23 & 3
+        base = _g(rn) if index in (1, 3) else ()                        # post/pre-index write the base back
+        if load:
+            return _g(rn), reg(rt) + reg(rt2) + base
+        return _g(rn) + reg(rt) + reg(rt2), base
+    if word & 0x3B000000 == 0x39000000 or word & 0x3B200000 == 0x38000000 or \
+            word & 0x3B200C00 == 0x38200800:                            # single register: imm, unscaled, reg offset
+        size, opc = word >> 30, word >> 22 & 3
+        if vector:
+            load = opc & 1
+        else:
+            if size == 3 and opc == 2:                                  # prfm
+                return (), ()
+            load = opc != 0
+        offset = _g(rm) if word & 0x3B200C00 == 0x38200800 else ()
+        index = word >> 10 & 3
+        base = _g(rn) if word & 0x3B200000 == 0x38000000 and index in (1, 3) else ()
+        if load:
+            return _g(rn) + offset, reg(rt) + base
+        return _g(rn) + offset + reg(rt), base
+    if word & 0xBF800000 in (0x0C000000, 0x0C800000) or word & 0xBF800000 in (0x0D000000, 0x0D800000):
+        load = word >> 22 & 1                                           # ld1/st1 ... structures
+        count = 4
+        vectors = tuple(V + (rt + i) % 32 for i in range(count))
+        base = _g(rn) if word >> 23 & 1 else ()
+        if load:
+            return _g(rn), vectors[:1] + base
+        return _g(rn), base
+    return (), ()
+
+
+def _simd(word: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    rd, rn, rm, ra = word & 31, word >> 5 & 31, word >> 16 & 31, word >> 10 & 31
+    vd, vn, vm, va = V + rd, V + rn, V + rm, V + ra
+    if word & 0x5F000000 == 0x1E000000:                                 # scalar floating point (bit 31: sf)
+        if word >> 21 & 1 == 0:                                         # fixed-point conversions
+            opcode = word >> 16 & 7
+            return ((vn,), _g(rd)) if opcode in (0, 1) else (_g(rn), (vd,))
+        low = word >> 10 & 3
+        if low == 0b10:                                                 # two sources
+            return (vn, vm), (vd,)
+        if low == 0b11:                                                 # fcsel
+            return (vn, vm), (vd,)
+        if low == 0b01:                                                 # fccmp
+            return (vn, vm), ()
+        if word >> 10 & 0x1F == 0b10000:                                # one source
+            return (vn,), (vd,)
+        if word >> 10 & 0xF == 0b1000:                                  # fcmp (with zero: rm unused)
+            return ((vn,) if word >> 3 & 1 else (vn, vm)), ()
+        if word >> 10 & 7 == 0b100:                                     # fmov immediate
+            return (), (vd,)
+        if word >> 10 & 0x3F == 0:                                      # to and from general registers
+            opcode = word >> 16 & 7
+            if opcode in (2, 3, 7):                                     # scvtf, ucvtf, fmov from general
+                return _g(rn), (vd,)
+            return (vn,), _g(rd)                                        # fcvt*, fmov to general
+        return (), (vd,)
+    if word & 0xDF000000 == 0x1F000000:                                 # fmadd, fmsub, fnmadd, fnmsub
+        return (vn, vm, va), (vd,)
+    if word & 0x9F000000 in (0x0E000000, 0x0F000000) or word & 0xDF000000 in (0x5E000000, 0x5F000000):
+        # advanced SIMD: vector, and scalar
+        u = word >> 29 & 1
+        if word >> 24 & 1 == 0:
+            if word >> 21 & 1 and word >> 10 & 1:                       # three same
+                opcode = word >> 11 & 0x1F
+                accumulate = opcode == 0b11001 or opcode == 0b10010 or \
+                    (u == 1 and opcode == 0b00011 and word >> 22 & 3)   # fmla/fmls, mla/mls, bsl/bit/bif
+                return ((vn, vm, vd) if accumulate else (vn, vm)), (vd,)
+            if word >> 21 & 1 and word >> 10 & 3 == 0:                 # three different (widening)
+                return (vn, vm), (vd,)
+            if word >> 17 & 0x1F in (0b10000, 0b11000) and word >> 10 & 3 == 0b10:   # two-reg misc, across lanes
+                return (vn,), (vd,)
+            if word & 0x1FE08400 == 0x0E000400:                         # copy: dup, ins, umov, smov
+                imm4 = word >> 11 & 0xF
+                if u:                                                   # ins (element)
+                    return (vd, vn), (vd,)
+                if imm4 == 0:                                           # dup (element)
+                    return (vn,), (vd,)
+                if imm4 == 1:                                           # dup (general)
+                    return _g(rn), (vd,)
+                if imm4 == 3:                                           # ins (general)
+                    return (vd,) + _g(rn), (vd,)
+                return (vn,), _g(rd)                                    # umov, smov
+            if word >> 21 & 1 == 0 and word >> 10 & 1 == 0:             # permute, ext, table lookup
+                if word & 0x3F208C00 == 0x0E000000:                     # tbl, tbx
+                    return ((vn, vm, vd) if word >> 12 & 1 else (vn, vm)), (vd,)
+                return (vn, vm), (vd,)
+            return (), (vd,)
+        if word >> 10 & 1:                                              # shift by immediate, modified immediate
+            if word >> 19 & 0x1F == 0:                                  # movi, mvni, orr/bic immediate, fmov
+                cmode = word >> 12 & 0xF
+                keep = cmode & 1 and cmode < 0b1100
+                return ((vd,) if keep else ()), (vd,)
+            opcode = word >> 11 & 0x1F
+            keep = opcode in (0b00010, 0b00110) or (u and opcode in (0b01000, 0b01010))   # sra, rsra, sri, sli
+            return ((vn, vd) if keep else (vn,)), (vd,)
+        # by element: a half-word element's index takes the top bit of the register field
+        element = V + (word >> 16 & (0xF if word >> 22 & 3 == 1 else 0x1F))
+        opcode = word >> 12 & 0xF
+        accumulate = opcode in ((0b0000, 0b0100) if u else (0b0001, 0b0101)) or opcode in (0b0010, 0b0011, 0b0110,
+                                                                                            0b0111)
+        return ((vn, element, vd) if accumulate else (vn, element)), (vd,)
+    if word & 0xFF3E0C00 == 0x4E280800:                                 # aes, sha: read and write rd
+        return (vd, vn), (vd,)
+    return (), (vd,)
+
+
+def argument_reads(words: list[int], start: int) -> set[int]:
+    """Argument registers (x0-x7 as 0-7, v0-v7 as 32-39) some path from the entry reads before writing: what
+    the function takes from its caller. A call reads nothing (what it passes on is not counted) and clobbers what
+    calls clobber; a branch out of the function (a tail call) and an indirect branch end the path."""
+    count = len(words)
+    end = start + count * 4
+    leaders = {0}
+    successors: list[list[int]] = []
+    targets: dict[int, int] = {}
+    for index, word in enumerate(words):
+        site = start + index * 4
+        target = None
+        if word & 0xFC000000 == 0x14000000:                             # b
+            target = site + _sign(word & 0x3FFFFFF, 26) * 4
+        elif word & 0xFF000010 == 0x54000000 or word & 0x7E000000 == 0x34000000:   # b.cond, cbz, cbnz
+            target = site + _sign(word >> 5 & 0x7FFFF, 19) * 4
+        elif word & 0x7E000000 == 0x36000000:                           # tbz, tbnz
+            target = site + _sign(word >> 5 & 0x3FFF, 14) * 4
+        elif word & 0xFE000000 == 0xD6000000 and word & 0xFFFFFC1F != 0xD63F0000:   # br, ret
+            leaders.add(index + 1)
+            continue
+        if target is not None:
+            leaders.add(index + 1)
+            if start <= target < end and (target - start) % 4 == 0:
+                targets[index] = (target - start) // 4
+                leaders.add(targets[index])
+    order = sorted(i for i in leaders if i < count)
+    block_of = {first: n for n, first in enumerate(order)}
+    use: list[set[int]] = []
+    defined: list[set[int]] = []
+    for n, first in enumerate(order):
+        last = order[n + 1] if n + 1 < len(order) else count
+        reads, writes = set(), set()
+        for index in range(first, last):
+            r, w = register_use(words[index])
+            reads |= {x for x in r if x not in writes and (x < 8 or V <= x < V + 8)}
+            writes |= set(w)
+        word = words[last - 1]
+        follow = []
+        if word & 0xFC000000 == 0x14000000 or word & 0xFE000000 == 0xD6000000 and word & 0xFFFFFC1F != 0xD63F0000:
+            if last - 1 in targets:
+                follow.append(block_of[targets[last - 1]])
+        else:
+            if last - 1 in targets:
+                follow.append(block_of[targets[last - 1]])
+            if last < count:
+                follow.append(block_of[last])
+        use.append(reads)
+        defined.append(writes)
+        successors.append(follow)
+    live = [set() for _ in order]
+    changed = True
+    while changed:
+        changed = False
+        for n in range(len(order) - 1, -1, -1):
+            out = set()
+            for s in successors[n]:
+                out |= live[s]
+            new = use[n] | (out - defined[n])
+            if new != live[n]:
+                live[n], changed = new, True
+    return live[0] if live else set()
