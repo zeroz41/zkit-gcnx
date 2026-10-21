@@ -122,6 +122,26 @@ class SwitchToolTests(unittest.TestCase):
         from zkit.project import Project
         self.project = Project.load(self.root / "project.json")
 
+    def test_a_link_reaches_a_structor_by_its_partner_when_the_original_names_one(self):
+        """clang emits a class's complete- and base-object destructors (D1, D2) as one function under both names;
+        the module keeps one. A derived destructor's call to its base's D2 lands on the base's D1, and a
+        constructor's C1 on its C2; a pair the original names apart (a class with virtual bases) keeps its own."""
+        from zkit import nxlink
+        self.assertEqual(nxlink.structor_partner("_ZN2fw14CommonResourceD2Ev"), "_ZN2fw14CommonResourceD1Ev")
+        self.assertEqual(nxlink.structor_partner("_ZN2gf3FooC1Ei"), "_ZN2gf3FooC2Ei")
+        self.assertEqual(nxlink.structor_partner("_ZN2mm3mtl12PtrSingletonIN2gf3FooEED2Ev"),
+                         "_ZN2mm3mtl12PtrSingletonIN2gf3FooEED1Ev")
+        self.assertIsNone(nxlink.structor_partner("_ZN3Foo3setEv"))
+        self.assertIsNone(nxlink.structor_partner("_Z6helperi"))
+        (self.root / "symbols.txt").write_text(SYMBOLS.replace("foo_set = ", "_ZN3FooD1Ev = ").replace(
+            "foo_data = ", "_ZN3BarC2Ev = ").replace("numbers = ", "_ZN3BazD2Ev = ") +
+            "_ZN3BazD1Ev = .text:0x00000148; // type:function size:0x4 scope:global\n", encoding="utf-8")
+        linker = nxlink.Linker(self.project, "t")
+        self.assertEqual(linker.by_name("_ZN3FooD2Ev", None, []), 0x100)
+        self.assertEqual(linker.by_name("_ZN3BarC1Ev", None, []), 0x120)
+        self.assertEqual(linker.by_name("_ZN3BazD1Ev", None, []), 0x148)    # named apart: its own
+        self.assertIsNone(linker.by_name("_ZN3QuxD2Ev", None, []))
+
     def read(self, address, kind=None, **options):
         from zkit.inspect_dol import read_data
         return read_data(self.project, "t", address, kind, **options)

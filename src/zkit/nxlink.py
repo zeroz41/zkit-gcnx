@@ -12,7 +12,10 @@ linker resolved it:
   caller inlined), and its bytes are nowhere in the unit;
 - a literal of a mergeable section (strings, constants) where the original's reference lands on the same bytes;
 - a call to an import through its stub, a GOT load through the slot whose dynamic relocation holds the target,
-  a pointer in data only where the original carries a dynamic relocation to the same address.
+  a pointer in data only where the original carries a dynamic relocation to the same address;
+- a constructor or destructor by its partner's name when the original names only one of the pair: clang emits the
+  complete-object and base-object variants (C1/C2, D1/D2) of a class without virtual bases as one function under
+  both names, and the module keeps one, so a derived destructor's call to its base's D2 lands on the base's D1.
 
 The rebuilt module is the original with each placed byte written from the compiled objects. It must equal the
 original, and on an NSO each segment must hash to its header's SHA-256: so `identical` is a proof, not a
@@ -27,6 +30,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import json
+import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,6 +55,18 @@ PC_RELATIVE = {PREL64: 8, PREL32: 4, PREL16: 2}
 UNPLACED = (".eh_frame", ".comment", ".note", ".group", ".llvm_addrsig", ".debug", ".ARM.", ".gcc_except_table")
 SEGMENTS = ("text", "rodata", "data")
 PADDING = 16   # a run of zero bytes up to this long between two placed sections is alignment, not content
+# an Itanium constructor or destructor variant closing its nested name: complete-object (1) or base-object (2)
+STRUCTOR = re.compile(r"([CD])([12])(?=E)")
+
+
+def structor_partner(name: str) -> str | None:
+    """The other variant's name of a mangled constructor or destructor (C1 <-> C2, D1 <-> D2), or None."""
+    found = list(STRUCTOR.finditer(name))
+    if not name.startswith("_ZN") or not found:
+        return None
+    last = found[-1]
+    other = "2" if last.group(2) == "1" else "1"
+    return name[:last.start(2)] + other + name[last.end(2):]
 
 
 @dataclass
@@ -193,6 +209,10 @@ class Linker:
         if len(found) == 1:
             return found[0]
         if not found:
+            partner = structor_partner(name)
+            aliased = self.addresses.get(partner) or [] if partner else []
+            if len(aliased) == 1:
+                return aliased[0]
             return self.stubs.get(name)
         inside = [a for a in found if any(s <= a < e for s, e in unit_ranges)]
         if len(inside) == 1:
