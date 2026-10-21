@@ -142,6 +142,27 @@ class SwitchToolTests(unittest.TestCase):
         self.assertEqual(linker.by_name("_ZN3BazD1Ev", None, []), 0x148)    # named apart: its own
         self.assertIsNone(linker.by_name("_ZN3QuxD2Ev", None, []))
 
+    def test_a_link_points_a_table_slot_at_an_import_the_original_imports_there(self):
+        """A class table's slot holds an import (`__cxa_pure_virtual`): the compiled table points at it by name, and
+        the link keeps the original's word where the module's dynamic relocation names that import."""
+        from types import SimpleNamespace
+        from zkit import nxlink
+        from zkit.elf import Symbol
+        linker = nxlink.Linker(self.project, "t")
+        name, slots = next(iter(linker.imported.items()))
+        imported = Symbol(1, name, 0, 0, "notype", "global", 0)
+        relocation = SimpleNamespace(type=nxlink.ABS64, addend=0, offset=0)
+        value, _ = nxlink._value(linker, SimpleNamespace(elf=None, ranges=[]), imported, relocation, slots[0], None,
+                                 [], {}, None)
+        self.assertEqual(value, -1)
+        item = nxlink.Placed(None, slots[0], bytearray(8), "a.cpp", "name")
+        nxlink._apply(linker, item, relocation, value, imported)
+        self.assertEqual(bytes(item.data), linker.original[slots[0]:slots[0] + 8])
+        other = Symbol(2, name + "_other", 0, 0, "notype", "global", 0)
+        with self.assertRaises(ValueError):
+            nxlink._value(linker, SimpleNamespace(elf=None, ranges=[]), other, relocation, slots[0], None, [], {},
+                          None)
+
     def read(self, address, kind=None, **options):
         from zkit.inspect_dol import read_data
         return read_data(self.project, "t", address, kind, **options)
