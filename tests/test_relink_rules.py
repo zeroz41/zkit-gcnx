@@ -223,6 +223,21 @@ class UnitEvidenceTests(unittest.TestCase):
         units._wide_statics(code, ev)
         self.assertEqual([(lo, hi) for lo, hi, _ in ev.joins], [(0, 100)])
 
+    def test_a_nested_class_citing_nothing_is_its_enclosing_class_s_file(self):
+        """K's 1 cites k.cpp; its nested K::Listener's 2 and 3 cite nothing and another build put them in m.cpp,
+        whose own citation is at 5: they are k.cpp's. J::Inner's 7 has no enclosing file to take."""
+        from unittest import mock
+        code = _Code(10, weak=(9,))
+        classes = {1: "K", 2: "K/Listener", 3: "K/Listener", 6: "J", 7: "J/Inner"}
+        ev = units.Evidence({}, [], [])
+        ev.files = {1: "k.cpp", 2: "m.cpp", 3: "m.cpp", 5: "m.cpp", 8: "n.cpp"}
+        ev.placed = {2, 3}
+        with mock.patch.object(units, "_function_classes", return_value=classes), \
+                mock.patch.object(units, "_folded_destructors", return_value=set()):
+            units._class_files(code, ev)
+        self.assertEqual((ev.files[2], ev.files[3]), ("k.cpp", "k.cpp"))
+        self.assertEqual(ev.classed, {2, 3})
+
     def test_merged_literals_come_in_link_order_once_per_block(self):
         """Units 0-9 in link order, strings then constants: the strings run 0..9 with one misplaced claim (a
         global another unit defines), the constants 0..9 again, then their other read-only data 0..9: blocks start
