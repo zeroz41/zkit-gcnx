@@ -32,7 +32,9 @@ then checked: an address two pieces of evidence name differently, and a name two
 and the matching runs again without them. A function's own `__FILE__` (a path its code points at the start of)
 names the file it was compiled in, so a name whose donor functions cite only other files is refuted for that
 address, and so is a class table's name where a slot's function cites another file than the donor class's function
-in that slot, with that class's own names in its slots; the address may still take another name.
+in that slot, with that class's own names in its slots; the address may still take another name. On the Switch a
+C++ name is refuted for code that reads an argument register its parameters cannot fill (`Matcher.fits`): an
+update that changed a function's parameters changed its name, which no donor has.
 
 On the Switch a shape clears what `aarch64.code_relocations` relocates (calls and branches out of the function,
 adrp pages and the low halves paired with them, adr and literal loads), and a class table is an Itanium `_ZTV`
@@ -692,6 +694,9 @@ class Matcher:
                 self.tables[same.get(name, name)].append([same.get(k, k) for k in slots])
             for name, size in donor.sizes.items():
                 self.sizes[same.get(name, name)].add(size)
+        self._arguments: dict[int, set[int]] = {}           # address -> argument registers its code reads
+        self._capacity: dict[str, tuple[int, int] | None] | None = None
+        self._donor_arguments: dict[str, set[int]] = {}     # key -> argument registers its donors' code reads
         functions = program.functions
         self.extent = {f.address: f.size for f in functions}
         self.neighbours = {f.address: (functions[i - 1].address if i else None,
@@ -894,6 +899,46 @@ class Matcher:
                     self._vtables[start] = slots
         return self._vtables
 
+    def fits(self, address: int, key: str) -> bool:
+        """Whether a Switch function's code can carry a C++ name: every argument register some path reads before
+        writing (`aarch64.argument_reads`) is one the name's parameters fill (`itanium.argument_registers`), or
+        one the donors' code under that name reads as well."""
+        if self.program.platform.name != "switch" or address not in self.extent:
+            return True
+        from .aarch64 import V, argument_reads
+        name = display(key)
+        if not re.match(r"_Z[NL0-9]", name):
+            return True
+        if self._capacity is None:
+            from .platform import demangle_itanium
+            from .itanium import argument_registers
+            keys = sorted({display(k) for k in self.by_key if re.match(r"_Z[NL0-9]", display(k))})
+            self._capacity = {k: argument_registers(d) if d else None
+                              for k, d in zip(keys, demangle_itanium(keys))}
+        capacity = self._capacity.get(name)
+        if capacity is None:
+            return True
+        if address not in self._arguments:
+            try:
+                words = self.program.platform.words(self.program.image, address, self.extent[address])
+            except ValueError:
+                words = []
+            self._arguments[address] = argument_reads(words, address) if words else set()
+        general, vector = capacity
+        extra = {r for r in self._arguments[address] if not (r < general if r < V else r - V < vector)}
+        if not extra:
+            return True
+        # a read the donors' own code under that name makes too is the function's (an uninitialized local), not
+        # a parameter the name lacks
+        if key not in self._donor_arguments:
+            reads: set[int] = set()
+            for signature in self.by_key.get(key, ()):
+                if signature.code:
+                    words = list(struct.unpack(f"<{len(signature.code) // 8}I", bytes.fromhex(signature.code)))
+                    reads |= argument_reads(words, 0)
+            self._donor_arguments[key] = reads
+        return extra <= self._donor_arguments[key]
+
     def run(self, strings: bool = True, rounds: int = 8) -> list[Proposal]:
         """Proposals, after withdrawing every name some evidence contradicts and matching again without it."""
         banned_addresses: set[int] = set()
@@ -963,7 +1008,7 @@ class _State:
     def name(self, address: int, named: str, kind: str, evidence: str, source: int | None = None,
              entries: list[Signature] = (), agreed: int = 0) -> bool:
         if address in self.banned_addresses or named in self.banned_keys or self.known.get(address) == named \
-                or (address, named) in self.refuted:
+                or (address, named) in self.refuted or kind == "function" and not self.m.fits(address, named):
             return False
         if address in self.known:
             self.contradicted.add(address)

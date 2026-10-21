@@ -1514,3 +1514,67 @@ def check(program: Program, compile, scratch: Path, class_filter: str | None = N
             "limits": "A table equal word for word proves the declaration's bases, virtual block and the offsets "
                       "of its bases; return types and fields are not in the table (padding stands for fields a "
                       "derived class's layout proves). `TUnk_` classes are bases no evidence names yet."}
+
+
+_SCALAR = re.compile(r"^(?:const\s+)?(?:bool|char|signed char|unsigned char|short|unsigned short|int|unsigned int|long|"
+                     r"unsigned long|long long|unsigned long long|wchar_t|char16_t|char32_t)(?:\s+const)?$")
+
+
+def parameters(demangled: str) -> tuple[str, list[str], bool] | None:
+    """(qualified name, parameter types, const) of a demangled function name, by its outermost parameter list."""
+    text, const = (demangled[:-6], True) if demangled.endswith(" const") else (demangled, False)
+    if not text.endswith(")"):
+        return None
+    depth = 0
+    for index in range(len(text) - 1, -1, -1):
+        if text[index] in ")>":
+            depth += 1
+        elif text[index] in "(<":
+            depth -= 1
+            if depth == 0:
+                if text[index] != "(":
+                    return None
+                head, inner = text[:index], text[index + 1:-1]
+                break
+    else:
+        return None
+    params, depth, current = [], 0, ""
+    for ch in inner:
+        depth += ch in "<(" and 1 or ch in ">)" and -1 or 0
+        if ch == "," and depth == 0:
+            params.append(current.strip())
+            current = ""
+        else:
+            current += ch
+    if current.strip():
+        params.append(current.strip())
+    return head, ([] if params == ["void"] else params), const
+
+
+def argument_registers(demangled: str) -> tuple[int, int] | None:
+    """The most AAPCS64 argument registers a C++ function's parameters can fill: (general, SIMD/FP). A member
+    function may take `this` in x0 (its name does not say whether it is static), a class passed by value up to
+    two general or four SIMD/FP registers (its size is unknown here); None for a variadic or unreadable name."""
+    parsed = parameters(demangled)
+    if parsed is None:
+        return None
+    head, params, _ = parsed
+    if "..." in params:
+        return None
+    general = vector = 0
+    for param in params:
+        if re.search(r"\(\S*::\*\)", param):                  # a pointer to member function: two words
+            general += 2
+        elif param.endswith(("*", "&", "* const", "& const")) or re.search(r"\((?:\*|&)\)", param):
+            general += 1
+        elif param in ("float", "double", "float const", "double const"):
+            vector += 1
+        elif _SCALAR.match(param):
+            general += 1
+        else:
+            general, vector = general + 2, vector + 4
+    bare = head
+    while re.search(r"<[^<>]*>", bare):
+        bare = re.sub(r"<[^<>]*>", "", bare)
+    bare = bare.split("operator")[0] if "operator" in bare else bare.split(" ")[-1]
+    return general + ("::" in bare), vector

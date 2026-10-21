@@ -336,5 +336,24 @@ class HeaderDebtTests(unittest.TestCase):
         self.assertNotIn("local_virtual", keys)                           # in its class's header: the class
 
 
+class ArgumentRegisterTests(unittest.TestCase):
+    def test_the_registers_a_parameter_list_fills(self):
+        """A member may take `this`; a pointer to member function is two words; a class by value up to two
+        general or four SIMD/FP registers; a variadic list says nothing."""
+        cases = {
+            "event::Manager::play(char const*, gf::GF_OBJ_HANDLE*, unsigned int, unsigned int, unsigned int, "
+            "unsigned int, bool)": (8, 0),
+            "btl::BattleCharacter::IsPlayer() const": (1, 0),
+            "void fw::PadRelay::bindAction<gf::Pad, void (gf::Pad::*)()>(char const*, gf::Pad*, void (gf::Pad::*)())":
+                (5, 0),
+            "Color::operator unsigned int() const": (1, 0),
+            "mixing(int*, int)": (2, 0),
+            "scale(mm::Vec3, float)": (2, 5),
+        }
+        for demangled, expected in cases.items():
+            self.assertEqual(itanium.argument_registers(demangled), expected, demangled)
+        self.assertIsNone(itanium.argument_registers("printf(char const*, ...)"))
+
+
 if __name__ == "__main__":
     unittest.main()
