@@ -536,6 +536,33 @@ class SwitchSignatureTests(unittest.TestCase):
         self.assertNotIn("_ZTV3Box", found.values())
         self.assertNotIn(at["_ZN5Timer3finEv"], found)
 
+    def test_a_wrapper_among_other_code_takes_no_name(self):
+        """An update replaced the code between two matched functions: a one-call wrapper there calls what a donor
+        wrapper called, but the code around it is not the code around the donor's (more copies on one side, or
+        copies whose order another one's call refutes), so it takes no name; where its neighbour is, it does."""
+        callees = "".join(f"__attribute__((noinline)) int {f}(int *v, int n) {{ int t = {k}; for (int i = 0; i < n; i++)"
+                          f" t = t * {k + 30} + (v[i] ^ {k * 7}) - i * {k}; return t ^ {k * 1000 + 17}; }}\n"
+                          for k, f in enumerate(("fa", "fb", "fc", "gx", "gy"), 1))
+        long = lambda name, k: (f"int {name}(int *v, int n) {{ int s = {k}; for (int i = 1; i < n; i++) {{ s ^= v[i] "
+                                f"* {k * 3 + 1} + (v[i - 1] >> {k % 5 + 1}); if (s & {k}) s += n * {k}; }} return s - {k}; }}\n")
+        wrap = lambda name, callee: f"int {name}(int *v, int n) {{ return {callee}(v, n); }}\n"
+        frame = lambda middle: GAP_DONOR.split("int mixing(")[0] + callees + middle + "int last(" + \
+            GAP_DONOR.split("int last(")[1]
+        cases = [  # (donor middle, target middle, target wrapper, its name or None)
+            (wrap("w", "fa") + long("mid", 3), long("added", 8) + wrap("x", "fa") + wrap("y", "gy"), "x", None),
+            (wrap("w", "fa") + long("mid", 3), wrap("x", "fa") + long("mid", 3) + wrap("y", "gy"), "x", "w"),
+            (wrap("w1", "fa") + long("big1", 4) + wrap("w2", "fb") + long("big2", 5) + wrap("w3", "fc"),
+             wrap("x1", "gx") + wrap("x2", "gy") + wrap("x3", "fc") + long("added", 9), "x3", None)]
+        for donor_middle, target_middle, wrapper, expected in cases:
+            elf, symbols, _ = self.module("donor", frame(donor_middle), hide=False)
+            donor = signatures.build("earlier", elf, symbols)
+            elf, symbols, at = self.module("target", frame(target_middle), hide=True)
+            found = {p.address: p.name for p in
+                     signatures.propose(Program.from_symbols(Switch(), elf, symbols), [donor])}
+            self.assertEqual(found.get(at["_Z5firstPii"]), "_Z5firstPii")
+            self.assertEqual(found.get(at[f"_Z{len(wrapper)}{wrapper}Pii"]),
+                             expected and f"_Z{len(expected)}{expected}Pii", (target_middle, found))
+
     def test_code_that_reads_like_its_twin(self):
         """A field added before two others moves both: the update's `sumA` reads the offset the first build's
         `sumB` read, so its code is exactly that `sumB`'s. Code that differs from a sibling in one immediate is
