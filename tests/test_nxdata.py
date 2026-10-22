@@ -711,3 +711,59 @@ class OutOfLineCallTests(unittest.TestCase):
             self.assertEqual(owner[tick], "game/manager.cpp")
             self.assertEqual(owner[helper], "game/manager.cpp")
             self.assertNotIn(owner[update], ("game/manager.cpp", "game/other.cpp"))
+
+
+# beta.cpp's Beta::s_size, which only user.cpp's code reads (linked first), lies between first.cpp's data and
+# beta.cpp's own
+GAP = {
+    "user.cpp": """void report(const char *file, int line);
+struct Beta { static int s_size; };
+int user_data[2] = {5, 6};
+int user(int v) { if (v > 9) report("C:/proj/src/game/user.cpp", 3); return Beta::s_size + user_data[v & 1]; }
+""",
+    "first.cpp": """void report(const char *file, int line);
+int first_data[4] = {1, 2, 3, 4};
+int first_more[2] = {7, 8};
+int first(int i) { if (i > 3) report("C:/proj/src/game/first.cpp", 1); return first_data[i] + first_more[i & 1]; }
+""",
+    "beta.cpp": """void report(const char *file, int line);
+struct Beta { static int s_size; static int s_own; Beta(); void set(int v); };
+int Beta::s_size = 7;
+int Beta::s_own = 3;
+Beta::Beta() { s_own = 1; }
+void Beta::set(int v) { if (v > 9) report("C:/proj/src/game/beta.cpp", 2); s_own = v; }
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class GapOwnerTests(unittest.TestCase):
+    def test_data_between_two_units_is_the_one_its_qualifier_names(self):
+        """No claim places Beta::s_size: only user.cpp's code uses it, against link order. Between first.cpp's
+        range and beta.cpp's, its qualifier Beta names beta.cpp's code, so beta.cpp's range starts with it."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in GAP.items():
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, "-ffunction-sections", "-fdata-sections", str(root / name), "-o",
+                                str(root / name.replace(".cpp", ".o"))], check=True, capture_output=True)
+            link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                    *(str(root / n.replace(".cpp", ".o")) for n in GAP)]
+            subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
+            elf = Elf.load(root / "full.elf")
+            at = {s.name: s.value for s in elf.symbols}
+            module = nx.load(root / "full.elf")
+            functions = module.functions()
+            names = {s.value: s.name for s in elf.symbols if s.kind == "func"}
+            symbols = [Symbol(names.get(a, f"fn_{a:08X}"), ".text", a, "function", s, "global")
+                       for a, s in functions]
+            symbols += [Symbol(s.name, "." + module.segment_at(s.value).name, s.value, "object", s.size, "global")
+                        for s in elf.symbols if s.kind == "object" and s.size]
+            program = Program.from_symbol_list(Switch(), module, symbols)
+            proposed = units.propose(program)["units"]
+            size, own = at["_ZN4Beta6s_sizeE"], at["_ZN4Beta5s_ownE"]
+            self.assertLess(at["first_data"], size)
+            self.assertLess(size, own)
+            holder = [u["unit"] for u in proposed for row in u["data"]
+                      if row["start_key"] <= size < row["end_key"]]
+            self.assertEqual(holder, ["game/beta.cpp"])

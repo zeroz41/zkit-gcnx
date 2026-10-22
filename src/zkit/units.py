@@ -1225,7 +1225,98 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
             out.append(row)
             last = row
     out.sort()
+    if program.platform.name == "switch":
+        out = _gap_owners(program, out, owner, order, weak, merged)
     return out
+
+
+def _data_qualifier(text: str) -> list[str]:
+    """The `::` parts of a demangled data symbol's name (`ssd::SoundCore::audioRendererConfigName_`), brackets
+    kept whole."""
+    depth, parts, start = 0, [], 0
+    for at, c in enumerate(text):
+        if c == "<":
+            depth += 1
+        elif c == ">":
+            depth -= 1
+        elif depth == 0 and text.startswith("::", at):
+            parts.append(text[start:at])
+            start = at + 2
+    return [p for p in parts + [text[start:]] if p]
+
+
+def _gap_owners(program: Program, out: list[tuple[int, int, str, str]], owner: dict[int, str],
+                order: dict[str, int], weak: set[int], merged: bool) -> list[tuple[int, int, str, str]]:
+    """A data object between two units' ranges of a section that no claim placed (only other units' code uses it,
+    or several units' do) is one of the units linked between them, both included: the linker lays out each
+    object's section whole, in link order. It is the one whose code its name's deepest qualifier qualifies
+    (`ssd::SoundCore::audioRendererConfigName_` is SoundCore's unit's), when only one candidate's does; the
+    objects so placed keep link order, or none of the gap's is. Weak data (the first user's), tables, guards and
+    a function's statics follow their own rules, and merged literals their blocks."""
+    from .platform import demangle_itanium
+    named = [(i, f.name) for i, f in enumerate(program.functions) if f.name.startswith("_Z") and i in owner]
+    quals: dict[str, set[str]] = collections.defaultdict(set)   # unit -> every qualifier its functions carry
+    for (index, _), text in zip(named, demangle_itanium([n for _, n in named])):
+        parts = _qualified(text) if text else None
+        if parts and len(parts) > 1:
+            for k in range(1, len(parts)):
+                quals[owner[index]].add("::".join(parts[:k]))
+    by_order = sorted(order, key=order.__getitem__)
+    gaps: list[tuple[int, int, int]] = []        # (index in out of the range before, gap start, gap end)
+    for k in range(len(out) - 1):
+        a, b = out[k], out[k + 1]
+        if a[3] == b[3] and a[1] < b[0] and a[2] in order and b[2] in order and order[a[2]] < order[b[2]] \
+                and not (merged and a[3] in MERGED_SECTIONS):
+            gaps.append((k, a[1], b[0]))
+    if not gaps:
+        return out
+    starts = program._object_starts
+    candidates = []
+    for k, start, stop in gaps:
+        index = bisect.bisect_left(starts, start)
+        while index < len(starts) and program.objects[index].address < stop:
+            o = program.objects[index]
+            index += 1
+            if o.address + max(o.size, 1) > stop or o.section != out[k][3] or o.scope == "weak" or \
+                    o.address in weak or not o.name.startswith("_ZN"):
+                continue
+            candidates.append((k, o))
+    texts = demangle_itanium([o.name for _, o in candidates])
+    placed: dict[int, list[tuple[int, int, str]]] = collections.defaultdict(list)
+    for (k, o), text in zip(candidates, texts):
+        parts = _data_qualifier(text) if text else []
+        if len(parts) < 2:
+            continue
+        first, last = order[out[k][2]], order[out[k + 1][2]]
+        window = by_order[first:last + 1]
+        best, chosen = 0, []
+        for unit in window:
+            depth = next((d for d in range(len(parts) - 1, 0, -1) if "::".join(parts[:d]) in quals[unit]), 0)
+            if depth > best:
+                best, chosen = depth, [unit]
+            elif depth and depth == best:
+                chosen.append(unit)
+        if len(chosen) == 1:
+            placed[k].append((o.address, o.address + max(o.size, 1), chosen[0]))
+    rows = list(out)
+    for k, objects in placed.items():
+        objects.sort()
+        if any(order[x[2]] > order[y[2]] for x, y in zip(objects, objects[1:])):
+            continue                                  # against link order: no placement is safe
+        before, after = rows[k], rows[k + 1]
+        spans: dict[str, list[int]] = {}
+        for start, stop, unit in objects:
+            span = spans.setdefault(unit, [start, stop])
+            span[0], span[1] = min(span[0], start), max(span[1], stop)
+        for unit, (start, stop) in spans.items():
+            if unit == before[2]:
+                rows[k] = before = (before[0], stop, unit, before[3])
+            elif unit == after[2]:
+                rows[k + 1] = after = (start, after[1], unit, after[3])
+            elif not any(r[2] == unit and r[3] == before[3] for r in rows):
+                rows.append((start, stop, unit, before[3]))
+    rows.sort()
+    return rows
 
 
 def _dropped_files(program: Program, ev: Evidence, order: dict[str, int]) -> list[tuple[int, int, str, str]]:
