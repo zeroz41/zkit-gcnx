@@ -32,7 +32,10 @@ def compile_command(project: Project, target: str, unit: dict) -> tuple[list[str
     source = (unit.get("metadata") or {}).get("source_path")
     base = unit.get("base_path")
     if not source or not base:
-        raise ValueError(f"Unit {unit.get('name')} has no source file yet")
+        planned = _planned_command(project, target, unit)
+        if planned is None:
+            raise ValueError(f"Unit {unit.get('name')} has no source file yet")
+        return planned
     # The build's own rule first: a compile_commands.json beside a ninja build is often an editor database
     # (clangd) whose compiler is not the one that builds the objects.
     if (root / "build.ninja").is_file():
@@ -50,6 +53,31 @@ def compile_command(project: Project, target: str, unit: dict) -> tuple[list[str
                 argv = entry.get("arguments") or shlex.split(entry["command"])
                 return list(argv), Path(entry["directory"]), entry["file"]
     raise ValueError(f"No build command for {base}: neither build.ninja nor compile_commands.json names it")
+
+
+def _planned_source(project: Project, target: str, unit: dict) -> str | None:
+    """The source a unit with no file yet will have in a zkit build (`src/<unit>` as its splits.txt names it)."""
+    from . import build
+    config = project.target(target)
+    if build.settings(config) is None or not config.get("splits"):
+        return None
+    splits = project.file(config["repository"], config["splits"])
+    name = next((u for u in build.unit_names(splits) if build.stem(u) == unit.get("name")), None)
+    return f"src/{name}" if name else None
+
+
+def _planned_command(project: Project, target: str, unit: dict) -> tuple[list[str], Path, str] | None:
+    """A unit with no source file yet: the command a zkit build will compile it with once it has one."""
+    from . import build
+    source = _planned_source(project, target, unit)
+    if source is None:
+        return None
+    config = project.target(target)
+    root = project.root(config["repository"])
+    name = source[len("src/"):]
+    step = build._compile(root, build.unit_settings(build.settings(config), name), name,
+                          build.layout(target, config), {}, [])
+    return step["argv"], root, source
 
 
 def _rel(path: Path, base: Path) -> str:
@@ -137,7 +165,7 @@ def compare(project: Project, target: str, unit: dict, name: str, text: str, kee
     from . import objects
     argv, workdir, source_arg = compile_command(project, target, unit)
     root = project.root(project.target(target)["repository"])
-    source_path = root / unit["metadata"]["source_path"]
+    source_path = root / ((unit.get("metadata") or {}).get("source_path") or _planned_source(project, target, unit))
     scratch = workdir / "build"  # ignored by the project; the compiler sees short relative paths
     scratch_dir = scratch if scratch.is_dir() else None
     with tempfile.TemporaryDirectory(prefix="zkit-try-", dir=scratch_dir) as work:
