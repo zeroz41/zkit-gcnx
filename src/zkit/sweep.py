@@ -143,6 +143,7 @@ def rewrites(text: str, body: dict) -> list[Rewrite]:
                                        ((a[0], b[1], right + middle + left),)))
         if kind == "CompoundStmt":
             _adjacent(text, kids, out)
+            _temporaries(text, kids, out)
         for kid in kids:
             visit(kid, node)
     visit(body, None)
@@ -282,6 +283,79 @@ STATEMENTS = ("BinaryOperator", "CompoundAssignOperator", "CXXOperatorCallExpr",
 def _statement_end(text: str, end: int) -> int | None:
     semicolon = text.find(";", end)
     return semicolon + 1 if semicolon >= 0 and not text[end:semicolon].strip() else None
+
+
+VALUES = INTEGERS + ("bool", "float", "double")
+
+
+def _uses(node: dict, name: str, found: list[dict]) -> list[dict]:
+    if node.get("kind") == "DeclRefExpr" and (node.get("referencedDecl") or {}).get("name") == name:
+        found.append(node)
+    for kid in _children(node):
+        _uses(kid, name, found)
+    return found
+
+
+def _local_name(text: str, lhs: str) -> str | None:
+    """A local's name for a value stored to `lhs` (`pVec->x` -> `x`, `m_total` -> `total`), unused in the text."""
+    words = re.findall(r"[A-Za-z_]\w*", lhs)
+    if not words:
+        return None
+    base = re.sub(r"^(m_|s_|p)(?=[A-Za-z])", "", words[-1]) or words[-1]
+    base = base[0].lower() + base[1:]
+    for candidate in [base] + [f"{base}{n}" for n in range(2, 9)]:
+        if not re.search(rf"\b{re.escape(candidate)}\b", text):
+            return candidate
+    return None
+
+
+def _temporaries(text: str, kids: list[dict], out: list[Rewrite]) -> None:
+    """A single-use local written into its use (when nothing between touches what it reads), and a stored value
+    held in a local first: how values are held decides clang's register choice and schedule."""
+    for at, kid in enumerate(kids):
+        decls = _children(kid)
+        if kid.get("kind") == "DeclStmt" and len(decls) == 1 and decls[0].get("kind") == "VarDecl" and \
+                _children(decls[0]) and (decls[0].get("type") or {}).get("qualType") in VALUES:
+            var, name = decls[0], decls[0].get("name")
+            value, whole = _span(_children(var)[0]), _span(kid)
+            later = kids[at + 1:]
+            uses = [u for k in later for u in _uses(k, name, [])]
+            if not value or not whole or len(uses) != 1 or not _span(uses[0]):
+                continue
+            holder = next(i for i, k in enumerate(later) if _uses(k, name, []))
+            reads, writes = set(), set()
+            if not _effects(_children(var)[0], reads, writes) or \
+                    not all(_independent(_children(var)[0], k) for k in later[:holder]):
+                continue
+            use = _span(uses[0])
+            end = whole[1] if text[whole[1] - 1:whole[1]] == ";" else (_statement_end(text, whole[1]) or whole[1])
+            while end < len(text) and text[end] in " \t":
+                end += 1
+            if text[end:end + 1] == "\n":
+                end += 1
+            start = whole[0]
+            while start > 0 and text[start - 1] in " \t":
+                start -= 1
+            inlined = _wrap(text[value[0]:value[1]])
+            out.append(Rewrite(f"inline {name}", ((start, end, ""), (use[0], use[1], inlined))))
+        stripped = _strip(kid)
+        parts = _children(stripped)
+        if kid.get("kind") == "BinaryOperator" and kid.get("opcode") == "=" and len(parts) == 2:
+            rhs = _strip(parts[1])
+            qual = (parts[1].get("type") or {}).get("qualType", "")
+            a, b = _span(parts[0]), _span(parts[1])
+            if qual not in VALUES or rhs.get("kind") not in ("BinaryOperator", "UnaryOperator", "CallExpr",
+                                                             "CXXMemberCallExpr", "ConditionalOperator") or \
+                    not a or not b:
+                continue
+            lhs = text[a[0]:a[1]]
+            name = _local_name(text, lhs)
+            line = text.rfind("\n", 0, a[0]) + 1
+            indent = text[line:a[0]] if not text[line:a[0]].strip() else ""
+            if name is None:
+                continue
+            held = f"{qual} {name} = {text[b[0]:b[1]]};\n{indent}{lhs} = {name}"
+            out.append(Rewrite(f"hold `{lhs}`'s value in {name}", ((a[0], b[1], held),)))
 
 
 CALLS = ("CallExpr", "CXXMemberCallExpr", "CXXOperatorCallExpr", "CXXConstructExpr", "CXXNewExpr",
