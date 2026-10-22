@@ -960,10 +960,15 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     soft: list[tuple[int, int, str, str]] = []       # weak data, merged literals: the first unit using it, where
                                                      # the order allows
     constructed = _constructed(program, owner)
+    keyed = _key_function_tables(program, owner, weak) if program.platform.name == "switch" else []
+    keyed_at = {row[0] for row in keyed}               # where the order of the others allows (below): a table
+                                                       # out of its key function's order says the units are wrong
     for o, fs in program.users().items():              # however far apart its users are: they are one unit's
         homes = {owner.get(i) for i in fs} - {None}
         if o.name in LINKER_OBJECTS or o.section in TABLES + ARRAYS + LINKER_SECTIONS:   # the linker's, or a
             continue                                                                    # table entry (below)
+        if o.address in keyed_at:                                       # its key function's unit (above)
+            continue
         if program.in_code(o.address):                                  # data in code is in its unit's code range
             continue
         definers = constructed.get(o.address, set())
@@ -1000,8 +1005,12 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     for row in pinned:
         by_section[place(row)].append(row)
     by_soft: dict[tuple, list] = collections.defaultdict(list)
+    by_keyed: dict[tuple, list] = collections.defaultdict(list)
     for claim in soft:
         by_soft[place(claim)].append(claim)
+        by_section.setdefault(place(claim), [])
+    for claim in keyed:
+        by_keyed[place(claim)].append(claim)
         by_section.setdefault(place(claim), [])
     for (section, instance, _block), rows in by_section.items():
         rows = sorted(r if r in pinned else _whole_symbols(program, [r])[0] for r in rows)
@@ -1017,8 +1026,9 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
         fixed_units = {r[2] for r in stand}
         kept = [r for r in kept if r not in pinned and r[2] not in fixed_units
                 and not any(a < r[1] and r[0] < b for a, b, _, _ in stand)]
-        kept += _fitting(kept, _whole_symbols(program, by_soft.get((section, instance, _block), [])), order,
-                         ordered, fixed_units, stand)
+        for group in (by_keyed, by_soft):              # a key function's table before the first users' copies
+            kept += _fitting(kept, _whole_symbols(program, group.get((section, instance, _block), [])), order,
+                             ordered, fixed_units, stand)
         spans: dict[str, list[int]] = {}
         for start, stop, unit, _ in kept:
             span = spans.setdefault(unit, [start, stop])
@@ -1140,6 +1150,34 @@ def _through_data(program: Program, ev: Evidence, claims: list[tuple[int, int, s
                 starts.insert(index, row[0])
                 claimed.insert(index, row[:3])
                 found = True
+    return out
+
+
+def _key_function_tables(program: Program, owner: dict[int, str], weak: set[int]) -> list[tuple[int, int, str, str]]:
+    """Itanium class tables with a key function (the class's first virtual defined out of line): clang emits such
+    a table in that function's unit alone, whatever other code refers to it (a template instance in another file
+    that builds the class). So a strong table whose class's own strong methods in its slots are all in one unit
+    is that unit's. A weak table (no key function) goes by its users."""
+    from .itanium import methods, recover
+    named = methods(program)
+    out = []
+    for cls in recover(program).values():
+        table = program.object_at(cls.table) if cls.table is not None else None
+        if table is None or table.address != cls.table or table.scope == "weak" or table.address in weak:
+            continue
+        homes = set()
+        for group in cls.groups:
+            for slot in group.slots:
+                index = program.function_index.get(slot) if isinstance(slot, int) else None
+                method = named.get(slot)
+                if index is None or method is None or method.thunk or method.owner != cls.name:
+                    continue
+                if program.functions[index].scope == "weak" or slot in weak:
+                    continue
+                homes.add(owner.get(index))
+        homes.discard(None)
+        if len(homes) == 1:
+            out.append((table.address, table.address + max(table.size, 1), homes.pop(), table.section))
     return out
 
 

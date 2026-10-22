@@ -238,3 +238,58 @@ class InitializerNameTests(unittest.TestCase):
                      for i in range(u["first"], u["end"])}
             self.assertEqual(owner[initializer], "game/a.cpp")
             self.assertEqual(owner[at["_ZN1BC2Ev"].value], "game/b.cpp")
+
+
+# a class whose key function is in the first file, built only by a template instance the second file uses
+KEYED = {
+    "a.cpp": """void report(const char *file, int line);
+struct Node { virtual ~Node(); virtual int run(int v); int m_count; };
+Node::~Node() {}
+int Node::run(int v) { if (v > 99) report("C:/proj/src/game/a.cpp", 4); return m_count += v; }
+int touchA(int v) { if (v < -5) report("C:/proj/src/game/a.cpp", 6); return v * 7; }
+""",
+    "b.cpp": """void report(const char *file, int line);
+struct Node { virtual ~Node(); virtual int run(int v); int m_count; };
+template <class T> T *make(void *where) { return new (where) T(); }
+inline void *operator new(unsigned long, void *where) { return where; }
+Node *build(void *where) { if (!where) report("C:/proj/src/game/b.cpp", 5); return make<Node>(where); }
+int touchB(int v) { if (v == 3) report("C:/proj/src/game/b.cpp", 7); return v + 1; }
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class KeyFunctionTableTests(unittest.TestCase):
+    def test_a_table_is_its_key_functions_units_whatever_builds_it(self):
+        """Only the second file's code (a template instance constructing the class) refers to `Node`'s table,
+        but clang emits a table with its key function, in the first file: the table is that file's."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in KEYED.items():
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, str(root / name), "-o", str(root / name.replace(".cpp", ".o"))],
+                               check=True, capture_output=True)
+            link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                    str(root / "a.o"), str(root / "b.o")]
+            subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
+            subprocess.run([*link, "--strip-all", "-o", str(root / "main.elf")], check=True, capture_output=True)
+            at = {s.name: s for s in Elf.load(root / "full.elf").symbols}
+            module = nx.load(root / "main.elf")
+            named = {at[n].value: n for n in ("_ZN4NodeD2Ev", "_ZN4NodeD0Ev", "_ZN4Node3runEi")
+                     if n in at}
+            weak = {at[n].value for n in at if n.startswith("_Z4makeI4NodeEPT_Pv")}
+            symbols = [Symbol(named.get(a, f"fn_{a:08X}"), ".text", a, "function", s,
+                              "weak" if a in weak else "global") for a, s in module.functions()]
+            symbols += [Symbol(f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section in nxdata.objects(module, module.functions())
+                        if a != at["_ZTV4Node"].value]
+            symbols.append(Symbol("_ZTV4Node", ".data", at["_ZTV4Node"].value, "object", at["_ZTV4Node"].size,
+                                  "global"))
+            symbols += [Symbol(name or f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section, name in nxdata.linker_tables(module)]
+            program = Program.from_symbol_list(Switch(), module, symbols)
+            proposal = units.propose(program)
+            table = at["_ZTV4Node"].value
+            owners = [unit["unit"] for unit in proposal["units"] for row in unit["data"]
+                      if row["start_key"] <= table < row["end_key"]]
+            self.assertEqual(owners, ["game/a.cpp"])
