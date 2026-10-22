@@ -79,6 +79,8 @@ class Evidence:
     edges: dict[tuple[int, int, str], int] = field(default_factory=dict)   # where a file's evidence ends or
                                                                            # starts -> the side it is on
     roots: list[str] = field(default_factory=list)
+    apart: list[tuple[int, int, str]] = field(default_factory=list)   # separations placed after all the others:
+                                                                      # only where those left none
 
     def joined(self, count: int, joins: list[tuple[int, int, str]] | None = None) -> list[bool]:
         """joined[p]: a boundary before function p would split one unit (by `joins`, default all of them)."""
@@ -139,6 +141,7 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     ev = Evidence(local, joins + firsts, separations, firsts=firsts)
     _file_evidence(program, ev, placed)
     ev.joins += _table_joins(program, ev)
+    _out_of_line_calls(program, ev)
     _initializer_ends(program, ev)
     _start_up_object(program, ev)
     return ev
@@ -220,6 +223,33 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
             continue
         out.append((own[0], own[-1], f"the functions only the table at {text(address)} holds"))
     return out
+
+
+INLINE_INSTRUCTION, INLINE_CALL = 5, 25    # LLVM's inline cost of an instruction and of a call it makes
+INLINED = 150       # well under the -O2/-O3 threshold (225/250): a callee this cheap is always inlined
+
+
+def _out_of_line_calls(program: Program, ev: Evidence) -> None:
+    """Switch (clang -O3): a direct call to a cheap function the same file defines is always inlined, so a call to
+    one that stayed a call is to another file's (a base class's constructor, a utility's accessor): a boundary
+    lies between the two, placed after every other boundary and only where those left none. Cheap is LLVM's
+    inline cost, not size: a short function making several calls stays a call within its file. Not for a
+    function a class table holds, whose call may have been a virtual one the optimizer turned direct after
+    inlining."""
+    if program.platform.name != "switch":
+        return
+    held = {pointee for _, pointee in program.pointers}
+    functions = program.functions
+    for caller, callees in program.calls.items():
+        for callee in callees:
+            function = functions[callee]
+            made = len(program.calls.get(callee, ()))
+            cost = INLINE_INSTRUCTION * max(function.size // 4 - made, 0) + INLINE_CALL * made
+            if callee == caller or cost > INLINED or function.address in held or abs(callee - caller) > TIGHT:
+                continue
+            lo, hi = min(caller, callee) + 1, max(caller, callee)
+            ev.apart.append((lo, hi, f"{functions[caller].name} calls {function.name} "
+                                     f"({function.size} bytes) without inlining it"))
 
 
 def _first_users(program: Program) -> list[tuple[int, int, str]]:
@@ -770,7 +800,10 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     # then the others, narrowest first: one an inner one did not meet (it had no place the joins allow) still
     # needs its boundary
     rest = sorted(set(rows) - set(stated), key=lambda r: (r[1] - r[0], r[0]))
-    for row in [r for r in stated if r not in ev.edges] + [r for r in stated if r in ev.edges] + rest:
+    apart = sorted(set(ev.apart), key=lambda r: (r[1] - r[0], r[0]))
+    apart_rows = set(apart)
+    owner = _function_classes(program, qualifiers=True) if apart else {}
+    for row in [r for r in stated if r not in ev.edges] + [r for r in stated if r in ev.edges] + rest + apart:
         lo, hi, because = row
         toward = ev.edges.get(row, lo)  # among equal places, the one nearest the evidence (else the earliest)
         if any(lo <= c.position <= hi for c in chosen):
@@ -782,6 +815,11 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
             # user's unit whatever the files between cite (one file including another)
         if not candidates:
             continue
+        if row in apart_rows:           # a call says nothing of a class's or namespace's run of functions
+            whole = [p for p in candidates if not (owner.get(p - 1) and owner.get(p - 1) == owner.get(p))]
+            if not whole:
+                continue
+            candidates = whole
         best = min(candidates, key=lambda p: (*cost(p), abs(p - toward)))
         chosen.append(Boundary(best, (candidates[0], candidates[-1]), crossings[best], because))
     return sorted(chosen, key=lambda c: c.position)
