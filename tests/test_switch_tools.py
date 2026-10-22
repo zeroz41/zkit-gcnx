@@ -194,6 +194,44 @@ class SwitchToolTests(unittest.TestCase):
             nxlink._value(linker, SimpleNamespace(elf=None, ranges=[]), other, relocation, slots[0], None, [], {},
                           None)
 
+    def test_a_table_slot_reaches_an_inline_the_link_kept_elsewhere_by_its_pointer(self):
+        """A class table's slot points at an inline virtual the object emits as its own COMDAT copy, which no name
+        places. The module's pointer in that slot says where it goes: another unit's identical copy (the one the
+        link kept, or folded with identical code) is used, not placed; a copy whose bytes differ is a problem; a
+        pointer inside the unit places it there."""
+        from types import SimpleNamespace
+        from zkit import nxlink
+        from zkit.elf import Section, Symbol
+        from zkit.platform import Switch
+        ret = bytes.fromhex("c0035fd6")
+        original = bytearray(0x100)
+        original[0x40:0x44] = ret
+        original[0x80:0x84] = ret
+        slot, outside, inside = 0xC0, 0x40, 0x80
+        linker = SimpleNamespace(original=bytes(original), platform=Switch(), module=SimpleNamespace(pointers={}),
+                                 by_name=lambda name, hint, ranges: None)   # no name places it
+        section = Section(1, ".text._ZN3Foo2vfEv", 1, nxlink.SHF_ALLOC | nxlink.SHF_EXECINSTR | nxlink.SHF_GROUP,
+                          0, 0, 4, 0, 0, 0)
+        elf = SimpleNamespace(sections=[None, section], relocations=lambda s: [], data=lambda s: ret)
+        symbol = Symbol(1, "_ZN3Foo2vfEv", 0, 4, "func", "weak", 1)
+        relocation = SimpleNamespace(type=nxlink.ABS64, addend=0, offset=0)
+        obj = SimpleNamespace(elf=elf, ranges=[(0x80, 0x90), (0xC0, 0xC8)], whole=True, unit="u")
+
+        def value(pointee, data=ret):
+            elf.data = lambda s: data
+            result, placed = nxlink.UnitLink("u", True), {}
+            address, new = nxlink._value(linker, obj, symbol, relocation, slot, ("address", pointee), [], placed,
+                                         result)
+            return address, new, placed, result
+
+        address, new, placed, result = value(outside)
+        self.assertEqual((address, new, placed, result.folded), (outside, [], {}, ["_ZN3Foo2vfEv"]))
+        with self.assertRaises(ValueError):
+            value(outside, bytes.fromhex("1f2003d5"))
+        address, new, placed, result = value(inside)
+        self.assertEqual((address, new, result.folded), (inside, [("u", 1)], []))
+        self.assertEqual(placed[("u", 1)].address, inside)
+
     def read(self, address, kind=None, **options):
         from zkit.inspect_dol import read_data
         return read_data(self.project, "t", address, kind, **options)

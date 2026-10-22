@@ -532,7 +532,19 @@ def _value(linker: Linker, obj: _Object, symbol: Symbol, r, pc: int, hint, hints
                 return found + r.addend, []
         if _placeable(target) and obj.whole and r.type not in GOT:
             # a section no name places, reached from placed code: where the original's references reach
+            if r.type == ABS64 and hint is not None:
+                hints = [hint]            # a table slot: the word the module's loader writes there
             address = _reached(linker, hints, r.type)
+            if address is not None and target.flags & SHF_GROUP and \
+                    not any(s <= address < e for s, e in obj.ranges):
+                # an inline the link kept another unit's copy of (or folded with identical code): the same bytes
+                start = address - offset
+                if elf.relocations(target) or target.type == SHT_NOBITS or \
+                        linker.original[start:start + target.size] != elf.data(target):
+                    raise ValueError(f"{target.name} would be another unit's copy at "
+                                     f"{linker.platform.text(address)}, whose bytes differ")
+                result.folded.append(symbol.name or target.name)
+                return address, []
             if address is None:
                 hint_text = ""
                 if r.type == ABS64 and re.search(r"D[12]Ev$", target.name):
