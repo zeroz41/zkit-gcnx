@@ -232,6 +232,32 @@ class SwitchToolTests(unittest.TestCase):
         self.assertEqual((address, new, result.folded), (inside, [("u", 1)], []))
         self.assertEqual(placed[("u", 1)].address, inside)
 
+    def test_a_section_reached_outside_the_unit_is_a_problem_not_a_placement(self):
+        """A function no name places, reached from placed code where the original's word there reaches outside the
+        unit (the candidate's code differs there, or a symbol names another function at this one's address): the
+        link reports it instead of placing the section there (past the image, the comparison would crash)."""
+        from types import SimpleNamespace
+        from zkit import nxlink
+        from zkit.elf import Section, Symbol
+        from zkit.platform import Switch
+        ret = bytes.fromhex("c0035fd6")
+        linker = SimpleNamespace(original=bytes(0x100), platform=Switch(),
+                                 module=SimpleNamespace(pointers={}), by_name=lambda name, hint, ranges: None)
+        section = Section(1, ".text._ZN3Foo3fn_Ev", 1, nxlink.SHF_ALLOC | nxlink.SHF_EXECINSTR, 0, 0, 4, 0, 0, 0)
+        elf = SimpleNamespace(sections=[None, section], relocations=lambda s: [], data=lambda s: ret)
+        symbol = Symbol(1, "_ZN3Foo3fn_Ev", 0, 4, "func", "global", 1)
+        relocation = SimpleNamespace(type=nxlink.ABS64, addend=0, offset=0)
+        obj = SimpleNamespace(elf=elf, ranges=[(0x80, 0x90), (0xC0, 0xC8)], whole=True, unit="u", discarded={})
+        for pointee, placed_at in ((0x4393E0, None), (0x80, 0x80)):
+            result, placed = nxlink.UnitLink("u", True), {}
+            if placed_at is None:
+                with self.assertRaisesRegex(ValueError, "outside the unit"):
+                    nxlink._value(linker, obj, symbol, relocation, 0xC0, ("address", pointee), [], placed, result)
+                self.assertEqual(placed, {})
+            else:
+                nxlink._value(linker, obj, symbol, relocation, 0xC0, ("address", pointee), [], placed, result)
+                self.assertEqual(placed[("u", 1)].address, placed_at)
+
     def test_a_recursive_call_the_split_object_resolved_in_place_is_the_same_call(self):
         """A weak function calling itself: the compiled object relocates the `bl` against its own symbol, while
         the original's split object resolved it in place (`bl` back to the function's start). The same call."""

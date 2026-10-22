@@ -580,6 +580,11 @@ def _value(linker: Linker, obj: _Object, symbol: Symbol, r, pc: int, hint, hints
                                  "destructor is inline, so declare it `{}` in the class and define none in the file)")
                 raise ValueError(f"cannot tell where {target.name} goes from the original's references{hint_text}")
             base = address - offset
+            if not any(s <= base and base + target.size <= e for s, e in obj.ranges):
+                # what the original has at the reference is no reference to this section (the candidate's code
+                # differs there, or a symbol names another function at this one's address)
+                raise ValueError(f"{target.name} would go at {linker.platform.text(base)}, outside the unit, by "
+                                 "the original's reference there")
             data = bytearray(target.size) if target.type == SHT_NOBITS else bytearray(elf.data(target))
             placed[key] = Placed(target, base, data, obj.unit, "reference")
             return address, [key]
