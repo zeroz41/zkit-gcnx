@@ -449,6 +449,21 @@ class NeighbourFolderTests(unittest.TestCase):
         shuffled.insert(5, (99, 100, "gf/GfAssetUtil.cpp", "class"))
         self.assertEqual(units._in_neighbours_folder(shuffled, {})[5][2], "gf/GfAssetUtil.cpp")
 
+    def test_a_unit_between_two_folders_takes_the_folder_both_are_in(self):
+        """Between the last file of one folder and the first of another, a sorted folder walk lists only files of
+        the deepest folder both are in; with no folder in common the unit keeps its name."""
+        files = [f"app/game/battle/ai/f_{c}.cpp" for c in "abcdefghijkl"] + \
+            [f"app/game/battle/g_{c}.cpp" for c in "abcdefghijkl"] + [f"lib/x/h_{c}.cpp" for c in "a"]
+        named = [(i, i + 1, name, "file string") for i, name in enumerate(files)]
+        named.insert(12, (99, 100, "ai/AiScriptDataManager.cpp", "class"))
+        named.insert(25, (199, 200, "unit_7100001000.cpp", "placeholder"))
+        named.insert(27, (299, 300, "lib/Tail.cpp", "class"))                   # only the top folder in common
+        named.append((399, 400, "lib/y/i_a.cpp", "file string"))
+        out = units._in_neighbours_folder(named, {})
+        self.assertEqual(out[27][2], "lib/Tail.cpp")
+        self.assertEqual(out[12][2], "app/game/battle/AiScriptDataManager.cpp")
+        self.assertEqual(out[25][2], "unit_7100001000.cpp")
+
 
 class RecursionTests(unittest.TestCase):
     def test_a_recursive_call_is_cut_resolved_as_clang_leaves_it(self):
