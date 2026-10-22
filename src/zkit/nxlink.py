@@ -251,6 +251,7 @@ class _Object:
     ranges: list[tuple[int, int]]
     whole: bool
     exact: set[str]
+    discarded: dict[int, str] = field(default_factory=dict)   # sections of COMDAT groups another unit's copy holds
 
 
 def _piece(elf: Elf, section: Section, offset: int) -> bytes:
@@ -418,15 +419,39 @@ def _code_matched(row: dict) -> bool:
         all(f.get("fuzzy_match_percent") == 100 for f in functions)
 
 
+SHT_GROUP, GRP_COMDAT = 17, 1
+
+
+def _discarded(linker: Linker, obj: _Object) -> dict[int, str]:
+    """{section index: its group's signature} of the COMDAT groups whose signature symbol the original holds
+    outside the unit: the link kept another unit's copy of the whole group (a template's static, its guard, its
+    initializer and that initializer's .init_array entry), so none of its sections are this unit's."""
+    elf, out = obj.elf, {}
+    for section in elf.sections:
+        if section.type != SHT_GROUP or section.size < 8:
+            continue
+        words = struct.unpack(f"<{section.size // 4}I", elf.data(section))
+        if not words[0] & GRP_COMDAT or section.info >= len(elf.symbols):
+            continue
+        signature = elf.symbols[section.info].name
+        at = linker.by_name(signature, None, obj.ranges) if signature else None
+        if at is not None and not any(s <= at < e for s, e in obj.ranges):
+            out.update(dict.fromkeys(words[1:], signature))
+    return out
+
+
 def _place_named(linker: Linker, obj: _Object, placed: dict, result: UnitLink) -> None:
     """Place each section of the object that a name, or the unit's .init_array range, puts somewhere."""
     elf = obj.elf
+    obj.discarded = _discarded(linker, obj)
+    for signature in dict.fromkeys(obj.discarded.values()):
+        result.folded.append(signature)
     defined = collections.defaultdict(list)
     for symbol in elf.symbols:
         if 0 < symbol.section < 0xFF00 and symbol.kind in ("func", "object") and symbol.name:
             defined[symbol.section].append(symbol)
     for section in elf.sections:
-        if not _placeable(section):
+        if not _placeable(section) or section.index in obj.discarded:
             continue
         code = bool(section.flags & SHF_EXECINSTR)
         names = sorted(defined.get(section.index, []), key=lambda s: (s.value, s.bind == "local"))
@@ -530,6 +555,9 @@ def _value(linker: Linker, obj: _Object, symbol: Symbol, r, pc: int, hint, hints
             found = linker.by_name(symbol.name, hint, obj.ranges)
             if found is not None:
                 return found + r.addend, []
+        if symbol.section in obj.discarded:
+            raise ValueError(f"{symbol.name or target.name} is in {obj.discarded[symbol.section]}'s group, which "
+                             "the link kept from another unit, and the symbols do not name it")
         if _placeable(target) and obj.whole and r.type not in GOT:
             # a section no name places, reached from placed code: where the original's references reach
             if r.type == ABS64 and hint is not None:
