@@ -371,3 +371,22 @@ class SwitchToolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StringPieceTests(unittest.TestCase):
+    def test_a_wide_string_ends_at_a_zero_entry_not_a_zero_byte(self):
+        """A string section's entries are sh_entsize wide: a UTF-16 string (.rodata.str2.2) has a zero high byte
+        in every ASCII character, and ends only at a zero character."""
+        from types import SimpleNamespace
+        from zkit import nxlink
+        SHF_STRINGS = nxlink.SHF_STRINGS
+        wide = "Init".encode("utf-16-le") + b"\0\0" + "x".encode("utf-16-le") + b"\0\0"
+        elf = SimpleNamespace(data=lambda section: wide)
+        section = SimpleNamespace(flags=SHF_STRINGS, entsize=2)
+        self.assertEqual(nxlink._piece(elf, section, 0), "Init".encode("utf-16-le") + b"\0\0")
+        self.assertEqual(nxlink._piece(elf, section, 10), b"x\0\0\0")
+        narrow = SimpleNamespace(flags=SHF_STRINGS, entsize=1)
+        elf = SimpleNamespace(data=lambda section: b"ab\0c\0")
+        self.assertEqual(nxlink._piece(elf, narrow, 0), b"ab\0")
+        self.assertEqual(nxlink._piece(elf, narrow, 3), b"c\0")
+
