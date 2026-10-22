@@ -449,6 +449,12 @@ def _gamecube(project: Project, target: str) -> Image:
                  text, program.section_of)
 
 
+def _local(scope: str | None) -> str | None:
+    """A module's symbols say `scope:global` of every name its exports did not settle, so only a local scope is
+    taken from them (a file's own, like its static initializer); the others go by the name (`internal_linkage`)."""
+    return "local" if scope == "local" else None
+
+
 def _switch(project: Project, target: str, platform) -> Image:
     from .bridge import _symbol_table
     from .index import connect, refresh
@@ -459,14 +465,14 @@ def _switch(project: Project, target: str, platform) -> Image:
     if config.get("symbols") and project.file(config["repository"], config["symbols"]).is_file():
         # the symbols file names the functions: the index takes them from the last report, which these very
         # objects made, so a name the file changed would never reach them
-        functions = sorted((Entry(s.address, s.size, s.name) for s in table if s.type == "function" and s.size
-                            and s.address < 1 << 32), key=lambda e: e.address)
+        functions = sorted((Entry(s.address, s.size, s.name, _local(s.scope)) for s in table
+                            if s.type == "function" and s.size and s.address < 1 << 32), key=lambda e: e.address)
     else:
         refresh(project)
         functions = [Entry(a, s, n) for a, s, n in connect(project).execute(
             "SELECT address, size, name FROM functions WHERE target=? AND address<? ORDER BY address",
             (target, 1 << 32))]
-    data = [Entry(s.address, s.size, s.name) for s in table if s.type != "function"]
+    data = [Entry(s.address, s.size, s.name, _local(s.scope)) for s in table if s.type != "function"]
     text = lambda address: platform.text(address)[2:]
     symbols = Symbols(functions, data, text)
     in_image = lambda address: module.segment_at(address) is not None
@@ -547,6 +553,30 @@ class Plan:
     fixed: frozenset[int] = frozenset()  # addresses no object can name: references to them keep the original bytes
 
 
+def _own_sections(image: Image, section: str, span: tuple[int, int], name: str):
+    """A code range as (start, end, section in the object): on AArch64, a file-local function whose name has a dot
+    (clang's `_GLOBAL__sub_I_<file>`) in the section clang compiles it into, `<section>.<its name>`. objdiff pairs a
+    local symbol only between sections whose names agree once their last `.part` is dropped, which `.text` and
+    `.text._GLOBAL__sub_I_a.cpp` do not."""
+    start, end = span
+    if image.machine is not AARCH64 or not section_traits(image.machine, section)[1] & SHF_EXECINSTR:
+        yield start, end, name
+        return
+    symbols, cursor = image.symbols, start
+    for function in symbols._function_starts[bisect.bisect_left(symbols._function_starts, start):]:
+        if function >= end:
+            break
+        entry = symbols.functions[function]
+        if "." in entry.name and internal_linkage(entry.name, entry.scope):
+            stop = min(end, function + entry.size)
+            if function > cursor:
+                yield cursor, function, name
+            yield function, stop, f"{section}.{entry.name}"
+            cursor = stop
+    if cursor < end:
+        yield cursor, end, name
+
+
 def cut_unit(image: Image, unit: Unit) -> Cut:
     """A unit's bytes, section by section (each range keeping its own alignment), with the reference fields cleared
     and every reference recorded by the address it reaches."""
@@ -556,7 +586,9 @@ def cut_unit(image: Image, unit: Unit) -> Cut:
     groups = collections.defaultdict(list)            # name in the object -> ranges (a renamed range is its own)
     for base_name, spans in unit.ranges.items():
         for span in spans:
-            groups[unit.renames.get((base_name, span[0]), base_name)].append(span)
+            for start, end, name in _own_sections(image, base_name, span, unit.renames.get((base_name, span[0]),
+                                                                                            base_name)):
+                groups[name].append((start, end))
     for section_name in sorted(groups, key=lambda n: (_section_order(machine, n.split("$", 1)[0]), n)):
         ranges = sorted(groups[section_name])
         kind, flags, _, alignment = section_traits(machine, section_name)
