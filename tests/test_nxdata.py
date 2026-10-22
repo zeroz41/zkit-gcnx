@@ -293,3 +293,75 @@ class KeyFunctionTableTests(unittest.TestCase):
             owners = [unit["unit"] for unit in proposal["units"] for row in unit["data"]
                       if row["start_key"] <= table < row["end_key"]]
             self.assertEqual(owners, ["game/a.cpp"])
+
+
+def _module(sources: dict[str, str], root: Path):
+    """A stripped module linked from `sources` (a.cpp first), its full ELF's symbols, and the module."""
+    for name, text in sources.items():
+        (root / name).write_text(text, encoding="utf-8")
+        subprocess.run([CLANG, *FLAGS, str(root / name), "-o", str(root / name.replace(".cpp", ".o"))],
+                       check=True, capture_output=True)
+    link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+            *[str(root / name.replace(".cpp", ".o")) for name in sources]]
+    subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
+    subprocess.run([*link, "--strip-all", "-o", str(root / "main.elf")], check=True, capture_output=True)
+    return {s.name: s for s in Elf.load(root / "full.elf").symbols}, nx.load(root / "main.elf")
+
+
+def _program(module, names: dict[int, tuple[str, str]] = {}, objects: dict[int, tuple[str, int]] = {}):
+    symbols = [Symbol(names.get(a, (f"fn_{a:08X}",))[0], ".text", a, "function", s,
+                      names.get(a, ("", "global"))[1]) for a, s in module.functions()]
+    symbols += [Symbol(f"lbl_{a:08X}", section, a, "object", size, "global")
+                for a, size, section in nxdata.objects(module, module.functions()) if a not in objects]
+    symbols += [Symbol(name, ".data" if a not in () else ".data", a, "object", size, "global")
+                for a, (name, size) in objects.items()]
+    symbols += [Symbol(name or f"lbl_{a:08X}", section, a, "object", size, "global")
+                for a, size, section, name in nxdata.linker_tables(module)]
+    return Program.from_symbol_list(Switch(), module, symbols)
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class DonorInitializerTests(unittest.TestCase):
+    def test_a_donors_initializer_takes_its_units_file_name(self):
+        """A donor's unnamed static initializer is named after the unit its splits put it in, so another build's
+        copy of that initializer can carry the file over."""
+        from zkit import signatures
+        with tempfile.TemporaryDirectory() as temp:
+            at, module = _module(INITIALIZED, Path(temp))
+            program = _program(module)
+            init = at["_GLOBAL__sub_I_a.cpp"].value
+            unit_of = lambda address: "game/a.cpp" if address <= init else "game/b.cpp"
+            named = signatures._named_initializers(program, unit_of)
+            self.assertEqual(next(f.name for f in named.functions if f.address == init), "_GLOBAL__sub_I_a.cpp")
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class TableSizeTests(unittest.TestCase):
+    def test_an_unsized_table_is_read_from_its_slots_and_takes_its_labels(self):
+        """A class table no donor sizes is as long as its two header words and its function slots; a placeholder
+        label inside it goes and one running into it ends at its start."""
+        from zkit import analyze
+        from zkit.program import DataObject
+        with tempfile.TemporaryDirectory() as temp:
+            at, module = _module(KEYED, Path(temp))
+            table = at["_ZTV4Node"]
+            program = _program(module)
+            self.assertEqual(analyze._table_size(program, table.value), table.size)
+            labels = Program(program.platform, program.image, program.functions,
+                             [DataObject(table.value - 8, 16, f"lbl_{table.value - 8:08X}", ".data", "global"),
+                              DataObject(table.value + 16, 8, f"lbl_{table.value + 16:08X}", ".data", "global")], program.sda)
+            absorbed, resized = analyze._room_for(labels, {table.value: table.size})
+            self.assertEqual((absorbed, resized), ({table.value + 16}, {table.value - 8: 8}))
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class ExternalDataTests(unittest.TestCase):
+    def test_a_global_one_files_initializer_constructs_joins_no_users(self):
+        """Both files' code reads `g_info`, which the first file's static initializer constructs: a global that
+        file defines and the other reaches through the GOT, so no join makes the users one unit."""
+        with tempfile.TemporaryDirectory() as temp:
+            at, module = _module(CONSTRUCTED, Path(temp))
+            program = _program(module)
+            g = at["g_info"].value
+            self.assertIn(g, units._initialized(program))
+            self.assertFalse([why for _, _, why in units.evidence(program).joins if f"{g:08X}" in why])
