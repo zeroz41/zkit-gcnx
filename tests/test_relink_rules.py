@@ -461,6 +461,7 @@ class NeighbourFolderTests(unittest.TestCase):
         named.append((399, 400, "lib/y/i_a.cpp", "file string"))
         out = units._in_neighbours_folder(named, {})
         self.assertEqual(out[27][2], "lib/Tail.cpp")
+        self.assertTrue(units.UNNAMED.match("app/game/unit_7100001000.cpp"))   # a placeholder in a folder
         self.assertEqual(out[12][2], "app/game/battle/AiScriptDataManager.cpp")
         self.assertEqual(out[25][2], "unit_7100001000.cpp")
 

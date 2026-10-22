@@ -156,7 +156,11 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
     A table with a key function is emitted with it, and the code forming its address (the class's constructors and
     destructors, or the enclosing class's code they are inlined in) is there too: with the functions only that
     table holds, inlines included, it is one unit's, as far as a tight run reaches where no file the code cites or
-    another build places changes within it (a nested listener's one virtual after its owner's code)."""
+    another build places changes within it (a nested listener's one virtual after its owner's code). The unit
+    emitting a table emits the inline virtuals only it holds, and the link keeps the first copy, so none of them
+    is in a later unit than its key function, one of the class's own methods in the table: from the last of
+    those to the last of the inline ones is one unit's, whatever another build places between (an update moving
+    code between files), unless the code there cites two files."""
     if program.platform.name != "switch":
         return []
     from .itanium import _groups
@@ -213,6 +217,14 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
             out.append((min(run), max(run), f"the table at {text(address)}, the code forming its address and "
                                             "the functions only it holds"))
             continue
+        if table.scope != "weak" and table.address not in weak:
+            own = [index[s] for s in set(slots) if count[s] == 1 and s in index]
+            strong = [i for i in own if program.functions[i].address not in weak]
+            inline = [i for i in own if program.functions[i].address in weak]
+            if strong and inline and max(strong) < max(inline) and max(inline) - max(strong) <= CLASS_SPAN and \
+                    len({own_files[i] for i in range(max(strong), max(inline) + 1) if i in own_files}) <= 1:
+                out.append((max(strong), max(inline), f"the inline virtuals only the table at {text(address)} "
+                                                      "holds, emitted with its key function"))
         if not placeholder(table.name) or \
                 not placeholder(getattr(program.object_at(address + 16), "name", "lbl_")):
             continue                                   # a named class: its functions go by their class
@@ -363,7 +375,8 @@ def _initializers(program: Program) -> list[int]:
 
 
 PIECE = re.compile(r"_[0-9A-Fa-f]{8,16}(?=\.\w+$)")   # `file_<address>.cpp`: a later piece of one file
-UNNAMED = re.compile(r"^unit_[0-9A-Fa-f]+\.\w+$")      # a placeholder: a unit no file or class names
+UNNAMED = re.compile(r"^(?:.*/)?unit_[0-9A-Fa-f]+\.\w+$")   # a placeholder: a unit no file or class names (in a
+                                                           # folder its neighbours give it)
 
 
 def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None = None) -> None:
@@ -926,7 +939,8 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
         else:
             name, how = _unnamed(program, class_of, first, end, qualified)
         if UNNAMED.match(name):                  # another build's placeholder: this build's address names it
-            name, how = f"unit_{text(functions[first].address)[2:]}.cpp", "placeholder"
+            folder = name.rpartition("/")[0]
+            name, how = f"{folder + '/' if folder else ''}unit_{text(functions[first].address)[2:]}.cpp", "placeholder"
         named.append((first, end, name, how))
     # A file's code is one run: a unit only another build names after the file its neighbour's own code cites is
     # another file, which that build had not told apart.
@@ -1006,7 +1020,7 @@ def _in_neighbours_folder(named: list, held: dict) -> list:
     The files' own order is the evidence, so only a link whose consecutive files of one folder are almost all in
     name order counts; a hand-ordered link (a CodeWarrior project's) places nothing."""
     files = [k for k, (_, _, name, how) in enumerate(named)
-             if how not in ("class", "placeholder") and "/" in name and not UNNAMED.match(name.rsplit("/", 1)[1])]
+             if how not in ("class", "placeholder") and "/" in name and not UNNAMED.match(name)]
     pairs = [(named[a][2], named[b][2]) for a, b in zip(files, files[1:])
              if named[a][2].rpartition("/")[0] == named[b][2].rpartition("/")[0]]
     ordered = sum(_sort_key(a) < _sort_key(b) for a, b in pairs)
