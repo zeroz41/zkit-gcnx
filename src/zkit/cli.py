@@ -167,6 +167,16 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--unit", action="store_true", help="the candidate is the whole unit (query: the unit or an "
                    "address in it): every function compared and, on Switch, the object linked into the original; "
                    "records no attempts")
+    c = add("sweep", help="Switch near-misses: rewrite one function's source site by site (operand order, compound "
+                          "assignment, ++ form, if/else, counter type, loop direction, statement order), compile "
+                          "each with its unit's command and climb to the closest; writes the best text, records "
+                          "no attempts")
+    c.add_argument("query", help="the function's address or name")
+    c.add_argument("candidate", type=Path, help="source file holding the function (a unit copy or a try file)")
+    c.add_argument("--out", type=Path, help="where to write the best text (default build/sweep/<address>.cpp)")
+    c.add_argument("--jobs", type=int, help="compiles at once (default: half the CPUs)")
+    c.add_argument("--rounds", type=int, default=12, help="most rewrites taken one after another")
+    c.add_argument("--seconds", type=float, default=600.0)
     c = add("objects", help="Prove a change kept the code: --save copies every built object, --compare (after the "
                             "build) checks each against its copy modulo intended renames")
     c.add_argument("--save", action="store_true")
@@ -710,6 +720,15 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from .candidate import check
         data = check(project, target, args.query, args.candidate, args.force, args.keep)
         return data, render.candidate(data)
+    if command == "sweep":
+        from .sweep import sweep
+        data = sweep(project, target, args.query, args.candidate, args.out, args.jobs, args.rounds, args.seconds)
+        lines = [f"{data['address']} {data['function']}: {data['score']} after {len(data['history']) - 1} "
+                 f"rewrite(s); {data['variants_compiled']} variants compiled in {data['seconds']} s"]
+        lines += [f"  {step['score']:<36} {step['step']}" for step in data["history"]]
+        lines.append(f"wrote {data['written']}" + ("  (identical: check it with `zkit try`)" if data["exact"]
+                                                     else ""))
+        return data, "\n".join(lines)
     if command == "objects":
         from . import objects
         if args.save:
