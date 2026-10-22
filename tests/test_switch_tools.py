@@ -131,6 +131,11 @@ class SwitchToolTests(unittest.TestCase):
         image = nx.load(self.root / "main")
         self.assertEqual(image.bss, (END, 0x100))
         self.assertEqual(next(s for s in image.segments if s.name == "bss").size, 0x1000)
+        from zkit import nxdata
+        struct.pack_into("<I", image.image, DATA + 0x400, 0)                # nothing refers into .bss but a pointer
+        image.pointers[DATA + 0x400] = END + 0x80
+        found = {a: (size, section) for a, size, section in nxdata.objects(image, [])}
+        self.assertEqual(found[END + 0x80], (0x80, ".bss"))                 # to MOD0's end, not the page's
 
     def test_a_link_reaches_a_structor_by_its_partner_when_the_original_names_one(self):
         """clang emits a class's complete- and base-object destructors (D1, D2) as one function under both names;
