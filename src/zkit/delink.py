@@ -615,9 +615,13 @@ def cut_unit(image: Image, unit: Unit) -> Cut:
                         break
                     entry = symbols.functions[function]
                     size = min(entry.size, end - function)
-                    relocs, cleared = image.code(function, size, lambda target: local(target) is not None and
-                                                 target in symbols.functions and
-                                                 _internal(symbols.functions[target], symbols.functions[target].name))
+                    # the assembler resolves a call within its section to a local symbol, and to the calling
+                    # function's own start (a recursion: clang never leaves a relocation for it)
+                    relocs, cleared = image.code(function, size, lambda target, function=function: local(target)
+                                                 is not None and target in symbols.functions and (
+                                                     (image.machine is AARCH64 and target == function) or
+                                                     _internal(symbols.functions[target],
+                                                                                     symbols.functions[target].name)))
                     for site, word in cleared.items():
                         struct.pack_into(o + "I", blob, local(site), word)
                     found += relocs
