@@ -592,3 +592,64 @@ class CallbackTests(unittest.TestCase):
             self.assertLess(at["_Z4tickILi3EEii"], at["_Z2fbi"])
             self.assertEqual(owner[at["_Z4tickILi3EEii"]], "game/a.cpp")
             self.assertEqual(owner[at["_Z2fbi"]], "game/b.cpp")
+
+
+# an inline virtual of a base two classes share, each class with its own key function in its own file: both files
+# emit a copy and the link keeps the first file's, after that file's code
+SHARED_INLINE = {
+    "a.cpp": """void report(const char *file, int line);
+struct Cond { virtual int test(int) = 0; virtual int arg() const { return kind * 3; } int kind; };
+struct A : Cond { int test(int v); };
+int A::test(int v) { if (v > 9) report("C:/proj/src/game/a.cpp", 1); return v + kind; }
+inline void *operator new(__SIZE_TYPE__, void *at) { return at; }
+Cond *makeA(void *at) { return new (at) A(); }
+""",
+    "b.cpp": """void report(const char *file, int line);
+struct Cond { virtual int test(int) = 0; virtual int arg() const { return kind * 3; } int kind; };
+struct B : Cond { int test(int v); };
+int B::test(int v) { if (v > 9) report("C:/proj/src/game/b.cpp", 2); return v - kind; }
+inline void *operator new(__SIZE_TYPE__, void *at) { return at; }
+Cond *makeB(void *at) { return new (at) B(); }
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class SharedInlineTests(unittest.TestCase):
+    def test_an_inline_several_tables_hold_is_the_first_emitting_units(self):
+        """Cond::arg is inline and held by A's table and B's: a.cpp and b.cpp each emit a copy, the link keeps
+        a.cpp's, after a.cpp's code. It is a.cpp's, though it sits right before b.cpp's code."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in SHARED_INLINE.items():
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, "-ffunction-sections", str(root / name), "-o",
+                                str(root / name.replace(".cpp", ".o"))], check=True, capture_output=True)
+            link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                    *(str(root / n.replace(".cpp", ".o")) for n in SHARED_INLINE)]
+            subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
+            subprocess.run([*link, "--strip-all", "-o", str(root / "main.elf")], check=True, capture_output=True)
+            full = Elf.load(root / "full.elf").symbols
+            at = {s.name: s.value for s in full}
+            inline = {s.name for n in SHARED_INLINE for s in Elf.load(root / n.replace(".cpp", ".o")).symbols
+                      if s.bind == "weak"}                        # hidden: the link made them local
+            weak = {s.value for s in full if s.name in inline and s.kind == "func"}
+            module = nx.load(root / "main.elf")
+            functions = module.functions()
+            symbols = [Symbol(f"fn_{a:08X}", ".text", a, "function", s, "weak" if a in weak else "global")
+                       for a, s in functions]
+            tables = [s for s in full if s.name.startswith("_ZTV")]
+            symbols += [Symbol(f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section in nxdata.objects(module, functions)
+                        if not any(t.value <= a < t.value + t.size for t in tables)]
+            symbols += [Symbol(f"lbl_{t.value:08X}", ".data", t.value, "object", t.size, "global") for t in tables]
+            symbols += [Symbol(name or f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section, name in nxdata.linker_tables(module)]
+            program = Program.from_symbol_list(Switch(), module, symbols)
+            owner = {}
+            for unit in units.propose(program)["units"]:
+                for index in range(unit["first"], unit["end"]):
+                    owner[program.functions[index].address] = unit["unit"]
+            self.assertLess(at["_ZNK4Cond3argEv"], at["_ZN1B4testEi"])
+            self.assertEqual(owner[at["_ZNK4Cond3argEv"]], "game/a.cpp")
+            self.assertEqual(owner[at["_ZN1B4testEi"]], "game/b.cpp")

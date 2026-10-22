@@ -180,6 +180,23 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
     text = program.platform.text
     users = program.users()
     out = []
+    # an inline virtual several tables with key functions hold: each of their units emits a copy, and the link
+    # keeps the first, so it is in the earliest unit's code that forms one of those tables' addresses
+    earliest: dict[int, tuple[int, int]] = {}
+    for address, slots in holders.items():
+        table = program.object_at(address)
+        if table.scope == "weak" or table.address in weak:
+            continue
+        formers = set().union(*(users.get(o, ()) for o in {table, program.object_at(address + 16)} if o))
+        for s in set(slots):
+            if formers and s in weak and count[s] > 1 and s in index and \
+                    min(formers) < earliest.get(index[s], (len(program.functions), 0))[0]:
+                earliest[index[s]] = (min(formers), address)
+    for target, (first, address) in sorted(earliest.items()):
+        if first < target and target - first <= TIGHT and \
+                len({ev.files[i] for i in range(first, target + 1) if i in ev.files}) <= 1:
+            out.append((first, target, f"{program.functions[target].name} is first emitted with the table at "
+                                       f"{text(address)}"))
     for address, slots in holders.items():
         table = program.object_at(address)
         run = set()
