@@ -419,3 +419,58 @@ class DroppedCodeTests(unittest.TestCase):
             self.assertLessEqual(ranges["b.cpp"][0], path)
             self.assertLess(path, ranges["b.cpp"][1])
             self.assertGreaterEqual(ranges["game/c.cpp"][0], ranges["b.cpp"][1])
+
+
+# a class whose table no symbol names (the module is stripped): only its second virtual cites its file, the three
+# after it cite nothing, and the next file's code follows
+CLASSES = {
+    "a.cpp": """void report(const char *file, int line);
+int fa(int v) { if (v > 9) report("C:/proj/src/game/a.cpp", 1); return v + 1; }
+struct A { virtual ~A(); virtual int f(int); virtual int g(int); virtual int h(int); int x; };
+A::~A() {}
+int A::f(int v) { if (v > 9) report("C:/proj/src/game/a.cpp", 5); return v + x; }
+int A::g(int v) { return v * x + 3; }
+int A::h(int v) { return v - x * 7; }
+inline void *operator new(__SIZE_TYPE__, void *at) { return at; }
+A *makeA(void *at) { return new (at) A(); }
+""",
+    "b.cpp": """void report(const char *file, int line);
+int fb(int v) { if (v > 9) report("C:/proj/src/game/b.cpp", 2); return v * 2; }
+int fb2(int v) { if (v < 0) report("C:/proj/src/game/b.cpp", 3); return v - 2; }
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class UnnamedClassTests(unittest.TestCase):
+    def test_an_unnamed_tables_own_functions_are_one_units(self):
+        """Only A::f cites a.cpp, and nothing ties A::g and A::h to it but A's table: the functions only that
+        table holds are one unit's, so they are a.cpp's, not the next file's."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in CLASSES.items():
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *[f for f in FLAGS if f != "-fno-rtti"], "-fno-rtti", "-ffunction-sections",
+                                str(root / name), "-o", str(root / name.replace(".cpp", ".o"))],
+                               check=True, capture_output=True)
+            link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                    *(str(root / n.replace(".cpp", ".o")) for n in CLASSES)]
+            subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
+            subprocess.run([*link, "--strip-all", "-o", str(root / "main.elf")], check=True, capture_output=True)
+            at = {s.name: s.value for s in Elf.load(root / "full.elf").symbols}
+            module = nx.load(root / "main.elf")
+            functions = module.functions()
+            symbols = [Symbol(f"fn_{a:08X}", ".text", a, "function", s, "global") for a, s in functions]
+            symbols += [Symbol(f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section in nxdata.objects(module, functions)]
+            symbols += [Symbol(name or f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section, name in nxdata.linker_tables(module)]
+            program = Program.from_symbol_list(Switch(), module, symbols)
+            owner = {}
+            for unit in units.propose(program)["units"]:
+                for index in range(unit["first"], unit["end"]):
+                    owner[program.functions[index].address] = unit["unit"]
+            self.assertEqual(owner[at["_ZN1A1fEi"]], "game/a.cpp")
+            self.assertEqual(owner[at["_ZN1A1gEi"]], "game/a.cpp")
+            self.assertEqual(owner[at["_ZN1A1hEi"]], "game/a.cpp")
+            self.assertEqual(owner[at["_Z2fbi"]], "game/b.cpp")
