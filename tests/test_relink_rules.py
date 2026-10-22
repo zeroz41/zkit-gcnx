@@ -446,3 +446,28 @@ class NeighbourFolderTests(unittest.TestCase):
         shuffled = [(i, i + 1, name, "file string") for i, name in enumerate(reversed(files))]
         shuffled.insert(5, (99, 100, "gf/GfAssetUtil.cpp", "class"))
         self.assertEqual(units._in_neighbours_folder(shuffled, {})[5][2], "gf/GfAssetUtil.cpp")
+
+
+class RecursionTests(unittest.TestCase):
+    def test_a_recursive_call_is_cut_resolved_as_clang_leaves_it(self):
+        """clang 3.9 resolves a function's call to its own start in its object (no relocation, the offset encoded):
+        the original's copy is cut the same way. A call to another global function keeps its relocation."""
+        from zkit import aarch64
+        code = struct.pack("<4I", 0x94000000, 0x97FFFFFF, 0x94000002, 0xD65F03C0)
+        # at 0x100: bl 0x100 (itself, -0 words is encoded 0x94000000), at 0x104: bl 0x100 (-1 word),
+        # at 0x108: bl 0x110 (+2 words, another function), at 0x10C: ret
+        functions = [delink.Entry(0x100, 0x10, "_Z4selfv"), delink.Entry(0x110, 0x4, "_Z5otherv")]
+        blob = code + struct.pack("<I", 0xD65F03C0)
+        read = lambda address, size: blob[address - 0x100:address - 0x100 + size]
+        symbols = delink.Symbols(functions, [], lambda a: f"{a:X}")
+
+        def code_of(start, size, resolved):
+            words = list(struct.unpack(f"<{size // 4}I", read(start, size)))
+            found, cleared = aarch64.code_relocations(words, start, {}, resolved)
+            return [(r.offset, r.kind, r.target, r.got) for r in found], cleared
+        image = delink.Image(delink.AARCH64, 0, read, symbols, lambda a: True, code_of, lambda a, b: [],
+                             lambda a: f"{a:X}")
+        unit = delink.Unit("a.cpp")
+        unit.ranges[".text"].append((0x100, 0x114))
+        cut = delink.cut_unit(image, unit)
+        self.assertEqual([(offset, target) for offset, _, target, _ in cut.found[".text"]], [(0x108, 0x110)])
