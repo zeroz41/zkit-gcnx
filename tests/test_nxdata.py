@@ -181,3 +181,60 @@ class GotTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# a file whose static initializer builds a global, then a file of one class's methods
+INITIALIZED = {
+    "a.cpp": """void report(const char *file, int line);
+struct Info { const char *name; const Info *base; int count;
+              Info(const char *n, const Info *b) : name(n), base(b), count(0) {} };
+extern Info g_base;
+const char *label(int v);
+Info g_a(label(1), &g_base);
+int countA(int v) { if (v > 99) report("C:/proj/src/game/a.cpp", 4); return g_a.count + v; }
+""",
+    "b.cpp": """void report(const char *file, int line);
+struct B { int v; B(); int get() const; int put(int x); };
+B::B() : v(0) {}
+int B::get() const { if (v < 0) report("C:/proj/src/game/b.cpp", 3); return v; }
+int B::put(int x) { if (x == 7) report("C:/proj/src/game/b.cpp", 4); v = x; return v * 3; }
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class InitializerNameTests(unittest.TestCase):
+    def test_an_initializer_takes_its_files_name_not_a_constructors(self):
+        """`.init_array` calls the first file's static initializer, which the symbols misname as the next file's
+        class's constructor: the analysis withdraws that name, keeps the initializer with its file and names it
+        as clang did."""
+        from zkit import analyze
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in INITIALIZED.items():
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, str(root / name), "-o", str(root / name.replace(".cpp", ".o"))],
+                               check=True, capture_output=True)
+            link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                    str(root / "a.o"), str(root / "b.o")]
+            subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
+            subprocess.run([*link, "--strip-all", "-o", str(root / "main.elf")], check=True, capture_output=True)
+            at = {s.name: s for s in Elf.load(root / "full.elf").symbols}
+            module = nx.load(root / "main.elf")
+            initializer = at["_GLOBAL__sub_I_a.cpp"].value
+            named = {at[n].value: n for n in ("_ZN1BC2Ev", "_ZNK1B3getEv", "_ZN1B3putEi")}
+            named[initializer] = "_ZN1BC1Ev"                    # what a wrong donor name would say
+            symbols = [Symbol(named.get(a, f"fn_{a:08X}"), ".text", a, "function", s, "global")
+                       for a, s in module.functions()]
+            symbols += [Symbol(f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section in nxdata.objects(module, module.functions())]
+            symbols += [Symbol(name or f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section, name in nxdata.linker_tables(module)]
+            program = Program.from_symbol_list(Switch(), module, symbols)
+            result = analyze.analyze(program)
+            self.assertEqual(result["symbols"][initializer], ("_GLOBAL__sub_I_a.cpp", "function", 0))
+            self.assertIn(initializer, result["local"])
+            owner = {program.functions[i].address: u["unit"] for u in result["units"]["units"]
+                     for i in range(u["first"], u["end"])}
+            self.assertEqual(owner[initializer], "game/a.cpp")
+            self.assertEqual(owner[at["_ZN1BC2Ev"].value], "game/b.cpp")
