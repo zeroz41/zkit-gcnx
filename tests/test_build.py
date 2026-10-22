@@ -395,6 +395,8 @@ class SwitchBuildTests(unittest.TestCase):
             self.assertEqual(marked["measures"]["complete_units"], 2)
             self.assertEqual(marked["units"][1]["measures"]["matched_data"], "4")
             self.assertEqual(good["collected"], 0)
+            one = nxlink.link_unit(Project.load(manifest), "test", "b.cpp", game / "build/test/src/b.o")
+            self.assertTrue(one["linked"], one)                     # one unit's object, alone, into the original
             dropped = built(B_CPP + '__attribute__((section(".text.unused"))) int unused(int v) { return v - 1; }\n')
             self.assertTrue(dropped["identical"], dropped)
             self.assertEqual((dropped["linked_units"], dropped["collected"]), (["a.cpp", "b.cpp"], 1))
@@ -402,6 +404,9 @@ class SwitchBuildTests(unittest.TestCase):
             self.assertFalse(bad["identical"])
             self.assertEqual(bad["linked_units"], [])
             self.assertTrue(any("differs" in p for p in bad["problems"]), bad["problems"])
+            alone = nxlink.link_unit(Project.load(manifest), "test", "b.cpp", game / "build/test/src/b.o")
+            self.assertFalse(alone["linked"])
+            self.assertIn("first_difference", alone)
             self.assertFalse(any(u["metadata"].get("complete") for u in json.loads(report.read_text())["units"]))
 
     def test_a_renamed_symbol_reaches_the_target_objects(self):

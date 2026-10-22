@@ -1382,3 +1382,32 @@ def map_adoption(data: dict[str, Any]) -> str:
     else:
         lines.append("--write rewrites the target's splits.txt and symbols.txt")
     return "\n".join(lines)
+
+
+def candidate_unit(data: dict) -> str:
+    """`zkit try --unit`: per function, then the link."""
+    head = f"{data['unit']} ({data['candidate']})"
+    if not data.get("compiled"):
+        return f"{head}: does not compile\n{data.get('errors', '')}"
+    rows = data.get("functions", [])
+    lines = [f"{head}: {data['exact']}/{len(rows)} functions identical"]
+    for row in rows:
+        if not row["exact"]:
+            why = "not in the candidate" if row.get("missing") else (
+                f"{row.get('differences')} differing word(s)" + (" (relocations only)" if row.get("reloc_only") else ""))
+            lines.append(f"  differs: {row['function']}: {why}")
+    if data.get("debt"):
+        lines.append("  decompiler debt: " + ", ".join(data["debt"]))
+    link = data.get("link")
+    if link is not None:
+        if link.get("linked"):
+            lines.append(f"  links: identical to the original ({link.get('code', 0)} code and {link.get('data', 0)} "
+                         "data bytes placed from the object)")
+        else:
+            lines.append("  does not link:")
+            lines += [f"    {p}" for p in (link.get("problems", []) + link.get("gaps", []))[:20]]
+            if link.get("first_difference"):
+                d = link["first_difference"]
+                lines.append(f"    first difference at {d['address']}: ours {d['ours']}, original {d['original']}")
+    lines.append("DONE: every function identical, no debt, linked" if data.get("done") else "not done")
+    return "\n".join(lines)

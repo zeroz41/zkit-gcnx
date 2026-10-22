@@ -359,6 +359,48 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
     return result
 
 
+def link_unit(project: Project, target: str, unit_name: str, object_path: Path,
+              splits: Path | None = None) -> dict[str, Any]:
+    """Whether one compiled object links: every section of it placed into the original at its unit's addresses,
+    every relocation resolved as the original's code and data reach, and the image then compared with the
+    original byte for byte (the rest of the image is the original's own). The proof `zkit build` gives a unit,
+    for a candidate outside the tree."""
+    from .delink import read_units
+    linker = Linker(project, target)
+    config = linker.config
+    splits = splits or project.file(config["repository"], config["splits"])
+    unit = next((u for u in read_units(splits, linker.platform.base) if u.name == unit_name), None)
+    if unit is None:
+        raise ValueError(f"{unit_name} is no unit of {splits}")
+    ranges = sorted(r for spans in unit.ranges.values() for r in spans)
+    result = UnitLink(unit.name, True)
+    obj = _Object(unit.name, Elf.load(object_path), ranges, True, set())
+    placed: dict[tuple[str, int], Placed] = {}
+    _place_named(linker, obj, placed, result)
+    queue = list(placed)
+    done: set[tuple[str, int]] = set()
+    while queue:
+        key = queue.pop(0)
+        if key in done:
+            continue
+        done.add(key)
+        queue += _relocate(linker, obj, placed[key], placed, result)
+    for item in placed.values():
+        _compare(linker, item, result)
+    _cover(linker, obj, result, placed)
+    identical = bytes(linker.image) == linker.original
+    out: dict[str, Any] = {"unit": unit.name, "linked": bool(identical and result.linked), "identical": identical,
+                           "functions": result.functions, "code": result.code, "data": result.data,
+                           "problems": result.problems[:40], "gaps": result.gaps[:40],
+                           "folded": result.folded, "collected": result.collected}
+    if not identical:
+        first = next(i for i, (a, b) in enumerate(zip(linker.image, linker.original)) if a != b)
+        out["first_difference"] = {"address": linker.platform.text(first),
+                                   "ours": linker.image[first:first + 8].hex(),
+                                   "original": linker.original[first:first + 8].hex()}
+    return out
+
+
 def _report_rows(project: Project, target: str) -> dict[str, dict]:
     config = project.target(target)
     path = project.file(config["repository"], config["report"]) if config.get("report") else None

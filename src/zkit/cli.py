@@ -164,6 +164,9 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("candidate", type=Path, help="source file: the function and the includes it needs, or a unit copy")
     c.add_argument("--force", action="store_true", help="past the attempt cap (say why in your notes)")
     c.add_argument("--keep", type=Path, help="also copy the compiled object here")
+    c.add_argument("--unit", action="store_true", help="the candidate is the whole unit (query: the unit or an "
+                   "address in it): every function compared and, on Switch, the object linked into the original; "
+                   "records no attempts")
     c = add("objects", help="Prove a change kept the code: --save copies every built object, --compare (after the "
                             "build) checks each against its copy modulo intended renames")
     c.add_argument("--save", action="store_true")
@@ -700,6 +703,10 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         data = bridge.compiled(project, args.query, target, args.limit)
         return data, render.compiled(data)
     if command == "try":
+        if args.unit:
+            from .candidate import check_unit
+            data = check_unit(project, target, args.query, args.candidate)
+            return data, render.candidate_unit(data)
         from .candidate import check
         data = check(project, target, args.query, args.candidate, args.force, args.keep)
         return data, render.candidate(data)
