@@ -393,8 +393,7 @@ def code_relocations(words: list[int], start: int, pointers: dict[int, int],
             pending[origin].append(len(out))
             out.append(Reloc(pc, ADD_ABS_LO12_NC, target))
             cleared[pc] = word & ~(0xFFF << 10)
-            if rd != rn:
-                pages.pop(rd, None)
+            pages.pop(rd, None)            # it holds the whole address now, the page no longer (rd == rn too)
             continue
         if word & 0x3B000000 == 0x39000000 and rn in pages:                  # ldr/str (unsigned immediate)
             page, origin = pages[rn]
@@ -408,8 +407,8 @@ def code_relocations(words: list[int], start: int, pointers: dict[int, int],
             out.append(Reloc(pc, LD64_GOT_LO12_NC if got else LDST.get(scale, LDST64),
                              pointers[target] if got else target, got))
             cleared[pc] = word & ~(0xFFF << 10)
-            if word >> 22 & 3 and rd == rn:
-                pages.pop(rn, None)
+            if word >> 22 & 3 and not vector:  # a load writes its general register, whichever it is
+                pages.pop(rd, None)
             continue
         if word & 0xFFFFFC1F == 0xD63F0000:                                   # blr
             for register in range(19):
