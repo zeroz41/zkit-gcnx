@@ -183,8 +183,15 @@ def _same_structor(xa: tuple, xb: tuple) -> bool:
         x == y or structor_partner(x) == y for x, y in zip(xa[1], xb[1]))
 
 
-def _branch(word: bytes) -> tuple[int, int] | None:
-    """(instruction bits without the displacement, signed displacement) of a PowerPC b/bc."""
+def _branch(word: bytes, machine: str = "ppc") -> tuple[int, int] | None:
+    """(instruction bits without the displacement, signed displacement) of a PowerPC b/bc or an AArch64 b/bl."""
+    if machine == "aarch64":
+        value = int.from_bytes(word, "little")
+        if value >> 26 in (0x05, 0x25):
+            return value & ~0x03FFFFFF, (((value & 0x03FFFFFF) ^ 0x02000000) - 0x02000000) * 4
+        return None
+    if machine != "ppc":
+        return None
     value = int.from_bytes(word, "big")
     if value >> 26 == 18:
         return value & ~0x03FFFFFC, ((value & 0x03FFFFFC) ^ 0x02000000) - 0x02000000
@@ -195,8 +202,9 @@ def _branch(word: bytes) -> tuple[int, int] | None:
 
 def _same_branch(elf: Elf, function, offset: int, relocated: bytes, reloc: tuple, resolved: bytes) -> bool:
     """A branch one object relocates (the split object's `b fn+0x10`) and the other has resolved in place: the
-    same instruction to the same offset of the same function."""
-    left, right = _branch(relocated), _branch(resolved)
+    same instruction to the same offset of the same function (a recursive call to itself, which the split object
+    resolved in place)."""
+    left, right = _branch(relocated, elf.machine), _branch(resolved, elf.machine)
     if left is None or right is None or left[0] != right[0] or len(reloc[3]) != 1:
         return False
     symbol = elf.symbols[reloc[3][0]] if reloc[3][0] < len(elf.symbols) else None
@@ -321,8 +329,8 @@ def function_diff(target_path: Path, base_path: Path, name: str, base_name: str 
     for offset in range(0, max(len(da), len(db)), width):
         wa, wb = da[offset:offset + width], db[offset:offset + width]
         xa, xb = ra.get(offset), rb.get(offset)
-        if xa and not xb and machine == "ppc" and _same_branch(original, a, offset, wa, xa, wb) or \
-                xb and not xa and machine == "ppc" and _same_branch(built, b, offset, wb, xb, wa):
+        if xa and not xb and _same_branch(original, a, offset, wa, xa, wb) or \
+                xb and not xa and _same_branch(built, b, offset, wb, xb, wa):
             continue
         if wa != wb or (xa and xb and xa[0] != xb[0]) or bool(xa) != bool(xb):
             rows.append({"offset": offset, "original": wa.hex(), "compiled": wb.hex(),

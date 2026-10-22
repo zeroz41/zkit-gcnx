@@ -215,7 +215,7 @@ class SwitchToolTests(unittest.TestCase):
         elf = SimpleNamespace(sections=[None, section], relocations=lambda s: [], data=lambda s: ret)
         symbol = Symbol(1, "_ZN3Foo2vfEv", 0, 4, "func", "weak", 1)
         relocation = SimpleNamespace(type=nxlink.ABS64, addend=0, offset=0)
-        obj = SimpleNamespace(elf=elf, ranges=[(0x80, 0x90), (0xC0, 0xC8)], whole=True, unit="u")
+        obj = SimpleNamespace(elf=elf, ranges=[(0x80, 0x90), (0xC0, 0xC8)], whole=True, unit="u", discarded={})
 
         def value(pointee, data=ret):
             elf.data = lambda s: data
@@ -231,6 +231,42 @@ class SwitchToolTests(unittest.TestCase):
         address, new, placed, result = value(inside)
         self.assertEqual((address, new, result.folded), (inside, [("u", 1)], []))
         self.assertEqual(placed[("u", 1)].address, inside)
+
+    def test_a_recursive_call_the_split_object_resolved_in_place_is_the_same_call(self):
+        """A weak function calling itself: the compiled object relocates the `bl` against its own symbol, while
+        the original's split object resolved it in place (`bl` back to the function's start). The same call."""
+        from types import SimpleNamespace
+        from zkit import objects
+        from zkit.elf import Symbol
+        function = SimpleNamespace(section=3, value=0x40)
+        elf = SimpleNamespace(machine="aarch64", symbols=[None, Symbol(1, "_Z4walki", 0x40, 0x20, "func", "weak", 3)])
+        relocated = (0x94000000).to_bytes(4, "little")                  # bl 0, CALL26 -> _Z4walki
+        resolved = (0x94000000 | (-0x10 // 4 & 0x03FFFFFF)).to_bytes(4, "little")   # bl -0x10, at +0x10
+        reloc = ((283,), ("_Z4walki",), (0,), (1,))
+        self.assertTrue(objects._same_branch(elf, function, 0x10, relocated, reloc, resolved))
+        elsewhere = (0x94000000 | (-0xC // 4 & 0x03FFFFFF)).to_bytes(4, "little")
+        self.assertFalse(objects._same_branch(elf, function, 0x10, relocated, reloc, elsewhere))
+        self.assertIsNone(objects._branch(bytes(4), "aarch64"))
+        self.assertIsNone(objects._branch(relocated, "mips"))
+
+    def test_a_comdat_group_the_link_kept_from_another_unit_is_dropped_whole(self):
+        """A template's static with a dynamic initializer: clang puts the static, its guard, the initializer and
+        its .init_array entry in one COMDAT group keyed on the static. Where the original holds the static outside
+        the unit, the link kept another unit's group: none of the group's sections is placed."""
+        import struct
+        from types import SimpleNamespace
+        from zkit import nxlink
+        from zkit.elf import Section, Symbol
+        group = Section(1, ".group", nxlink.SHT_GROUP, 0, 0, 0, 12, 9, 1, 4)
+        elf = SimpleNamespace(sections=[group], symbols=[None, Symbol(1, "_ZN1TIiE1sE", 0, 8, "object",
+                                                                             "weak", 3)],
+                              data=lambda s: struct.pack("<3I", nxlink.GRP_COMDAT, 2, 5))
+        where = {"_ZN1TIiE1sE": 0x900}
+        linker = SimpleNamespace(by_name=lambda name, hint, ranges: where.get(name))
+        obj = SimpleNamespace(elf=elf, ranges=[(0x100, 0x200), (0x800, 0x880)])
+        self.assertEqual(nxlink._discarded(linker, obj), {2: "_ZN1TIiE1sE", 5: "_ZN1TIiE1sE"})
+        where["_ZN1TIiE1sE"] = 0x840                                    # the unit's own copy: kept
+        self.assertEqual(nxlink._discarded(linker, obj), {})
 
     def read(self, address, kind=None, **options):
         from zkit.inspect_dol import read_data
