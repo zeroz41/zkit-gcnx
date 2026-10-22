@@ -26,8 +26,10 @@ from .program import Program
 def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     from . import signatures
     proposals = signatures.propose(program, signatures.donors()) if signatures.listed() else []
-    placed = {p.address: p.unit for p in proposals if p.kind == "function" and p.unit}  # the donors' units
     initializers = _initializers(program)
+    # the donors' units; an initializer's only from another build's initializer (a constructor's shape is no file)
+    placed = {p.address: p.unit for p in proposals if p.kind == "function" and p.unit
+              and (p.address not in initializers or p.name.startswith("_GLOBAL__sub_I_"))}
     if initializers:                                # what an initializer array calls is named by its file alone
         program = _unnamed(program, initializers)
     current = {f.address: f.name for f in program.functions} | {o.address: o.name for o in program.objects}
@@ -37,8 +39,13 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
         named += _slot_names(program, named)
         symbols = {p.address: (p.name, "function" if p.kind == "function" else "object", 0) for p in named}
         sizes = {p.address: p.size for p in named if p.kind == "object" and p.size}
+        tables = {p.address: _table_size(program, p.address) for p in named
+                  if p.kind == "object" and not p.size and p.name.startswith("_ZTV")}
+        tables = {address: size for address, size in tables.items() if size}
+        sizes.update(tables)
+        absorbed, resized = _room_for(program, tables)
         weak = {p.address for p in named if p.weak}
-        with_data = _with_objects(program, _new_objects(program, symbols, sizes, set(current), weak))
+        with_data = _with_objects(program, _new_objects(program, symbols, sizes, set(current) - absorbed, weak))
         named_program = signatures.renamed(with_data, named)       # the names say which class owns a function
         proposal = units.propose(named_program, fixed, placed)
         own = _initializer_names(program, proposal, initializers)
@@ -46,7 +53,7 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
         symbols |= {p.address: (p.name, "function", 0) for p in own}
         return {"units": proposal, "classes": None, "symbols": symbols,
                 "sizes": sizes, "signatures": named,     # the data named counts for the units' data
-                "weak": weak, "local": {p.address for p in own}}
+                "weak": weak, "local": {p.address for p in own}, "absorbed": absorbed, "resized": resized}
     proposal = units.propose(program, fixed, placed)
     result: dict[str, Any] = {"units": proposal, "classes": None, "symbols": {}, "signatures": named,
                               "weak": {p.address for p in named if p.weak}}
@@ -138,6 +145,44 @@ def _initializer_names(program: Program, proposal: dict[str, Any], initializers:
     return out
 
 
+def _table_size(program: Program, address: int) -> int:
+    """The extent of a Switch class table no donor sizes, read from the module: its offset-to-top and typeinfo
+    words (zero: the module has no RTTI) and then each slot holding a function or an import."""
+    from .signatures import itanium_slots
+    image = program.image
+    if not hasattr(image, "pointers") or address in image.pointers or address + 8 in image.pointers:
+        return 0
+    try:
+        if image.u64(address) or image.u64(address + 8):
+            return 0
+    except (ValueError, IndexError):
+        return 0
+    starts = {f.address: f.size for f in program.functions}
+    count = 0
+    while True:
+        slot = itanium_slots(image, address + 8 * count, 1, starts)
+        if not slot or slot[0][0] == "other":
+            break
+        count += 1
+    return 16 + 8 * count if count else 0
+
+
+def _room_for(program: Program, tables: dict[int, int]) -> tuple[set[int], dict[int, int]]:
+    """Placeholder data labels a newly sized table covers: those starting inside it (its own slots, a label the
+    code's pointer to them made) go, and one running into its start ends there. Named objects are kept."""
+    absorbed: set[int] = set()
+    resized: dict[int, int] = {}
+    for address, size in tables.items():
+        for o in program.objects:
+            if not _placeholder(o.name):
+                continue
+            if address < o.address < address + size:
+                absorbed.add(o.address)
+            elif o.address < address < o.address + o.size:
+                resized[o.address] = address - o.address
+    return absorbed, resized
+
+
 def _placeholder(name: str | None) -> bool:
     from .score import placeholder
     return not name or placeholder(name)
@@ -151,6 +196,7 @@ def write(program: Program, result: dict[str, Any], symbols_in: Path, folder: Pa
     folder.mkdir(parents=True, exist_ok=True)
     units.write_splits(result["units"], folder / "splits.txt")
     renamed, weak, local = result["symbols"], result.get("weak", set()), result.get("local", set())
+    absorbed, resized = result.get("absorbed", set()), result.get("resized", {})
     lines, seen, starts = [], set(), set()
     for line in symbols_in.read_text(encoding="utf-8", errors="replace").splitlines():
         match = SYMBOL_LINE.match(line.strip())
@@ -158,6 +204,10 @@ def write(program: Program, result: dict[str, Any], symbols_in: Path, folder: Pa
             lines.append(line)
             continue
         address = int(match["address"], 16)
+        if address in absorbed:                   # inside a table this analysis sized
+            continue
+        if address in resized:
+            line = f"{match['name']} = {match['section']}:0x{address:08X}; //{_with_size(match['attrs'], resized[address])}"
         starts.add(address)
         if address in renamed and address not in seen:
             name, kind, size = renamed[address]
@@ -165,6 +215,8 @@ def write(program: Program, result: dict[str, Any], symbols_in: Path, folder: Pa
             attrs = match["attrs"]
             if size:
                 attrs = _with_size(attrs, size)
+            if address in resized:
+                attrs = _with_size(attrs, resized[address])
             if address in weak:                   # the donors' copy is an inline or a template instance
                 attrs = re.sub(r"\bscope:\w+", "scope:weak", attrs)
             if address in local:                  # a file's own, like its static initializer

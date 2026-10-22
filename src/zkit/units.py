@@ -94,13 +94,32 @@ class Evidence:
         return out
 
 
+def _initialized(program: Program) -> set[int]:
+    """Switch: the data objects some unit's own static initializer stores into (`_initializers`): globals that unit
+    defines (a class's `m_rtti`), which other units' code (their initializers' parent tables, a type test)
+    reaches through the GOT, so the functions near each other that use one are no one unit's for it."""
+    from .aarch64 import global_stores
+    out: set[int] = set()
+    initializers = _initializers(program)
+    load64 = program.image.pointers.get if initializers else None
+    for index in initializers:
+        function = program.functions[index]
+        words = program.platform.words(program.image, function.address, function.size)
+        for address in global_stores(words, function.address, load64):
+            found = program.object_at(address)
+            if found is not None:
+                out.add(found.address)
+    return out
+
+
 def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence:
     users = program.users()
     local = {o: sorted(fs) for o, fs in users.items() if fs and max(fs) - min(fs) <= TIGHT}
+    initialized = _initialized(program)
     per_unit = program.platform.literals_per_unit
     text = program.platform.text
     joins = [(fs[0], fs[-1], f"{o.name} ({o.section}) is one unit's") for o, fs in local.items()
-             if fs[-1] > fs[0] and (o.section in WRITABLE_SECTIONS or per_unit)]
+             if fs[-1] > fs[0] and (o.section in WRITABLE_SECTIONS or per_unit) and o.address not in initialized]
     separations = []
     if per_unit:
         copies: dict[tuple[str, bytes], list[DataObject]] = collections.defaultdict(list)

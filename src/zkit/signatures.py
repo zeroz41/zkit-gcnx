@@ -350,11 +350,33 @@ def _neighbours(signatures: list[Signature], order: list[str | None]) -> None:
             signature.after = order[i + 1] if i + 1 < len(order) else None
 
 
+def _named_initializers(program: Program, unit_of) -> Program:
+    """A donor's unnamed static initializers named as clang names them, after the units that place them
+    (`_GLOBAL__sub_I_<file>`): another build's initializer of the same file then carries that file over, where
+    nothing else in its unit may survive (a file the linker dropped all but its initializer of)."""
+    from dataclasses import replace
+    from .analyze import _initializers
+    from .score import placeholder
+    own = {a for a, guarded in _initializers(program).items() if not guarded}
+    functions = []
+    for f in program.functions:
+        unit = unit_of(f.address) if f.address in own and placeholder(f.name) else None
+        if unit:
+            file = re.sub(r"[^A-Za-z0-9_.]", "_", unit.rsplit("/", 1)[-1])
+            f = replace(f, name=f"_GLOBAL__sub_I_{file}", scope="local")
+        functions.append(f)
+    out = Program(program.platform, program.image, functions, program.objects, program.sda)
+    out.labels, out.sections = program.labels, program.sections
+    return out
+
+
 def add_program(donor: Donor, program: Program, units: list[tuple[int, int, str]] = ()) -> None:
     """Every named function of an original with symbols, its named virtual tables' slots and the sizes of the
     data its functions name. `units` ((start, end, unit) of any section) places file-local symbols."""
     from .delink import Entry, Symbols
     unit_of = _units(list(units))
+    if units and program.platform.name == "switch":
+        program = _named_initializers(program, unit_of)
     symbols = Symbols([Entry(f.address, f.size, f.name, f.scope) for f in program.functions],
                       [Entry(o.address, o.size, o.name, o.scope) for o in program.objects]
                       + [Entry(o.address, 0, o.name, o.scope) for o in program.labels
