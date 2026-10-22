@@ -36,7 +36,12 @@ def objects(module, functions: Iterable[tuple[int, int]], sized: Iterable[tuple[
             ) -> list[tuple[int, int, str]]:
     """(address, size, section) of each data object the module's code and pointers refer to that `sized` ((start,
     size) of the objects already known, the module's own symbols) does not hold already."""
-    segments = sorted((s.offset, s.offset + s.size, s.name) for s in module.segments if s.kind == "data" and s.size)
+    zero_end = getattr(module, "bss_end", None)       # .bss up to where its objects end (MOD0's), not the page
+
+    def end(s) -> int:
+        stop = s.offset + s.size
+        return zero_end if s.name == "bss" and zero_end is not None and s.offset < zero_end < stop else stop
+    segments = sorted((s.offset, end(s), s.name) for s in module.segments if s.kind == "data" and s.size)
     bounds = [s[0] for s in segments]
 
     def segment(address: int):
@@ -74,18 +79,59 @@ def objects(module, functions: Iterable[tuple[int, int]], sized: Iterable[tuple[
         if held is None or address in taken:
             continue
         stop = min(starts[position + 1], held[1]) if position + 1 < len(starts) else held[1]
+        text = _string_size(module, address, stop - address) \
+            if held[2] == "rodata" and address in whole and not widths.get(address) else 0
+        tail = _unreferenced_strings(module, address + text, stop) if text else []
+        if tail:
+            out += [(address, text, ".rodata")] + [(at, length, ".rodata") for at, length in tail]
+            continue
         out.append((address, _own_size(module, address, stop - address, held[2], whole, widths), f".{held[2]}"))
     return out
+
+
+def _unreferenced_strings(module, start: int, stop: int) -> list[tuple[int, int]]:
+    """(address, size) of each string from `start` to `stop` when that range is nothing but strings (and the zero
+    padding to an aligned start): literals no code or data refers to, a string's neighbours in a merged section
+    (code the linker dropped for want of callers leaves its literals). Each is an object of its own, never part of
+    the string before it, so a unit's range can end between them. Text is ASCII or UTF-8 without control bytes."""
+    if not 0 < stop - start <= STRING_LIMIT:
+        return []
+    raw = module.read(start, stop - start)
+    out, cursor = [], 0
+    while cursor < len(raw) and raw[cursor]:
+        end = raw.find(b"\0", cursor)
+        if end < 0 or not _text(raw[cursor:end]):
+            return []
+        out.append((start + cursor, end + 1 - cursor))
+        cursor = end + 1
+    padding = len(raw) - cursor
+    if any(raw[cursor:]) or padding >= 32 or (padding and stop % (1 << padding.bit_length())):
+        return []
+    return out
+
+
+def _text(raw: bytes) -> bool:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return all(c >= " " or c in "\t\n\r" for c in text)
+
+
+def _string_size(module, address: int, extent: int) -> int:
+    """The size of the ASCII string at an address, its NUL included, within the extent; 0 when it is none."""
+    if extent <= 1:
+        return 0
+    raw = module.read(address, min(extent, STRING_LIMIT))
+    end = raw.find(b"\0")
+    return end + 1 if end > 0 and all(0x20 <= c < 0x7F or c in (9, 10, 13) for c in raw[:end]) else 0
 
 
 def _own_size(module, address: int, extent: int, section: str, whole: set[int], widths: dict[int, set[int]]) -> int:
     """An object's own size within the extent up to the next start (module docstring)."""
     size = extent
-    if section == "rodata" and address in whole and not widths.get(address) and extent > 1:
-        raw = module.read(address, min(extent, STRING_LIMIT))
-        end = raw.find(b"\0")
-        if end > 0 and all(0x20 <= c < 0x7F or c in (9, 10, 13) for c in raw[:end]):
-            size = end + 1
+    if section == "rodata" and address in whole and not widths.get(address):
+        size = _string_size(module, address, extent) or extent
     elif address not in whole and len(widths.get(address, ())) == 1:
         width = next(iter(widths[address]))
         if 0 < width < extent:
