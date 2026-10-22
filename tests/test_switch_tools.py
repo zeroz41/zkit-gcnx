@@ -283,6 +283,20 @@ class SwitchToolTests(unittest.TestCase):
         (self.root / "symbols.txt").write_text(SYMBOLS.replace("foo_set", "foo_renamed") + caller, encoding="utf-8")
         self.assertIn("<foo_renamed>", disasm(self.project, "t", 0x160)["text"])
 
+    def test_a_placeholder_the_symbols_carry_is_found_by_its_full_address(self):
+        """A Switch placeholder spells the full address (fn_7100000160); the index keys functions by module
+        offset."""
+        from zkit import quality
+        from zkit.candidate import symbol_placeholders
+        from zkit.index import connect, refresh
+        placeholder = "_ZN3Foo13fn_7100000160Ev = .text:0x00000160; // type:function size:0x8 scope:global\n"
+        (self.root / "symbols.txt").write_text(SYMBOLS + placeholder, encoding="utf-8")
+        refresh(self.project)
+        text = "void f() {\n    Foo::fn_7100000160();\n    fn_7100000100();\n}\n"
+        debt, carried = symbol_placeholders(connect(self.project), "t", quality.findings(text, quality.patterns()))
+        self.assertEqual(carried, ["fn_7100000160"])
+        self.assertEqual([item["text"] for item in debt], ["fn_7100000100"])  # foo_set, not this name
+
     def test_words_are_pointer_sized_where_the_module_relocates_them(self):
         table = self.read(VTABLE)
         self.assertEqual(table["kind"], "ptr")                         # a vtable: four slots, not eight halves

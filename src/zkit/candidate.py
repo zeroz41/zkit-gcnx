@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -21,6 +22,7 @@ from typing import Any
 from .project import Project
 
 ATTEMPT_CAP = 4
+_PLACEHOLDER_ADDRESS = re.compile(r"_([0-9A-Fa-f]{6,16})$")
 DEP_FLAGS = {"-MMD", "-MD", "-MP", "-M", "-MM"}
 DEP_ARGS = {"-MF", "-MT", "-MQ"}
 
@@ -212,6 +214,26 @@ def compare(project: Project, target: str, unit: dict, name: str, text: str, kee
     return out
 
 
+def symbol_placeholders(db, target: str, debt: list[dict]) -> tuple[list[dict], list[str]]:
+    """(debt left, placeholders the symbols carry). An address-named function whose function at that address the
+    symbols name with that very placeholder (plainly, inside an Itanium name or before a CodeWarrior suffix) is
+    the callee's naming debt, kept until evidence names it: a candidate can only spell what the symbols say.
+    `zkit quality` still counts it across the tree; a placeholder the symbols do not carry stays the candidate's."""
+    from .index import function_at, parse_address
+    kept, carried = [], set()
+    for item in debt:
+        token = item.get("text", "")
+        match = _PLACEHOLDER_ADDRESS.search(token) if item.get("key") == "function_placeholder" else None
+        address = parse_address("0x" + match.group(1)) if match else None  # the index's key (Switch: module offset)
+        row = function_at(db, target, address) if address is not None else None
+        name = row["name"] if row is not None and row["address"] == address else ""
+        if name and (name == token or f"{len(token)}{token}" in name or name.startswith(token + "__")):
+            carried.add(token)
+        else:
+            kept.append(item)
+    return kept, sorted(carried)
+
+
 def check_unit(project: Project, target: str, query: str, candidate: Path) -> dict[str, Any]:
     """A whole unit's candidate, outside the tree: compiled with the unit's command, every function of the unit
     compared with the original's, and (Switch) the object linked into the original, which proves the unit's data,
@@ -255,6 +277,7 @@ def check_unit(project: Project, target: str, query: str, candidate: Path) -> di
         out["functions"] = rows
         out["exact"] = sum(r["exact"] for r in rows)
         debt = quality.findings(text, quality.patterns(project, project.target(target)["repository"]))
+        debt, out["placeholders"] = symbol_placeholders(connect(project), target, debt)
         out["debt"] = sorted({item["label"] for item in debt})
         if project.target(target).get("platform", "").lower() in ("switch", "nx"):
             from .delink import read_units
@@ -334,7 +357,7 @@ def check(project: Project, target: str, query: str, candidate: Path, force: boo
                                   params=bridge.parameter_count(row["demangled"]))
     body = "\n".join(lines[span[0]:span[1] + 1]) if span else text
     out["judged"] = "the function's definition" if span else "the whole candidate (definition not found)"
-    debt = quality.findings(body, catalog)
+    debt, out["placeholders"] = symbol_placeholders(db, target, quality.findings(body, catalog))
     if debt:
         labels: dict[str, int] = {}
         for item in debt:

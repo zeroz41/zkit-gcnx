@@ -89,6 +89,19 @@ class LookupToolTests(unittest.TestCase):
         self.assertEqual(found, {"decomp:src/Enemy.cpp:8": "definition", "decomp:src/Enemy.cpp:11": "definition",
                                  "decomp:src/Flag.h:4": "declaration", "decomp:docs/BUILD.md:1": "use"})
 
+    def test_a_placeholder_the_symbols_carry_is_not_the_candidates_debt(self):
+        from zkit import quality
+        from zkit.candidate import symbol_placeholders
+        from zkit.index import connect, refresh
+        self.add_function("_ZN2gf3Foo11fn_80003024Ev", "gf::Foo::fn_80003024()", TEXT + 0x24, 4)
+        refresh(self.project)
+        text = ("void f() {\n    TPlayer__sub_80003010();\n    gf::Foo::fn_80003024();\n    fn_80003028();\n"
+                "    fn_80003030();\n}\n")
+        debt, carried = symbol_placeholders(connect(self.project), "t", quality.findings(text, quality.patterns()))
+        # the symbols name 0x80003010 and 0x80003024 so; no function starts at 0x80003028 or 0x80003030
+        self.assertEqual(carried, ["TPlayer__sub_80003010", "fn_80003024"])
+        self.assertEqual(sorted(item["text"] for item in debt), ["fn_80003028", "fn_80003030"])
+
     def test_pasted_queries_and_floor_of_near_misses(self):
         from zkit.bridge import split_queries, status_word
         self.assertEqual(split_queries("`0x80003000`,"), ["0x80003000"])

@@ -1666,6 +1666,7 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
     decomp_gate = None
     if config.get("role") == "decomp":
         from . import quality
+        from .candidate import symbol_placeholders
         quality_config = config.get("quality", {})
         decomp_gate = quality_config.get("gate", "warning")
         catalog = quality.patterns(project, repo)
@@ -1687,7 +1688,14 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
             for number, line in enumerate(text_lines, 1):
                 if added is not None and number not in added:
                     continue
-                for found in quality.findings(line, catalog, header=header, skip=("extern_c",)) + externs[number]:
+                found_here = quality.findings(line, catalog, header=header, skip=("extern_c",)) + externs[number]
+                found_here, carried = symbol_placeholders(db, target, found_here)
+                for token in carried:   # the callee's naming debt, which `zkit quality` still counts
+                    stats["placeholders"] += 1
+                    findings.append({"severity": "info", "rule": "decomp-placeholder", "ref": f"{rel}:{number}",
+                                     "message": "a placeholder the symbols carry: renamed with its function",
+                                     "line": token})
+                for found in found_here:
                     stats["debt_added"] += 1
                     old = had[found["key"]] > 0
                     if old:
