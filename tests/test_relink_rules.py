@@ -336,6 +336,23 @@ class LinkerTableTests(unittest.TestCase):
         self.assertEqual((kind, flags & delink.SHF_EXECINSTR, size), (14, 0, 8))      # SHT_INIT_ARRAY
         self.assertTrue(delink.section_traits(delink.PPC, ".init")[1] & delink.SHF_EXECINSTR)
 
+    def test_a_dotted_local_function_has_its_own_code_section(self):
+        """clang compiles a file's static initializer, `_GLOBAL__sub_I_a.cpp`, into `.text._GLOBAL__sub_I_a.cpp`,
+        and objdiff pairs a local symbol only between sections whose names agree without their last `.part`: the
+        original's copy is cut into that section too, and only on AArch64."""
+        functions = [delink.Entry(0x100, 0x20, "_Z1fv"), delink.Entry(0x120, 0x10, "_GLOBAL__sub_I_a.cpp", "local"),
+                     delink.Entry(0x130, 0x10, "_Z1gv"), delink.Entry(0x140, 0x8, "_ZL1hv.part.0", "global")]
+        symbols = delink.Symbols(functions, [], lambda a: f"{a:X}")
+        image = delink.Image(delink.AARCH64, 0, None, symbols, None, None, None, None)
+        self.assertEqual(list(delink._own_sections(image, ".text", (0x100, 0x148), ".text")),
+                         [(0x100, 0x120, ".text"), (0x120, 0x130, ".text._GLOBAL__sub_I_a.cpp"),
+                          (0x130, 0x148, ".text")])                     # a global keeps the unit's section
+        self.assertEqual(list(delink._own_sections(image, ".data", (0x100, 0x148), ".data")),
+                         [(0x100, 0x148, ".data")])
+        image = delink.Image(delink.PPC, 0, None, symbols, None, None, None, None)
+        self.assertEqual(list(delink._own_sections(image, ".text", (0x100, 0x148), ".text")),
+                         [(0x100, 0x148, ".text")])
+
 
 class RuntimeMemberTests(unittest.TestCase):
     """The C++ runtime links late but leads .ctors and .dtors: mwld puts the tables of the archive member named
