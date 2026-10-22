@@ -1097,6 +1097,9 @@ def candidate(data: dict) -> str:
         out = [head + body.split(": ", 1)[1].split("\n", 1)[0]] + body.split("\n")[1:]
     for item in data.get("debt", []):
         out.append(f"  debt: {item}")
+    if data.get("placeholders"):
+        out.append("  placeholder names the symbols carry (renamed with their function): "
+                   + ", ".join(data["placeholders"]))
     if data.get("bank_note"):
         out.append(f"  {data['bank_note']}")
     return "\n".join(out)
@@ -1398,6 +1401,9 @@ def candidate_unit(data: dict) -> str:
             lines.append(f"  differs: {row['function']}: {why}")
     if data.get("debt"):
         lines.append("  decompiler debt: " + ", ".join(data["debt"]))
+    if data.get("placeholders"):
+        lines.append("  placeholder names the symbols carry (renamed with their function): "
+                     + ", ".join(data["placeholders"]))
     link = data.get("link")
     if link is not None:
         if link.get("linked"):

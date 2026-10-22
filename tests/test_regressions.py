@@ -110,6 +110,15 @@ class AuditRegressions(unittest.TestCase):
         self.assertEqual(rules.get("forbidden-existing"), "info")
         self.assertNotIn("forbidden", rules)
 
+    def test_check_reports_a_placeholder_the_symbols_carry_as_info(self):
+        from zkit.bridge import check
+        (self.decomp / "src/Call.cpp").write_text("void f() {\n    TPlayer__sub_80003010();\n    fn_80003030();\n}\n",
+                                                  encoding="utf-8")
+        found = {(f["rule"], f.get("line")): f["severity"]
+                 for f in check(self.project, "decomp", paths=["src/Call.cpp"])["findings"]}
+        self.assertEqual(found[("decomp-placeholder", "TPlayer__sub_80003010")], "info")
+        self.assertIn(("decomp-debt-added", "fn_80003030"), found)   # no function of the symbols is named so
+
     def test_git_worktree_is_its_own_working_tree(self):
         from zkit.bridge import check
         tree = self.native.parent / "native-wt"
