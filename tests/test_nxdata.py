@@ -653,3 +653,61 @@ class SharedInlineTests(unittest.TestCase):
             self.assertLess(at["_ZNK4Cond3argEv"], at["_ZN1B4testEi"])
             self.assertEqual(owner[at["_ZNK4Cond3argEv"]], "game/a.cpp")
             self.assertEqual(owner[at["_ZN1B4testEi"]], "game/b.cpp")
+
+
+# timer.cpp's cheap Timer::update, called out of line by manager.cpp's code; manager.cpp's own helper makes too
+# many calls to be inlined, so its call stays within the file
+OUT_OF_LINE = {
+    "other.cpp": """void report(const char *file, int line);
+int fo(int v) { if (v > 9) report("C:/proj/src/game/other.cpp", 1); return v + 3; }
+""",
+    "timer.cpp": """struct Timer { float t; void update(float d); };
+void Timer::update(float d) { t += d; }
+""",
+    "manager.cpp": """void report(const char *file, int line);
+void ping(int);
+struct Timer { float t; void update(float d); };
+__attribute__((noinline)) void helper(int v) { ping(v); ping(v + 1); ping(v + 2); ping(v + 3); ping(v + 4);
+    ping(v + 5); ping(v + 6); ping(v + 7); }
+void tick(Timer *timers, int n, float d) {
+    if (n > 99) report("C:/proj/src/game/manager.cpp", 2);
+    for (int i = 0; i < n; i++) timers[i].update(d);
+    helper(n);
+}
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class OutOfLineCallTests(unittest.TestCase):
+    def test_a_cheap_function_called_out_of_line_is_another_files(self):
+        """Nothing cites timer.cpp; between other.cpp's and manager.cpp's citations only the call manager.cpp's
+        tick makes to Timer::update, which -O2 would have inlined from the same file, separates it from tick.
+        helper's eight calls make it too dear to inline, so its call says nothing and it stays tick's."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in OUT_OF_LINE.items():
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, "-ffunction-sections", str(root / name), "-o",
+                                str(root / name.replace(".cpp", ".o"))], check=True, capture_output=True)
+            link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                    *(str(root / n.replace(".cpp", ".o")) for n in OUT_OF_LINE)]
+            subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
+            subprocess.run([*link, "--strip-all", "-o", str(root / "main.elf")], check=True, capture_output=True)
+            at = {s.name: s.value for s in Elf.load(root / "full.elf").symbols}
+            module = nx.load(root / "main.elf")
+            functions = module.functions()
+            symbols = [Symbol(f"fn_{a:08X}", ".text", a, "function", s, "global") for a, s in functions]
+            symbols += [Symbol(f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section in nxdata.objects(module, functions)]
+            program = Program.from_symbol_list(Switch(), module, symbols)
+            owner = {}
+            for unit in units.propose(program)["units"]:
+                for index in range(unit["first"], unit["end"]):
+                    owner[program.functions[index].address] = unit["unit"]
+            update, tick, helper = at["_ZN5Timer6updateEf"], at["_Z4tickP5Timerif"], at["_Z6helperi"]
+            self.assertLess(at["_Z2foi"], update)
+            self.assertLess(update, helper)
+            self.assertEqual(owner[tick], "game/manager.cpp")
+            self.assertEqual(owner[helper], "game/manager.cpp")
+            self.assertNotIn(owner[update], ("game/manager.cpp", "game/other.cpp"))
