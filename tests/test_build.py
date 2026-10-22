@@ -156,6 +156,11 @@ class ConfigureTests(unittest.TestCase):
         # `zkit try` compiles candidates with exactly this command
         found, workdir, source = candidate.compile_command(Project.load(self.manifest), "t", units[0])
         self.assertEqual((found, workdir, source), (argv, self.game, "src/game/Enemy.cpp"))
+        # a unit with no source file yet compiles as the build will compile it once it has one
+        found, workdir, source = candidate.compile_command(Project.load(self.manifest), "t", units[1])
+        self.assertEqual((found, workdir, source), (
+            ["tools/wibo", "build/compilers/GC/1.2.5n/mwcceppc.exe", "-O4,p", "-inline", "auto", "-i", "include",
+             "-DGAME", "-c", "src/game/Player.cpp", "-o", "build/T/src/game"], self.game, "src/game/Player.cpp"))
 
     def test_report_and_link_steps(self):
         (self.root / "objdiff-cli").write_bytes(b"")
