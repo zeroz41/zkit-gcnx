@@ -365,3 +365,57 @@ class ExternalDataTests(unittest.TestCase):
             g = at["g_info"].value
             self.assertIn(g, units._initialized(program))
             self.assertFalse([why for _, _, why in units.evidence(program).joins if f"{g:08X}" in why])
+
+
+# b.cpp's code the linker dropped left its literals (written here as the object would carry them: a string c.cpp
+# uses too, its path, a string only it used); b.cpp's kept code cites itself by its relative path
+DROPPED = {
+    "a.cpp": """void report(const char *file, int line);
+int fa(int v) { if (v > 9) report("C:/proj/src/game/a.cpp", 1); return v + 1; }
+""",
+    "b.cpp": """void report(const char *file, int line);
+__asm__(".pushsection .rodata.str1.1,\\"aMS\\",@progbits,1\\n.asciz \\"child == nullptr\\"\\n"
+        ".asciz \\"C:/proj/src/game/b.cpp\\"\\n.asciz \\"b gone\\"\\n.popsection");
+int fb(int v) { if (v > 9) report("b.cpp", 2); return v * 2; }
+""",
+    "c.cpp": """void report(const char *file, int line);
+int fc(int v) { if (v > 9) report("C:/proj/src/game/c.cpp", 3); if (v < 0) report("child == nullptr", 4);
+                return v - 1; }
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class DroppedCodeTests(unittest.TestCase):
+    def test_a_dropped_files_literals_are_its_own(self):
+        """Strings no code refers to are objects of their own, not the tail of the string before them, and the
+        path among them is its file's (the unit its kept code names by a shorter path): b.cpp's range holds it,
+        and c.cpp's starts after b.cpp's."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in DROPPED.items():
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, str(root / name), "-o", str(root / name.replace(".cpp", ".o"))],
+                               check=True, capture_output=True)
+            # -O0: each object's strings in link order, as the original's linker keeps them (lld's merging
+            # orders them by hash)
+            subprocess.run([LLD, "-O0", "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                            "--strip-all", *(str(root / n.replace(".cpp", ".o")) for n in DROPPED), "-o",
+                            str(root / "main.elf")], check=True, capture_output=True)
+            module = nx.load(root / "main.elf")
+            functions = module.functions()
+            found = nxdata.objects(module, functions)
+            texts = {module.read(a, size): a for a, size, section in found if section == ".rodata"}
+            for text in (b"child == nullptr\0", b"C:/proj/src/game/b.cpp\0", b"b gone\0"):
+                self.assertIn(text, texts)                                  # each its own object
+            symbols = [Symbol(f"fn_{a:08X}", ".text", a, "function", s, "global") for a, s in functions]
+            symbols += [Symbol(f"lbl_{a:08X}", section, a, "object", size, "global") for a, size, section in found]
+            symbols += [Symbol(name or f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section, name in nxdata.linker_tables(module)]
+            program = Program.from_symbol_list(Switch(), module, symbols)
+            ranges = {unit["unit"]: (row["start_key"], row["end_key"]) for unit in units.propose(program)["units"]
+                      for row in unit["data"] if row["section"] == ".rodata"}
+            path = texts[b"C:/proj/src/game/b.cpp\0"]
+            self.assertLessEqual(ranges["b.cpp"][0], path)
+            self.assertLess(path, ranges["b.cpp"][1])
+            self.assertGreaterEqual(ranges["game/c.cpp"][0], ranges["b.cpp"][1])

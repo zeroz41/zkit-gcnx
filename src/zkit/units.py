@@ -1050,6 +1050,8 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
                 claims.append((address, address + tables[address].size, next(iter(homes)), ".data"))
         claims += _exception_tables(program, owner)
     claims += _through_data(program, ev, claims)
+    if merged:
+        claims += _dropped_files(program, ev, order)
     out: list[tuple[int, int, str, str]] = []
     if program.platform.name == "gamecube":
         claims += _initializer_tables(program, owner)
@@ -1102,6 +1104,28 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
             out.append(row)
             last = row
     out.sort()
+    return out
+
+
+def _dropped_files(program: Program, ev: Evidence, order: dict[str, int]) -> list[tuple[int, int, str, str]]:
+    """A source file's own path that no code or data refers to is that file's: the `__FILE__` of code the linker
+    dropped (`--gc-sections` removes unreferenced functions, while their file's literals stay where its object's
+    went, in link order between its neighbours' literals). Only a path naming a unit; a header's is no file's."""
+    referred = {address for rows in program.refs.values() for _, address, _ in rows}
+    referred.update(pointee for _, pointee in program.pointers)
+    out = []
+    for address, text in program.strings().items():
+        if not SOURCE.search(text) or HEADER.search(text) or address in referred:
+            continue
+        found = program.object_at(address)
+        if found is None or found.section not in MERGED_SECTIONS:
+            continue
+        unit = _unit_name(text, ev.roots)
+        if unit not in order:                          # a unit its own code names by a shorter path
+            tails = [u for u in order if unit.casefold().endswith("/" + u.casefold())]
+            unit = tails[0] if len(tails) == 1 else None
+        if unit is not None:
+            out.append((address, address + len(text) + 1, unit, found.section))
     return out
 
 
