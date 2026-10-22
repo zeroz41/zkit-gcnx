@@ -138,9 +138,54 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     firsts = _first_users(program)
     ev = Evidence(local, joins + firsts, separations, firsts=firsts)
     _file_evidence(program, ev, placed)
+    ev.joins += _table_joins(program, ev)
     _initializer_ends(program, ev)
     _start_up_object(program, ev)
     return ev
+
+
+def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
+    """Itanium (Switch): the functions only one class table holds (its class's own virtuals, not a base's or an
+    inline another table shares) are one unit's: the class's file defines its methods, and clang emits the table and
+    the inline virtuals only it holds in one unit. For a table no symbol names (a class an update added, whose
+    functions no name ties to a class either), as far as a tight run reaches, never across two files the code
+    itself cites (a method defined in another file). A named class's functions go by their class (`_class_files`)."""
+    if program.platform.name != "switch":
+        return []
+    from .itanium import _groups
+    from .score import placeholder
+    weak = set(getattr(program.image, "weak", ())) | {f.address for f in program.functions if f.scope == "weak"}
+    formed = {address for rows in program.refs.values() for _, address, kind in rows if kind == "addr"}
+    holders: dict[int, list[int]] = {}
+    for o in program.objects:                          # a table's start: its name, or code forming its address
+        if o.section != ".data":                       # point, 16 bytes in (one object, or two at that point)
+            continue
+        if o.name.startswith("_ZTV") or o.size >= 24 and o.address + 16 in formed:
+            start, size = o.address, o.size
+        elif o.address in formed and o.address - 16 not in holders and \
+                (head := program.object_at(o.address - 16)) is not None and head.address == o.address - 16:
+            start, size = head.address, 16 + o.size
+        else:
+            continue
+        groups = _groups(program, start, size)
+        if groups:
+            holders[start] = [s for g in groups for s in g.slots if isinstance(s, int)]
+    count = collections.Counter(s for slots in holders.values() for s in set(slots))
+    index = program.function_index
+    own_files = {i: f for i, f in ev.files.items() if i not in ev.placed}
+    text = program.platform.text
+    out = []
+    for address, slots in holders.items():
+        if not placeholder(program.object_at(address).name) or \
+                not placeholder(getattr(program.object_at(address + 16), "name", "lbl_")):
+            continue                                   # a named class: its functions go by their class
+        own = sorted({index[s] for s in slots if count[s] == 1 and s in index and s not in weak})
+        if len(own) < 2 or own[-1] - own[0] > TIGHT:
+            continue
+        if len({own_files[i] for i in range(own[0], own[-1] + 1) if i in own_files}) > 1:
+            continue
+        out.append((own[0], own[-1], f"the functions only the table at {text(address)} holds"))
+    return out
 
 
 def _first_users(program: Program) -> list[tuple[int, int, str]]:
