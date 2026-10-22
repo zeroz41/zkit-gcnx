@@ -90,6 +90,8 @@ class _Code:
         self.image = SimpleNamespace(weak={self.functions[i].address for i in weak},
                                      symbols={f.address: f.name for f in listed})
         self.calls = {}
+        self.refs = {}                                   # no code takes an address
+        self.function_index = {f.address: i for i, f in enumerate(self.functions)}
 
 
 class UnitEvidenceTests(unittest.TestCase):

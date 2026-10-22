@@ -542,3 +542,53 @@ class TableUserTests(unittest.TestCase):
             self.assertEqual(owner[at["_ZN5Outer4initEi"]], "game/a.cpp")
             self.assertEqual(owner[at["_ZN5Outer3Ear4hearEi"]], "game/a.cpp")
             self.assertEqual(owner[at["_Z2fbi"]], "game/b.cpp")
+
+
+# a template instance whose address a.cpp's code takes (a callback), emitted after a.cpp's own code; the module
+# keeps no symbol that marks it weak
+CALLBACKS = {
+    "a.cpp": """void report(const char *file, int line);
+typedef int (*Tick)(int);
+void store(Tick tick);
+template <int N> int tick(int v) { return v * N + 1; }
+int fa(int v) { if (v > 9) report("C:/proj/src/game/a.cpp", 1); store(&tick<3>); return v + 4; }
+""",
+    "b.cpp": """void report(const char *file, int line);
+int fb(int v) { if (v > 9) report("C:/proj/src/game/b.cpp", 2); return v * 2; }
+int fb2(int v) { if (v < 0) report("C:/proj/src/game/b.cpp", 3); return v - 2; }
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class CallbackTests(unittest.TestCase):
+    def test_a_function_whose_address_the_code_takes_stays_beside_that_code(self):
+        """tick<3> cites nothing and nothing calls it; fa, which cites a.cpp, takes its address. Like a static
+        helper beside its callers, it is a.cpp's: the boundary goes after it, not before."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in CALLBACKS.items():
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, "-ffunction-sections", str(root / name), "-o",
+                                str(root / name.replace(".cpp", ".o"))], check=True, capture_output=True)
+            link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                    *(str(root / n.replace(".cpp", ".o")) for n in CALLBACKS)]
+            subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
+            subprocess.run([*link, "--strip-all", "-o", str(root / "main.elf")], check=True, capture_output=True)
+            at = {s.name: s.value for s in Elf.load(root / "full.elf").symbols}
+            module = nx.load(root / "main.elf")
+            functions = module.functions()
+            symbols = [Symbol(f"fn_{a:08X}", ".text", a, "function", s, "global") for a, s in functions]
+            symbols += [Symbol(f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section in nxdata.objects(module, functions)]
+            symbols += [Symbol(name or f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section, name in nxdata.linker_tables(module)]
+            program = Program.from_symbol_list(Switch(), module, symbols)
+            owner = {}
+            for unit in units.propose(program)["units"]:
+                for index in range(unit["first"], unit["end"]):
+                    owner[program.functions[index].address] = unit["unit"]
+            self.assertLess(at["_Z2fai"], at["_Z4tickILi3EEii"])
+            self.assertLess(at["_Z4tickILi3EEii"], at["_Z2fbi"])
+            self.assertEqual(owner[at["_Z4tickILi3EEii"]], "game/a.cpp")
+            self.assertEqual(owner[at["_Z2fbi"]], "game/b.cpp")
