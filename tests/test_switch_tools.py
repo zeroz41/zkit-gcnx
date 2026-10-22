@@ -35,7 +35,7 @@ def add(rd, rn, imm):
 RET = 0xD65F03C0
 
 
-def module(got: int = GOT) -> bytes:
+def module(got: int = GOT, bss: int = 0x100) -> bytes:
     """An NSO: two functions that reach a vtable and an import through the GOT and one that forms a table's address;
     the vtable (its methods relocated), a table of plain numbers, strings in three encodings, and the linker's
     tables laid out as Nintendo's linker does: .dynamic, .got.plt, .got (led by .dynamic's address), .init_array
@@ -77,7 +77,7 @@ def module(got: int = GOT) -> bytes:
     header[:4] = b"NSO0"
     for index, (start, end) in enumerate(((TEXT, RODATA), (RODATA, DATA), (DATA, END))):
         struct.pack_into("<III", header, 0x10 + index * 0x10, 0x100 + start, start, end - start)
-    struct.pack_into("<I", header, 0x3C, 0x100)                       # .bss
+    struct.pack_into("<I", header, 0x3C, bss)                         # .bss
     struct.pack_into("<III", header, 0x60, RODATA - TEXT, DATA - RODATA, END - DATA)
     return bytes(header + image)
 
@@ -121,6 +121,16 @@ class SwitchToolTests(unittest.TestCase):
                               "symbols": "symbols.txt", "splits": "splits.txt"}}}), encoding="utf-8")
         from zkit.project import Project
         self.project = Project.load(self.root / "project.json")
+
+    def test_bss_ends_where_mod0_says_not_at_the_page_rounded_size(self):
+        """An NSO header gives .bss's size rounded up to a page; MOD0 gives where its objects end. The rest is
+        padding: no unit's range reaches into it."""
+        image = nx.load(self.root / "main")
+        self.assertEqual(image.bss, (END, 0x100))
+        (self.root / "main").write_bytes(module(bss=0x1000))
+        image = nx.load(self.root / "main")
+        self.assertEqual(image.bss, (END, 0x100))
+        self.assertEqual(next(s for s in image.segments if s.name == "bss").size, 0x1000)
 
     def test_a_link_reaches_a_structor_by_its_partner_when_the_original_names_one(self):
         """clang emits a class's complete- and base-object destructors (D1, D2) as one function under both names;

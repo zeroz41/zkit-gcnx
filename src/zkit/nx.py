@@ -110,11 +110,19 @@ class Module:
     tables: dict[str, tuple[int, int]] = field(default_factory=dict)  # the linker's own: name -> (start, end)
     raw: bytes = b""                    # the image as stored, before the dynamic relocations are applied
     hashes: dict[str, bytes] = field(default_factory=dict)          # segment -> the NSO header's SHA-256 of it
+    bss_end: int | None = None                                      # MOD0's: where the zero-initialized objects end
 
     @property
     def bss(self) -> tuple[int, int]:
+        """The zero-initialized range: the bss segment up to where MOD0 says the objects end (an NSO header gives
+        the segment's size rounded up to a page, and the rest is padding no object owns)."""
         segment = next((s for s in self.segments if s.name == "bss"), None)
-        return (segment.offset, segment.size) if segment else (0, 0)
+        if segment is None:
+            return (0, 0)
+        end = segment.offset + segment.size
+        if self.bss_end is not None and segment.offset < self.bss_end < end:
+            end = self.bss_end
+        return (segment.offset, end - segment.offset)
 
     def section_at(self, offset: int) -> Segment | None:
         segment = self.segment_at(offset)
@@ -260,6 +268,8 @@ def _read_mod0(module: Module) -> None:
     if image[mod0:mod0 + 4] != b"MOD0":
         return
     dynamic, bss_start, bss_end, eh_start, eh_end, _ = struct.unpack_from("<iiiiii", image, mod0 + 4)
+    if bss_end > bss_start:
+        module.bss_end = mod0 + bss_end
     if eh_end > eh_start:
         module.eh_frame_hdr = (mod0 + eh_start, mod0 + eh_end)
     module.tables["MOD0"] = (mod0, mod0 + 28)
