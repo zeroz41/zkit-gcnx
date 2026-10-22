@@ -27,8 +27,12 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
     from . import signatures
     proposals = signatures.propose(program, signatures.donors()) if signatures.listed() else []
     placed = {p.address: p.unit for p in proposals if p.kind == "function" and p.unit}  # the donors' units
+    initializers = _initializers(program)
+    if initializers:                                # what an initializer array calls is named by its file alone
+        program = _unnamed(program, initializers)
     current = {f.address: f.name for f in program.functions} | {o.address: o.name for o in program.objects}
-    named = [p for p in proposals if p.kind != "label" and _placeholder(current.get(p.address))]
+    named = [p for p in proposals if p.kind != "label" and _placeholder(current.get(p.address))
+             and p.address not in initializers]
     if program.platform.name != "gamecube":
         named += _slot_names(program, named)
         symbols = {p.address: (p.name, "function" if p.kind == "function" else "object", 0) for p in named}
@@ -36,9 +40,13 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
         weak = {p.address for p in named if p.weak}
         with_data = _with_objects(program, _new_objects(program, symbols, sizes, set(current), weak))
         named_program = signatures.renamed(with_data, named)       # the names say which class owns a function
-        return {"units": units.propose(named_program, fixed, placed), "classes": None, "symbols": symbols,
+        proposal = units.propose(named_program, fixed, placed)
+        own = _initializer_names(program, proposal, initializers)
+        named += own
+        symbols |= {p.address: (p.name, "function", 0) for p in own}
+        return {"units": proposal, "classes": None, "symbols": symbols,
                 "sizes": sizes, "signatures": named,     # the data named counts for the units' data
-                "weak": weak}
+                "weak": weak, "local": {p.address for p in own}}
     proposal = units.propose(program, fixed, placed)
     result: dict[str, Any] = {"units": proposal, "classes": None, "symbols": {}, "signatures": named,
                               "weak": {p.address for p in named if p.weak}}
@@ -84,6 +92,52 @@ def _slot_names(program: Program, named: list) -> list:
     return out
 
 
+def _initializers(program: Program) -> dict[int, bool]:
+    """{address: whether it tests a guard} for every function a Switch module's `.init_array` calls. clang names
+    a file's own static initializer (no guard) `_GLOBAL__sub_I_<file>` and a template static member's
+    (guarded) `__cxx_global_var_init.<n>`, both file-local: no other build exports either, and an initializer
+    takes no arguments, so a donor's name on one (a constructor's, by its shape) is never its own."""
+    if program.platform.name != "switch":
+        return {}
+    from .aarch64 import guarded
+    out = {}
+    for address in getattr(program.image, "init_array", ()):
+        index = program.function_index.get(address)
+        if index is not None:
+            size = program.functions[index].size
+            out[address] = guarded(program.platform.words(program.image, address, min(size, 64)))
+    return out
+
+
+def _unnamed(program: Program, addresses) -> Program:
+    """The program with the functions at `addresses` back to their placeholders."""
+    from dataclasses import replace
+    out = Program(program.platform, program.image,
+                  [replace(f, name=f"fn_{program.platform.text(f.address)[2:]}") if f.address in addresses
+                   and not _placeholder(f.name) else f for f in program.functions], program.objects, program.sda)
+    out.labels, out.sections = program.labels, program.sections
+    return out
+
+
+def _initializer_names(program: Program, proposal: dict[str, Any], initializers: dict[int, bool]) -> list:
+    """Each unit's own static initializer named as clang names it: `_GLOBAL__sub_I_` and the file's name, every
+    character but letters, digits, `_` and `.` made `_`. Only where the unit has exactly one."""
+    from . import signatures
+    found: dict[str, list[int]] = {}
+    for unit in proposal["units"]:
+        for index in range(unit.get("first", 0), unit.get("end", 0)):
+            address = program.functions[index].address
+            if address in initializers and not initializers[address]:
+                found.setdefault(unit["unit"], []).append(address)
+    out = []
+    for unit, addresses in found.items():
+        if len(addresses) == 1:
+            file = re.sub(r"[^A-Za-z0-9_.]", "_", unit.rsplit("/", 1)[-1])
+            out.append(signatures.Proposal(addresses[0], f"_GLOBAL__sub_I_{file}", "function",
+                                           "static initializer", unit=unit))
+    return out
+
+
 def _placeholder(name: str | None) -> bool:
     from .score import placeholder
     return not name or placeholder(name)
@@ -96,7 +150,7 @@ def write(program: Program, result: dict[str, Any], symbols_in: Path, folder: Pa
     from .gc import SYMBOL_LINE
     folder.mkdir(parents=True, exist_ok=True)
     units.write_splits(result["units"], folder / "splits.txt")
-    renamed, weak = result["symbols"], result.get("weak", set())
+    renamed, weak, local = result["symbols"], result.get("weak", set()), result.get("local", set())
     lines, seen, starts = [], set(), set()
     for line in symbols_in.read_text(encoding="utf-8", errors="replace").splitlines():
         match = SYMBOL_LINE.match(line.strip())
@@ -113,6 +167,8 @@ def write(program: Program, result: dict[str, Any], symbols_in: Path, folder: Pa
                 attrs = _with_size(attrs, size)
             if address in weak:                   # the donors' copy is an inline or a template instance
                 attrs = re.sub(r"\bscope:\w+", "scope:weak", attrs)
+            if address in local:                  # a file's own, like its static initializer
+                attrs = re.sub(r"\bscope:\w+", "scope:local", attrs) if "scope:" in attrs else attrs + " scope:local"
             lines.append(f"{name} = {match['section']}:0x{address:08X}; //{attrs}")
         else:
             lines.append(line)
