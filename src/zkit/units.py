@@ -764,6 +764,8 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
                     *(p for p in range(1, len(functions)) if sections[p] != sections[p - 1]),   # a unit never
                     *(p for span in held for p in span)})                                       # spans two
     class_of = _function_classes(program)
+    qualified = _function_classes(program, qualifiers=True)  # a unit no class names: what its names qualify
+    qualified = {i: q for i, q in qualified.items() if re.fullmatch(r"[A-Za-z_][\w/]*", q)}
     units = []
     reserved = {u["unit"] for u in held.values()}     # a fixed unit keeps its name in every code section
     taken: collections.Counter = collections.Counter()
@@ -782,7 +784,7 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
             how = "file string" if any(i not in ev.classed for i in own) else "class's file" if own \
                 else "another build"
         else:
-            name, how = _unnamed(program, class_of, first, end)
+            name, how = _unnamed(program, class_of, first, end, qualified)
         if UNNAMED.match(name):                  # another build's placeholder: this build's address names it
             name, how = f"unit_{text(functions[first].address)[2:]}.cpp", "placeholder"
         named.append((first, end, name, how))
@@ -791,7 +793,8 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
     for k, (first, end, name, how) in enumerate(named):
         if how == "another build" and any(0 <= j < len(named) and named[j][2] == name and
                                           named[j][3] == "file string" for j in (k - 1, k + 1)):
-            named[k] = (first, end, *_unnamed(program, class_of, first, end))
+            named[k] = (first, end, *_unnamed(program, class_of, first, end, qualified))
+    named = _in_neighbours_folder(named, held)
     for first, end, name, how in named:
         if (first, end) not in held:
             taken[name] += 1
@@ -843,9 +846,48 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
                       "may go; compiling decides the exact place."}
 
 
-def _unnamed(program: Program, class_of: dict[int, str], first: int, end: int) -> tuple[str, str]:
-    """A name for a unit no file names: the class most of its functions belong to, else its address."""
-    classes = collections.Counter(class_of[i] for i in range(first, end) if i in class_of)
+SORTED_PAIRS = 20        # file pairs a folder-sorted link must show before its order places other units
+SORTED_SHARE = 0.95      # the share of them in name order it needs
+
+
+def _sort_key(name: str) -> str:
+    """A file name as a Windows build orders a folder's files: case folded to upper, so `_` sorts after letters."""
+    return name.upper()
+
+
+def _in_neighbours_folder(named: list, held: dict) -> list:
+    """Units no file names (named after their class or address), placed in the folder of the files around them,
+    where the files link in name order within a folder (a build that globs each folder): one between two files of
+    a folder is that folder's. The files' own order is the evidence, so only a link whose consecutive files of one
+    folder are almost all in name order counts; a hand-ordered link (a CodeWarrior project's) places nothing."""
+    files = [k for k, (_, _, name, how) in enumerate(named)
+             if how not in ("class", "placeholder") and "/" in name and not UNNAMED.match(name.rsplit("/", 1)[1])]
+    pairs = [(named[a][2], named[b][2]) for a, b in zip(files, files[1:])
+             if named[a][2].rpartition("/")[0] == named[b][2].rpartition("/")[0]]
+    ordered = sum(_sort_key(a) < _sort_key(b) for a, b in pairs)
+    if len(pairs) < SORTED_PAIRS or ordered < SORTED_SHARE * len(pairs):
+        return named
+    out = list(named)
+    for k, (first, end, name, how) in enumerate(named):
+        if how not in ("class", "placeholder") or (first, end) in held:
+            continue
+        before = [j for j in files if j < k]
+        after = [j for j in files if j > k]
+        if not before or not after:
+            continue
+        folder = named[before[-1]][2].rpartition("/")[0]
+        if folder and folder == named[after[0]][2].rpartition("/")[0]:
+            out[k] = (first, end, f"{folder}/{name.rsplit('/', 1)[-1]}", how)
+    return out
+
+
+def _unnamed(program: Program, class_of: dict[int, str], first: int, end: int,
+             qualified: dict[int, str] | None = None) -> tuple[str, str]:
+    """A name for a unit no file names: the class most of its functions belong to, else the class (or namespace)
+    most of their names qualify them with when no class has a constructor here (`gf::GfAssetUtil`'s static
+    functions), else its address."""
+    classes = collections.Counter(class_of[i] for i in range(first, end) if i in class_of) or \
+        collections.Counter((qualified or {})[i] for i in range(first, end) if i in (qualified or {}))
     if classes:
         return classes.most_common(1)[0][0] + ".cpp", "class"
     return f"unit_{program.platform.text(program.functions[first].address)[2:]}.cpp", "placeholder"
