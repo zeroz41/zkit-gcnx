@@ -50,7 +50,8 @@ class RewriteTests(unittest.TestCase):
     def test_each_family_offers_its_rewrite(self):
         for what in ("v * 2 -> 2 * v", "count = count + v -> count += v", "total += v * 2 -> total = total + (v * 2)",
                      "total++ -> ++total", "if (flag) swapped", "bool flag -> unsigned char",
-                     "for pairs down -> up", "flag -> flag != 0"):
+                     "for pairs down -> up", "flag -> flag != 0", "inline flag",
+                     "hold `count`'s value in count2"):
             self.assertIn(what, self.found)
 
     def test_a_rewrite_still_compiles(self):
