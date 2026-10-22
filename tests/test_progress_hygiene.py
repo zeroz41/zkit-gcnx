@@ -182,6 +182,15 @@ class QualityTests(unittest.TestCase):
             self.assertEqual(quality.audit(project, "decomp", revision="HEAD")["total"],
                              quality.compare(project, "decomp", "HEAD")["total"]["before"])
 
+    def test_a_name_starting_in_is_no_ghidra_register_input(self):
+        """Ghidra names a register's incoming value `in_x8`, `in_w1`, `in_lr`, `in_FPCR`, `in_stack_ffffffe8`; a
+        member called `in_list` (an original's own name, from its assert) is none."""
+        catalog = quality.patterns()
+        debt = "int a = in_x8 + in_w1; f(in_lr, in_FPCR, in_stack_ffffffe8, in_r3);"
+        self.assertEqual(quality.count(debt, catalog)["ghidra_temp"], 6)
+        self.assertEqual(quality.count("bool in_list() const; MM_ASSERT(it.node()->in_list());", catalog)
+                         ["ghidra_temp"], 0)
+
     def test_a_c_modules_header_may_declare_extern_c(self):
         catalog = quality.patterns()
         guarded = '#ifdef __cplusplus\nextern "C" {\n#endif\nvoid* memset(void*, int, unsigned long);\n'
