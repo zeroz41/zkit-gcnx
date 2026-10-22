@@ -70,7 +70,8 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
     _p("stack_local", "stack-slot locals (sp8, sp1C)", r"\bsp[0-9A-F]{1,3}\b", "decompiler"),
     _p("arg_name", "argN parameters (arg0, farg1)", r"\bf?arg\d+\b", "decompiler"),
     _p("ghidra_temp", "Ghidra temporaries (iVar1, puVar2, param_1, local_10)",
-       r"\b(?:[a-z]{1,3}Var\d+|param_\d+|local_[0-9a-fA-F]+|in_[a-z]+\d*|unaff_\w+|extraout_\w+|auStack_\w+)\b",
+       r"\b(?:[a-z]{1,3}Var\d+|param_\d+|local_[0-9a-fA-F]+|unaff_\w+|extraout_\w+|auStack_\w+|"
+       r"in_(?:[a-z]{1,4}\d+|lr|ctr|xer|fpscr|fpcr|sp|pc|nzcv|tpidr\w*|stack_[0-9a-fA-F]+|[A-Z]\w*))\b",
        "decompiler"),
     _p("ghidra_type", "Ghidra placeholder types (undefined4, code *)", r"\bundefined[1248]?\b", "types"),
     _p("m2c_macro", "m2c helper macros (M2C_FIELD, M2C_ERROR)", r"\bM2C_\w+", "decompiler"),
