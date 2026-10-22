@@ -427,3 +427,22 @@ class BareProgramTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NeighbourFolderTests(unittest.TestCase):
+    def test_a_unit_no_file_names_takes_the_folder_of_the_files_around_it(self):
+        """A build that links each folder's files in name order (case folded, so `_` after letters) puts a unit
+        named after its class between two files of one folder into that folder; a hand-ordered link, where the
+        files' own order is not sorted, places nothing."""
+        files = [f"game/asset/f_{c}.cpp" for c in "abcdefghijklmnopqrstuvwxy"]
+        named = [(i, i + 1, name, "file string") for i, name in enumerate(files)]
+        named.insert(5, (99, 100, "gf/GfAssetUtil.cpp", "class"))
+        named.insert(9, (199, 200, "unit_7100001000.cpp", "placeholder"))
+        named.append((299, 300, "gf/GfTail.cpp", "class"))                     # no file after it
+        out = units._in_neighbours_folder(named, {})
+        self.assertEqual(out[5][2], "game/asset/GfAssetUtil.cpp")
+        self.assertEqual(out[9][2], "game/asset/unit_7100001000.cpp")
+        self.assertEqual(out[-1][2], "gf/GfTail.cpp")
+        shuffled = [(i, i + 1, name, "file string") for i, name in enumerate(reversed(files))]
+        shuffled.insert(5, (99, 100, "gf/GfAssetUtil.cpp", "class"))
+        self.assertEqual(units._in_neighbours_folder(shuffled, {})[5][2], "gf/GfAssetUtil.cpp")
