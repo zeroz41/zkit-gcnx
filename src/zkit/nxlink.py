@@ -256,9 +256,12 @@ class _Object:
 
 def _piece(elf: Elf, section: Section, offset: int) -> bytes:
     data = elf.data(section)
-    if section.flags & SHF_STRINGS:
-        end = data.find(b"\0", offset)
-        return data[offset:end + 1 if end >= 0 else len(data)]
+    if section.flags & SHF_STRINGS:              # a string ends at a zero entry: one byte, or two in .rodata.str2.2
+        width = max(section.entsize, 1)
+        end = offset
+        while end + width <= len(data) and any(data[end:end + width]):
+            end += width
+        return data[offset:min(end + width, len(data))]
     return data[offset:offset + max(section.entsize, 1)]
 
 
