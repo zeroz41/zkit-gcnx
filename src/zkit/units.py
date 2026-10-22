@@ -731,7 +731,11 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     joined = ev.joined(count)
     cited = ev.joined(count, ev.cited)
     first = ev.joined(count, ev.firsts)
-    calls = _cover(((min(i, j), max(i, j)) for i, callees in program.calls.items() for j in callees
+    index = program.function_index
+    taken = ((i, index[address]) for i, rows in program.refs.items() for _, address, kind in rows
+             if kind == "addr" and address in index)     # a callback whose address the code takes, like a call
+    calls = _cover(((min(i, j), max(i, j)) for i, j in
+                    [(i, j) for i, callees in program.calls.items() for j in callees] + list(taken)
                     if 0 < abs(i - j) <= SHORT_CALL), count)
     members: dict[str, list[int]] = collections.defaultdict(list)
     for index, cls in _function_classes(program).items():
