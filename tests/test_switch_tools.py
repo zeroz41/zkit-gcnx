@@ -137,6 +137,22 @@ class SwitchToolTests(unittest.TestCase):
         found = {a: (size, section) for a, size, section in nxdata.objects(image, [])}
         self.assertEqual(found[END + 0x80], (0x80, ".bss"))                 # to MOD0's end, not the page's
 
+    def test_a_section_placed_past_the_originals_end_is_a_problem_not_a_crash(self):
+        """A section whose bytes would run past the end of the original image (an inline the original has no copy
+        of, placed by a name that lands at its end) is reported, and the rebuilt image keeps its size."""
+        from types import SimpleNamespace
+        from zkit import nxlink
+        from zkit.platform import Switch
+        original = bytes(64)
+        linker = SimpleNamespace(original=original, image=bytearray(original), platform=Switch(),
+                                 segment=lambda at: None)
+        section = SimpleNamespace(name=".text._Zfoo", size=16, type=1, flags=0)
+        item = nxlink.Placed(section, 56, bytearray(16), "u", "name")
+        result = nxlink.UnitLink("u", True)
+        nxlink._compare(linker, item, result)
+        self.assertEqual(len(linker.image), 64)
+        self.assertTrue(any("run past the original's end" in p for p in result.problems))
+
     def test_a_link_reaches_a_structor_by_its_partner_when_the_original_names_one(self):
         """clang emits a class's complete- and base-object destructors (D1, D2) as one function under both names;
         the module keeps one. A derived destructor's call to its base's D2 lands on the base's D1, and a

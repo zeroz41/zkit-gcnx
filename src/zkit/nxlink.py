@@ -629,6 +629,10 @@ def _compare(linker: Linker, item: Placed, result: UnitLink) -> None:
     if not item.resolved:
         return                            # left as the original's bytes: the problems say why
     original = linker.original[start:start + size]
+    if len(original) < size:
+        result.problems.append(f"{section.name}: {size} bytes at {linker.platform.text(start)} run past the original's "
+                               "end")
+        return
     if bytes(item.data) != original:
         first = next(i for i, (a, b) in enumerate(zip(item.data, original)) if a != b)
         result.problems.append(f"{section.name}+0x{first:X} differs: {bytes(item.data[first & ~3:(first & ~3) + 4]).hex()} "
