@@ -264,6 +264,11 @@ def check_unit(project: Project, target: str, query: str, candidate: Path) -> di
             name = next((u.name for u in read_units(splits) if u.name.rsplit(".", 1)[0] == unit["name"]), None)
             out["link"] = link_unit(project, target, name, built) if name else {"linked": False,
                                                                                   "problems": ["no split unit"]}
+        if out.get("link", {}).get("linked"):      # the link placed every byte where the original has it: a
+            for row in rows:                         # difference in relocation names only reaches the same thing
+                if not row["exact"] and row.get("reloc_only"):
+                    row["exact"] = row["proven_by_link"] = True
+            out["exact"] = sum(r["exact"] for r in rows)
         out["done"] = out["exact"] == len(rows) and not out["debt"] and out.get("link", {}).get("linked", True)
     return out
 
