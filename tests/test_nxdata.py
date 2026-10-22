@@ -474,3 +474,71 @@ class UnnamedClassTests(unittest.TestCase):
             self.assertEqual(owner[at["_ZN1A1gEi"]], "game/a.cpp")
             self.assertEqual(owner[at["_ZN1A1hEi"]], "game/a.cpp")
             self.assertEqual(owner[at["_Z2fbi"]], "game/b.cpp")
+
+
+# a class's nested listener: the class's code installs the listener's table, and the listener's one own virtual
+# (its others are its base's) comes after the class's code with nothing citing a file, then the next file's code
+LISTENERS = {
+    "base.cpp": """struct Listener { Listener(); virtual ~Listener(); virtual int hear(int) = 0; int heard; };
+Listener::Listener() : heard(0) {}
+Listener::~Listener() {}
+""",
+    "a.cpp": """void report(const char *file, int line);
+struct Listener { Listener(); virtual ~Listener(); virtual int hear(int) = 0; int heard; };
+inline void *operator new(__SIZE_TYPE__, void *at) { return at; }
+struct Outer {
+    struct Ear : Listener { int hear(int v); int gain; };
+    int init(int v);
+    Listener *ear;
+    char room[16];
+};
+int Outer::init(int v) { if (v > 9) report("C:/proj/src/game/a.cpp", 1); ear = new (room) Ear(); return v; }
+int fa(int v) { if (v < 0) report("C:/proj/src/game/a.cpp", 2); return v + 4; }
+int Outer::Ear::hear(int v) { return v * gain + 7; }
+""",
+    "b.cpp": """void report(const char *file, int line);
+int fb(int v) { if (v > 9) report("C:/proj/src/game/b.cpp", 2); return v * 2; }
+int fb2(int v) { if (v < 0) report("C:/proj/src/game/b.cpp", 3); return v - 2; }
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class TableUserTests(unittest.TestCase):
+    def test_a_tables_own_functions_are_the_unit_of_the_code_installing_it(self):
+        """Ear's table holds its base's destructor and Ear::hear, which cites nothing; only Outer::init, which
+        cites a.cpp, installs that table. Clang emits the table, with the functions only it holds, in one unit,
+        and the code forming its address is there too: Ear::hear is a.cpp's, not b.cpp's."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in LISTENERS.items():
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, "-ffunction-sections", str(root / name), "-o",
+                                str(root / name.replace(".cpp", ".o"))], check=True, capture_output=True)
+            link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                    *(str(root / n.replace(".cpp", ".o")) for n in LISTENERS)]
+            subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
+            subprocess.run([*link, "--strip-all", "-o", str(root / "main.elf")], check=True, capture_output=True)
+            full = Elf.load(root / "full.elf").symbols
+            at = {s.name: s.value for s in full}
+            weak = {s.value for s in full if s.bind == "weak"}
+            module = nx.load(root / "main.elf")
+            functions = module.functions()
+            symbols = [Symbol(f"fn_{a:08X}", ".text", a, "function", s, "weak" if a in weak else "global")
+                       for a, s in functions]
+            tables = {s.value: s for s in full if s.name.startswith("_ZTV")}    # the tables' extents, as a
+            symbols += [Symbol(f"lbl_{a:08X}", section, a, "object", size, "global")   # symbols.txt has them
+                        for a, size, section in nxdata.objects(module, functions)
+                        if not any(t.value <= a < t.value + t.size for t in tables.values())]
+            symbols += [Symbol(f"lbl_{t.value:08X}", ".data", t.value, "object", t.size, "global")
+                        for t in tables.values()]
+            symbols += [Symbol(name or f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section, name in nxdata.linker_tables(module)]
+            program = Program.from_symbol_list(Switch(), module, symbols)
+            owner = {}
+            for unit in units.propose(program)["units"]:
+                for index in range(unit["first"], unit["end"]):
+                    owner[program.functions[index].address] = unit["unit"]
+            self.assertEqual(owner[at["_ZN5Outer4initEi"]], "game/a.cpp")
+            self.assertEqual(owner[at["_ZN5Outer3Ear4hearEi"]], "game/a.cpp")
+            self.assertEqual(owner[at["_Z2fbi"]], "game/b.cpp")

@@ -149,7 +149,11 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
     inline another table shares) are one unit's: the class's file defines its methods, and clang emits the table and
     the inline virtuals only it holds in one unit. For a table no symbol names (a class an update added, whose
     functions no name ties to a class either), as far as a tight run reaches, never across two files the code
-    itself cites (a method defined in another file). A named class's functions go by their class (`_class_files`)."""
+    itself cites (a method defined in another file). A named class's functions go by their class (`_class_files`).
+    A table with a key function is emitted with it, and the code forming its address (the class's constructors and
+    destructors, or the enclosing class's code they are inlined in) is there too: with the functions only that
+    table holds, inlines included, it is one unit's, as far as a tight run reaches where no file the code cites or
+    another build places changes within it (a nested listener's one virtual after its owner's code)."""
     if program.platform.name != "switch":
         return []
     from .itanium import _groups
@@ -174,9 +178,22 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
     index = program.function_index
     own_files = {i: f for i, f in ev.files.items() if i not in ev.placed}
     text = program.platform.text
+    users = program.users()
     out = []
     for address, slots in holders.items():
-        if not placeholder(program.object_at(address).name) or \
+        table = program.object_at(address)
+        run = set()
+        if table.scope != "weak" and table.address not in weak:
+            formers = set().union(*(users.get(o, ()) for o in {table, program.object_at(address + 16)} if o))
+            held = {index[s] for s in slots if count[s] == 1 and s in index}
+            if formers and held:
+                run = formers | held
+        if run and max(run) - min(run) <= TIGHT and \
+                len({ev.files[i] for i in range(min(run), max(run) + 1) if i in ev.files}) <= 1:
+            out.append((min(run), max(run), f"the table at {text(address)}, the code forming its address and "
+                                            "the functions only it holds"))
+            continue
+        if not placeholder(table.name) or \
                 not placeholder(getattr(program.object_at(address + 16), "name", "lbl_")):
             continue                                   # a named class: its functions go by their class
         own = sorted({index[s] for s in slots if count[s] == 1 and s in index and s not in weak})
