@@ -534,7 +534,11 @@ def _value(linker: Linker, obj: _Object, symbol: Symbol, r, pc: int, hint, hints
             # a section no name places, reached from placed code: where the original's references reach
             address = _reached(linker, hints, r.type)
             if address is None:
-                raise ValueError(f"cannot tell where {target.name} goes from the original's references")
+                hint_text = ""
+                if r.type == ABS64 and re.search(r"D[12]Ev$", target.name):
+                    hint_text = (" (a table slot: clang points a trivial destructor's slot at its base's when the "
+                                 "destructor is inline, so declare it `{}` in the class and define none in the file)")
+                raise ValueError(f"cannot tell where {target.name} goes from the original's references{hint_text}")
             base = address - offset
             data = bytearray(target.size) if target.type == SHT_NOBITS else bytearray(elf.data(target))
             placed[key] = Placed(target, base, data, obj.unit, "reference")
