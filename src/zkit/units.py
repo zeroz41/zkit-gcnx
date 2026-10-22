@@ -988,6 +988,8 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
 
 SORTED_PAIRS = 20        # file pairs a folder-sorted link must show before its order places other units
 SORTED_SHARE = 0.95      # the share of them in name order it needs
+COMMON_DEPTH = 2         # folders two files' paths must share to place a unit between them: libraries under one
+                         # top folder cite paths from their own roots (`sources/voice_handle_api.cpp`)
 
 
 def _sort_key(name: str) -> str:
@@ -998,8 +1000,11 @@ def _sort_key(name: str) -> str:
 def _in_neighbours_folder(named: list, held: dict) -> list:
     """Units no file names (named after their class or address), placed in the folder of the files around them,
     where the files link in name order within a folder (a build that globs each folder): one between two files of
-    a folder is that folder's. The files' own order is the evidence, so only a link whose consecutive files of one
-    folder are almost all in name order counts; a hand-ordered link (a CodeWarrior project's) places nothing."""
+    a folder is that folder's, and one between the last file of a folder and the first of another lies in the
+    deepest folder both are in (a folder-by-folder walk lists nothing outside a folder between two of its files),
+    when that is deeper than the top folder.
+    The files' own order is the evidence, so only a link whose consecutive files of one folder are almost all in
+    name order counts; a hand-ordered link (a CodeWarrior project's) places nothing."""
     files = [k for k, (_, _, name, how) in enumerate(named)
              if how not in ("class", "placeholder") and "/" in name and not UNNAMED.match(name.rsplit("/", 1)[1])]
     pairs = [(named[a][2], named[b][2]) for a, b in zip(files, files[1:])
@@ -1015,10 +1020,20 @@ def _in_neighbours_folder(named: list, held: dict) -> list:
         after = [j for j in files if j > k]
         if not before or not after:
             continue
-        folder = named[before[-1]][2].rpartition("/")[0]
-        if folder and folder == named[after[0]][2].rpartition("/")[0]:
+        folder = _common_folder(named[before[-1]][2], named[after[0]][2])
+        if folder.count("/") + 1 >= COMMON_DEPTH:
             out[k] = (first, end, f"{folder}/{name.rsplit('/', 1)[-1]}", how)
     return out
+
+
+def _common_folder(a: str, b: str) -> str:
+    """The deepest folder two file paths are both in ("" for none)."""
+    shared = []
+    for x, y in zip(a.split("/")[:-1], b.split("/")[:-1]):
+        if x != y:
+            break
+        shared.append(x)
+    return "/".join(shared)
 
 
 def _unnamed(program: Program, class_of: dict[int, str], first: int, end: int,
