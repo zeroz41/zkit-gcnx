@@ -54,5 +54,18 @@ class JoinTests(unittest.TestCase):
         self.assertEqual(sorted((r.offset, r.target) for r in relocations), [(0x1004, 0x5010), (0x1008, 0x5010)])
         self.assertEqual(aarch64.global_stores(self.WORDS, 0x1000), set())
 
+class RelocationTests(unittest.TestCase):
+    def test_an_add_into_the_page_register_ends_the_page(self):
+        """`adrp x8, page; add x8, x8, #0x110` leaves x8 holding the whole address: a load through it after that
+        reads at an offset from that address, not at an offset into the page, and relocates nothing. So does a
+        load that overwrites another register holding a page."""
+        # adrp x8, page; add x8, x8, #0x110; ldr s0, [x8, #0x48]; adrp x9, page; ldr x9, [x8]; ldr w1, [x9, #4]
+        words = [0x90000028, 0x91044108, 0xBD404900, 0x90000009, 0xF9400109, 0xB9400521, 0xD65F03C0]
+        relocations, _ = aarch64.code_relocations(words, 0x1000, {})
+        self.assertEqual(sorted((r.offset, r.target) for r in relocations), [(0x1000, 0x5110), (0x1004, 0x5110),
+                                                                            (0x100C, 0x1000)])
+        self.assertEqual(sorted(aarch64.track_addresses(words, 0x1000).items()), [(0x1004, (0x5110, "addr"))])
+
+
 if __name__ == "__main__":
     unittest.main()
