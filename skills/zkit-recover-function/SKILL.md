@@ -39,4 +39,11 @@ Workers: subagents don't get the brief. Give each one the addresses, this skill'
 "use `zkit lookup|asm|m2c|decompile|data|xrefs|refs|try` via Bash, several addresses per call; edit only your own
 candidate files; never build the tree or edit src/include/config".
 
+Keep workers short. Every turn re-reads the whole context, so an agent's cost grows with the square of its length:
+one worker run to 500 turns costs several times what five fresh ones doing the same work cost. Give a worker one
+unit (or a handful of functions), have it keep its state in its files (candidate, a short NOTES file of what was
+tried and what blocks) and return after about 60 tool calls or when done. Continue unfinished work with a fresh
+worker pointed at those files, not by messaging the long-lived one. Ask for short reports; the coordinator's
+context grows the same way, so it reads results from files and diffs, not transcripts.
+
 Finish with `zkit-finish`.
