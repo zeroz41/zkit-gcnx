@@ -130,6 +130,26 @@ class ConfigureTests(unittest.TestCase):
         with mock.patch.object(build, "has_link", return_value=link):
             return build.configure(Project.load(self.manifest))
 
+    def test_categories_become_objdiff_progress_categories(self):
+        manifest = gamecube_project(self.root)
+        data = json.loads(manifest.read_text())
+        data["targets"]["t"]["categories"] = [{"id": "enemy", "name": "Enemies", "paths": ["game/Enemy.cpp"]},
+                                              {"id": "game", "paths": ["game/"]}, {"id": "none", "paths": ["x/*"]}]
+        manifest.write_text(json.dumps(data))
+        with mock.patch.object(build, "has_link", return_value=False):
+            result = build.configure(Project.load(manifest))
+        config = json.loads((self.root / "game/objdiff.json").read_text())
+        self.assertEqual(config["progress_categories"], [{"id": "enemy", "name": "Enemies"},
+                                                         {"id": "game", "name": "game"}, {"id": "none", "name": "none"}])
+        self.assertEqual([(u["name"], u["metadata"]["progress_categories"]) for u in config["units"]],
+                         [("game/Enemy", ["enemy", "game"]), ("game/Player", ["game"])])
+        self.assertFalse(any("in no category" in n for n in result["targets"]["t"]["notes"]))
+        data["targets"]["t"]["categories"] = [{"id": "enemy", "paths": ["game/Enemy.cpp"]}]
+        manifest.write_text(json.dumps(data))
+        with mock.patch.object(build, "has_link", return_value=False):
+            result = build.configure(Project.load(manifest))
+        self.assertIn("1 units in no category (first: game/Player.cpp)", result["targets"]["t"]["notes"])
+
     def test_ninja_file_objdiff_and_compile_commands(self):
         result = self.configure(units={"game/*": {"compiler": "GC/1.2.5n", "extra_cflags": "-DGAME"},
                                        "game/Enemy.cpp": {"extra_cflags": ["-O4,s"]}})
