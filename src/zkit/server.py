@@ -352,10 +352,11 @@ def create_server(project: Project) -> FastMCP:
     def zkit_asm(query: str | None = None, size: Number = None, repo: str | None = None,
                  addresses: list[str] | str | None = None, response_format: Format = "text",
                  addrs: list[str] | str | None = None, address: str | None = None, length: Number = None,
-                 lines: Number = None, max_instructions: Number = None) -> str:
+                 lines: Number = None, max_instructions: Number = None, words: bool = False) -> str:
         """Disassemble ORIGINAL bytes. query: address or name (several separated by spaces for a batch). With size
         (int or hex string), disassembly starts exactly at the given address, also mid-function. Branch targets,
-        r2/r13 and lis/addi references are resolved to symbols; lfs/lfd show the constant."""
+        r2/r13 and lis/addi references are resolved to symbols; lfs/lfd show the constant. words: also each
+        instruction's word."""
         p = decomp(repo)
         results = []
         if isinstance(addrs, str) and addrs.lstrip().startswith("["):
@@ -376,7 +377,7 @@ def create_server(project: Project) -> FastMCP:
                 continue
             exact = bridge.HEX.match(q.strip())
             at = int(exact[1], 16) if exact else found[0]
-            results.append(inspect_dol.disasm(p, target(p), at, size, max_lines=max(1, min(cap, 4000))))
+            results.append(inspect_dol.disasm(p, target(p), at, size, max_lines=max(1, min(cap, 4000)), words=words))
         data = results[0] if len(results) == 1 else {"batch": results}
         return out(data, render.disasm(data) if "text" not in data or data.get("size") else data["text"],
                    response_format)

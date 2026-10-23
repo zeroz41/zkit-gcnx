@@ -1347,11 +1347,12 @@ def nxlink(data: dict) -> str:
         f" ({', '.join(data['linked_units'][:6])}{', ...' if len(data['linked_units']) > 6 else ''})"
         if data["linked_units"] else ""))
     for row in data["not_linked"][:12]:
-        lines.append(f"  not linked {row['unit']}: " + "; ".join(row["why"][:3]))
-    for problem in data["problems"][:12]:
+        lines.append(f"  not linked {row['unit']}: " + "; ".join(grouped_problems(row["why"])[:3]))
+    problems = grouped_problems(data["problems"])
+    for problem in problems[:12]:
         lines.append(f"  problem: {problem}")
-    if len(data["problems"]) > 12:
-        lines.append(f"  ... {len(data['problems']) - 12} more problems (link.json)")
+    if len(problems) > 12:
+        lines.append(f"  ... {len(problems) - 12} more problems (link.json)")
     hashes = [s for s in data["segments"] if s["matches_header"] is not None]
     verdict = "== the original" if data["identical"] else "!= the original"
     lines.append(f"{data['out']}: {verdict}" + (
@@ -1387,6 +1388,18 @@ def map_adoption(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def grouped_problems(problems: list[str]) -> list[str]:
+    """Link problems with one message at several offsets of one symbol (an adrp and its add, every use of one
+    literal) as one line listing the offsets, in first-seen order."""
+    groups: dict[tuple[str, str], list[str]] = {}
+    for problem in problems:
+        found = re.match(r"(\S+)\+(0x[0-9A-Fa-f]+): (.*)", problem, re.S)
+        key = (found[1], found[3]) if found else (problem, "")
+        groups.setdefault(key, []).append(found[2] if found else "")
+    return [f"{symbol}: {message} (at +{', +'.join(offsets)})" if message else symbol
+            for (symbol, message), offsets in groups.items()]
+
+
 def candidate_unit(data: dict) -> str:
     """`zkit try --unit`: per function, then the link."""
     head = f"{data['unit']} ({data['candidate']})"
@@ -1411,7 +1424,10 @@ def candidate_unit(data: dict) -> str:
                          "data bytes placed from the object)")
         else:
             lines.append("  does not link:")
-            lines += [f"    {p}" for p in (link.get("problems", []) + link.get("gaps", []))[:20]]
+            problems = grouped_problems(link.get("problems", []) + link.get("gaps", []))
+            lines += [f"    {p}" for p in problems[:20]]
+            if len(problems) > 20:
+                lines.append(f"    ... {len(problems) - 20} more")
             if link.get("first_difference"):
                 d = link["first_difference"]
                 lines.append(f"    first difference at {d['address']}: ours {d['ours']}, original {d['original']}")

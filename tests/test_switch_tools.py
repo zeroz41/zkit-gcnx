@@ -309,6 +309,46 @@ class SwitchToolTests(unittest.TestCase):
         (self.root / "symbols.txt").write_text(SYMBOLS.replace("foo_set", "foo_renamed") + caller, encoding="utf-8")
         self.assertIn("<foo_renamed>", disasm(self.project, "t", 0x160)["text"])
 
+    def _with_assert_call(self):
+        """A function at 0x180 that branches inside itself and forms the address of an ASCII string at 0x1040."""
+        image = bytearray(module())
+        words = [0x34000060, adrp(0, 0x184, RODATA + 0x40), add(0, 0, (RODATA + 0x40) & 0xFFF), RET]  # cbz w0, +0xC
+        struct.pack_into("<4I", image, 0x100 + 0x180, *words)
+        image[0x100 + RODATA + 0x40:0x100 + RODATA + 0x4E] = b"index < size\0\0"
+        (self.root / "main").write_bytes(bytes(image))
+        assert_call = "assert_call = .text:0x00000180; // type:function size:0x10 scope:global\n"
+        (self.root / "symbols.txt").write_text(SYMBOLS + assert_call, encoding="utf-8")
+
+    @unittest.skipUnless(shutil.which("llvm-objdump"), "needs llvm-objdump")
+    def test_asm_shows_a_branch_inside_the_function_as_an_offset_and_a_string_as_its_text(self):
+        """Output every agent turn re-reads: a branch target inside the function is its offset, not the function's
+        mangled name again; an address of text carries the text, which saves a `zkit data` call."""
+        from zkit.inspect_dol import disasm
+        self._with_assert_call()
+        text = disasm(self.project, "t", 0x180)["text"]
+        self.assertIn("<+0xc>", text)
+        self.assertNotIn("<assert_call+", text)
+        self.assertIn('"index < size"', text)
+        self.assertNotIn("34000060", text)  # the word only when asked for
+        self.assertIn("34000060", disasm(self.project, "t", 0x180, words=True)["text"])
+
+    def test_decompiler_names_an_address_of_text_by_the_text(self):
+        """&UNK_x / s_..._x become the literal; DAT_x (the value stored there) is never replaced by one."""
+        from zkit.decompile import _namer
+        from zkit.index import connect, refresh
+        self._with_assert_call()
+        refresh(self.project)
+        name = _namer(self.project, "t", connect(self.project))
+        out = name("f(&UNK_7100001040,s_index___size_7100001040,DAT_7100001040,&UNK_7100002020);")
+        self.assertEqual(out, 'f("index < size","index < size",DAT_7100001040,&UNK_7100002020);')
+
+    def test_link_problems_at_several_offsets_of_one_symbol_read_as_one_line(self):
+        from zkit.render import grouped_problems
+        rows = grouped_problems(["f+0x13C: no GOT slot holding x", "f+0x140: no GOT slot holding x",
+                                 "g+0x8: no copy of the literal", ".data: outside the unit"])
+        self.assertEqual(rows, ["f: no GOT slot holding x (at +0x13C, +0x140)", "g: no copy of the literal (at +0x8)",
+                                ".data: outside the unit"])
+
     def test_a_placeholder_the_symbols_carry_is_found_by_its_full_address(self):
         """A Switch placeholder spells the full address (fn_7100000160); the index keys functions by module
         offset."""

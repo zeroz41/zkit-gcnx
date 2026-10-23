@@ -84,6 +84,32 @@ def _objdump(project: Project) -> str | None:
     return None
 
 
+def cstring(image, address: int, limit: int = 60) -> str | None:
+    """The C string literal at an address of the image, quoted, when the bytes there are printable text ending in a
+    zero byte (at least two characters); None otherwise. Longer strings are cut at `limit` characters."""
+    raw = b""
+    while b"\0" not in raw and len(raw) < 256:
+        try:
+            piece = image.read(address + len(raw), 16)
+        except (ValueError, IndexError, KeyError, struct.error, AttributeError):
+            break  # the section ends within these 16 bytes: read its last ones one at a time
+        if not piece:
+            break
+        raw += piece
+    for _ in range(16 if b"\0" not in raw else 0):
+        try:
+            raw += image.read(address + len(raw), 1)
+        except (ValueError, IndexError, KeyError, struct.error, AttributeError):
+            break
+    end = raw.find(b"\0")
+    if end < 2 or any(not (0x20 <= b < 0x7F or b in (9, 10, 13)) for b in raw[:end]):
+        return None
+    text = raw[:end].decode("ascii")
+    quoted = text[:limit].replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t") \
+        .replace("\r", "\\r")
+    return f'"{quoted}"' + ("..." if len(text) > limit else "")
+
+
 def _name(db, target: str, address: int) -> str:
     row = containing(db, target, address)
     if row is None:
@@ -115,9 +141,17 @@ def sda_bases(project: Project, target: str, dol) -> dict[int, int]:
 
 
 def disasm(project: Project, target: str, address: int, size: int | None = None,
-           max_lines: int = 400) -> dict:
+           max_lines: int = 400, words: bool = False) -> dict:
     """Original instructions. With size, start exactly at address (an interior address is honoured);
-    without, the whole containing function, marking address when it is interior."""
+    without, the whole containing function, marking address when it is interior. The instruction words are left
+    out unless asked for: the mnemonic says the same, and every line of this output is read again on each turn."""
+    data = _disasm(project, target, address, size, max_lines)
+    if not words and data.get("text"):
+        data["text"] = re.sub(r"^(\S+)  [0-9a-f]{8}  (?=[a-z])", r"\1  ", data["text"], flags=re.M)  # never words alone
+    return data
+
+
+def _disasm(project: Project, target: str, address: int, size: int | None = None, max_lines: int = 400) -> dict:
     refresh(project, [])
     db = connect(project)
     from .platform import for_target
@@ -232,6 +266,8 @@ def _disasm_elf(project: Project, target: str, address: int, size: int | None, m
         if holder is None:
             return found[0]
         offset = value - holder["address"]
+        if row is not None and holder["address"] == row["address"]:  # a branch inside the function: its offset
+            return f"0x{found[1]} <+0x{offset:x}>"
         return f"0x{found[1]} <{holder['name']}{f'+0x{offset:x}' if offset else ''}>"
     for line in result.stdout.splitlines():
         match = re.match(r"\s*([0-9a-f]+):\s+((?:[0-9a-f]{2} ){4}|[0-9a-f]{8})\s*(.*)", line)
@@ -243,7 +279,10 @@ def _disasm_elf(project: Project, target: str, address: int, size: int | None, m
         for value, kind in refs.get(pc, []):
             label = _name(db, target, value) or _symbol_name(project, target, value) or \
                 (image.symbols.get(value) if hasattr(image, "symbols") else "")
-            text += f"  ; ={address_text(value)}" + (f" {label}" if label else "")
+            if label and re.fullmatch(r"(?:lbl|DAT)_0*" + f"{value + platform.base:X}", label, re.I):
+                label = ""  # a placeholder spelling only the address says nothing more
+            literal = cstring(image, value) if kind not in ("f32", "f64") else None
+            text += f"  ; ={address_text(value)}" + (f" {label}" if label else "") + (f" {literal}" if literal else "")
             if kind in ("f32", "f64"):
                 try:
                     text += f" = {_value(db, target, image, value, kind, project)}"
