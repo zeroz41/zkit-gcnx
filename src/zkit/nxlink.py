@@ -453,6 +453,7 @@ def _place_named(linker: Linker, obj: _Object, placed: dict, result: UnitLink) -
     for symbol in elf.symbols:
         if 0 < symbol.section < 0xFF00 and symbol.kind in ("func", "object") and symbol.name:
             defined[symbol.section].append(symbol)
+    init_used = 0
     for section in elf.sections:
         if not _placeable(section) or section.index in obj.discarded:
             continue
@@ -461,11 +462,15 @@ def _place_named(linker: Linker, obj: _Object, placed: dict, result: UnitLink) -
         if not obj.whole and not (code and any(s.name in obj.exact for s in names)):
             continue
         if section.name.startswith(".init_array"):
+            # Every .init_array section of the object (the file's own, one per template static's COMDAT group)
+            # follows the last in the unit's range, in object order, as a link concatenates them.
             spans = [r for r in obj.ranges if _covers(linker, r, ".init_array")]
-            address = spans[0][0] if spans and spans[0][1] - spans[0][0] == section.size else None
-            if address is None:
-                result.problems.append(f"{section.name}: no .init_array range of {section.size} bytes in the unit")
+            address = spans[0][0] + init_used if spans else None
+            if address is None or address + section.size > spans[0][1]:
+                result.problems.append(f"{section.name}: no .init_array range of {section.size} bytes in the unit"
+                                       + (f" after the {init_used} bytes before it" if init_used else ""))
                 continue
+            init_used += section.size
             placed[(obj.unit, section.index)] = Placed(section, address, bytearray(elf.data(section)), obj.unit,
                                                        "array")
             continue
