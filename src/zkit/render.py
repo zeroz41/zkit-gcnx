@@ -1349,6 +1349,9 @@ def nxlink(data: dict) -> str:
     lines.append(f"units linked: {units['linked']} of {units['whole']} whose code all matches" + (
         f" ({', '.join(data['linked_units'][:6])}{', ...' if len(data['linked_units']) > 6 else ''})"
         if data["linked_units"] else ""))
+    if data.get("collected"):
+        lines.append(f"discarded {data['collected']} section(s) the symbols lack and nothing placed reaches "
+                     "(--gc-sections dropped them)")
     for row in data["not_linked"][:12]:
         lines.append(f"  not linked {row['unit']}: " + "; ".join(grouped_problems(row["why"])[:3]))
     problems = grouped_problems(data["problems"])
@@ -1434,5 +1437,8 @@ def candidate_unit(data: dict) -> str:
             if link.get("first_difference"):
                 d = link["first_difference"]
                 lines.append(f"    first difference at {d['address']}: ours {d['ours']}, original {d['original']}")
+        if link.get("collected"):
+            lines.append(f"  discarded {len(link['collected'])} section(s) the symbols lack and nothing placed "
+                         "reaches (--gc-sections dropped them)")
     lines.append("DONE: every function identical, no debt, linked" if data.get("done") else "not done")
     return "\n".join(lines)
