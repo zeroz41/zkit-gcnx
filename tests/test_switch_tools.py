@@ -294,6 +294,27 @@ class SwitchToolTests(unittest.TestCase):
         where["_ZN1TIiE1sE"] = 0x840                                    # the unit's own copy: kept
         self.assertEqual(nxlink._discarded(linker, obj), {})
 
+    def test_each_init_array_section_of_an_object_follows_the_last_in_the_units_range(self):
+        """A file whose template statics have dynamic initializers has one .init_array section per COMDAT group (and
+        one for its own initializer): a link concatenates them in object order into the unit's one range."""
+        from types import SimpleNamespace
+        from zkit import nxlink
+        from zkit.elf import Section
+        arrays = [Section(i, ".init_array", 14, nxlink.SHF_ALLOC | 3, 0, 0, 8, 0, 0, 0, 8) for i in (3, 5)]
+        elf = SimpleNamespace(sections=arrays, symbols=[], data=lambda s: bytes(8))
+        linker = SimpleNamespace(module=SimpleNamespace(tables={".init_array": (0x900, 0x940)}),
+                                 by_name=lambda name, hint, ranges: None)
+        obj = SimpleNamespace(elf=elf, unit="u.cpp", whole=True, exact=set(), ranges=[(0x100, 0x200), (0x910, 0x920)])
+        placed, result = {}, nxlink.UnitLink("u.cpp", True)
+        nxlink._place_named(linker, obj, placed, result)
+        self.assertEqual(result.problems, [])
+        self.assertEqual({k[1]: v.address for k, v in placed.items()}, {3: 0x910, 5: 0x918})
+        obj.ranges = [(0x100, 0x200), (0x910, 0x918)]                  # room for one: the second is a problem
+        placed, result = {}, nxlink.UnitLink("u.cpp", True)
+        nxlink._place_named(linker, obj, placed, result)
+        self.assertEqual(len(placed), 1)
+        self.assertIn("after the 8 bytes before it", result.problems[0])
+
     def read(self, address, kind=None, **options):
         from zkit.inspect_dol import read_data
         return read_data(self.project, "t", address, kind, **options)
