@@ -767,3 +767,56 @@ class GapOwnerTests(unittest.TestCase):
             holder = [u["unit"] for u in proposed for row in u["data"]
                       if row["start_key"] <= size < row["end_key"]]
             self.assertEqual(holder, ["game/beta.cpp"])
+
+
+# a file calling functions another module defines: lld makes a PLT stub for each, in .plt
+PLT_SOURCES = {
+    "a.cpp": """void report(const char *file, int line);
+extern "C" __attribute__((visibility("default"))) int imported_one(int);
+extern "C" __attribute__((visibility("default"))) int imported_two(int);
+extern "C" __attribute__((visibility("default"))) int imported_three(int);
+int first(int v) { if (v > 9) report("C:/proj/src/game/a.cpp", 4); return imported_one(v) + imported_two(v + 1); }
+int second(int v) { if (v < 0) report("C:/proj/src/game/a.cpp", 5); return imported_three(v) * 3; }
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class PltTests(unittest.TestCase):
+    def test_the_plt_is_found_from_its_stubs_and_is_no_units_code(self):
+        """lld's .plt (a 32-byte header, then a 16-byte stub per .got.plt jump slot) is found from the stubs alone,
+        stays out of the data tables, and no unit is proposed for it; a splits file holding it says so."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _, module = _module(PLT_SOURCES, root)
+            elf = Elf.load(root / "full.elf")
+        sections = {s.name: (s.address, s.address + s.size) for s in elf.sections if s.name}
+        self.assertEqual(module.tables[".plt"], sections[".plt"])
+        slots = (sections[".got.plt"][1] - sections[".got.plt"][0]) // 8 - 3      # report() and the three imports
+        self.assertEqual((slots, sections[".plt"][1] - sections[".plt"][0]), (4, 32 + 4 * 16))
+        self.assertNotIn(".plt", {section for _, _, section, _ in nxdata.linker_tables(module)})
+        plt = range(*sections[".plt"])
+        stubs = sorted(module.stubs())
+        self.assertEqual(len(stubs), 4)
+        self.assertTrue(all(a in plt for a in stubs))
+        program = _program(module)
+        self.assertEqual({program.functions[i].address for i in units.linker_code(program)}, set(stubs))
+        proposed = units.propose(program)["units"]
+        self.assertTrue(proposed)
+        self.assertFalse([u for u in proposed if any(u["start_key"] <= a < u["end_key"] for a in stubs)])
+        code = [f for f in program.functions if f.address not in plt]
+        covered = lambda a: any(u["start_key"] <= a < u["end_key"] for u in proposed)
+        self.assertTrue(all(covered(f.address) for f in code))
+        whole = [("all.cpp", ".text", program.functions[0].address, sections[".plt"][1])]
+        self.assertEqual(units.check(program, whole)["linker"], [{"unit": "all.cpp", "functions": 4}])
+
+    def test_stub_shaped_code_outside_the_jump_slots_is_no_plt(self):
+        """Without stubs for every jump slot in one run there is no .plt: the module keeps its code."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _, module = _module(PLT_SOURCES, root)
+        start, end = module.tables[".plt"]
+        del module.tables[".plt"]
+        module.image[end - 4:end] = (0xD503201F).to_bytes(4, "little")   # the last stub's br x17 is gone
+        nx._plt(module)
+        self.assertNotIn(".plt", module.tables)

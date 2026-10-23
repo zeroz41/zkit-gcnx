@@ -1173,6 +1173,9 @@ def units_proposal(data: dict, limit: int = 30) -> str:
 def units_check(data: dict) -> str:
     out = [f"{data['folds_total']} folds, {data['splits_total']} splits, {data['claims_total']:,} data claims "
            f"({data['claimed_bytes']:,} bytes)"]
+    for r in data.get("linker", ()):
+        out.append(f"linker code in a unit: {r['unit']} holds {r['functions']} of the linker's stubs (.plt): no "
+                   "source makes them; drop them from the unit")
     if data["folds"]:
         out.append("folds (two units holding one unit's data):")
         out += [f"  {' + '.join(r['units'])}: {r['shared']} shared, e.g. {r['examples'][0]}" for r in data["folds"]]
