@@ -389,7 +389,10 @@ def configure(project: Project, repository: str | None = None, only: str | None 
                              f"{objdiff.name}: give each target its own `objdiff` file")
         objdiff_files[name] = objdiff
         wrote = _write(objdiff, write_objdiff(objdiff, root, units, sources, paths,
-                                              target.get("module") or name))
+                                              target.get("module") or name, target.get("categories")))
+        uncategorized = [u for u in units if target.get("categories") and not categories_of(u, target["categories"])]
+        if uncategorized:
+            notes.append(f"{len(uncategorized)} units in no category (first: {uncategorized[0]})")
         report, tool = None, objdiff_cli(root, config)
         if tool and objdiff.name == "objdiff.json":
             report = paths.report
@@ -515,12 +518,20 @@ def source_root(root: Path, paths: Layout, config: dict[str, Any], notes: list[s
     return mirror
 
 
+def categories_of(unit: str, categories: list[dict[str, Any]]) -> list[str]:
+    """The ids of the target's progress categories a unit (its path under `src/`) is in: each category whose
+    `paths` globs match it (`*` crosses folders; a pattern ending in `/` takes the folder's whole tree)."""
+    return [c["id"] for c in categories
+            if any(fnmatch.fnmatchcase(unit, p + "*" if p.endswith("/") else p) for p in c.get("paths", []))]
+
+
 def write_objdiff(path: Path, root: Path, units: list[str], compiled: set[str], paths: Layout,
-                  module: str = "main") -> str:
+                  module: str = "main", categories: list[dict[str, Any]] | None = None) -> str:
     """objdiff's project file: each unit's target object, and its compiled one when it has a source (objdiff
     refuses a base object that does not exist), and the module it links into, so a unit that moves to another
     folder keeps its functions' place in the report. Paths are relative to the file's folder; objdiff rebuilds a
-    compiled object with `ninja -f build/build.ninja <object>`."""
+    compiled object with `ninja -f build/build.ninja <object>`. `categories` (the target's: `{id, name, paths}`)
+    become objdiff's progress categories, each unit in those its path matches."""
     folder = path.parent
     relative = lambda p: os.path.relpath(root / p, folder).replace(os.sep, "/")
     rows = []
@@ -529,12 +540,16 @@ def write_objdiff(path: Path, root: Path, units: list[str], compiled: set[str], 
         if unit in compiled:
             row["base_path"] = relative(f"{paths.src}/{stem(unit)}.o")
         row["metadata"] = {"source_path": f"src/{unit}", "module_name": module}
+        if categories:
+            row["metadata"]["progress_categories"] = categories_of(unit, categories)
         rows.append(row)
-    return json.dumps({"min_version": "2.0.0", "custom_make": "ninja",
-                       "custom_args": ["-f", os.path.relpath(root / NINJA, folder).replace(os.sep, "/")],
-                       "build_target": False, "build_base": True,
-                       "watch_patterns": ["*.c", "*.cp", "*.cpp", "*.h", "*.hpp", "*.inc"], "units": rows},
-                      indent=1) + "\n"
+    config: dict[str, Any] = {"min_version": "2.0.0", "custom_make": "ninja",
+                              "custom_args": ["-f", os.path.relpath(root / NINJA, folder).replace(os.sep, "/")],
+                              "build_target": False, "build_base": True,
+                              "watch_patterns": ["*.c", "*.cp", "*.cpp", "*.h", "*.hpp", "*.inc"]}
+    if categories:
+        config["progress_categories"] = [{"id": c["id"], "name": c.get("name") or c["id"]} for c in categories]
+    return json.dumps({**config, "units": rows}, indent=1) + "\n"
 
 
 def _link(ninja: Ninja, project: Project, name: str, target: dict[str, Any], config: dict[str, Any], root: Path,
