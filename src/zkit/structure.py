@@ -258,6 +258,18 @@ def blocked(project: Project, target: str | None = None, limit: int = 40) -> dic
                       "only a link attempt shows."}
 
 
+def _linker_code(project: Project, target: str) -> list[tuple[int, int]]:
+    """Code the linker made itself (a Switch module's `.plt`): no unit's to claim, so no gap."""
+    if for_target(project.target(target)).name != "switch":
+        return []
+    from .inspect_dol import _dol
+    from .units import LINKER_SECTIONS
+    module = _dol(project, target)
+    code = [(s.offset, s.offset + s.size) for s in module.segments if s.kind == "code"]
+    return [(a, b) for name, (a, b) in getattr(module, "tables", {}).items()
+            if name in LINKER_SECTIONS and any(lo <= a < hi for lo, hi in code)]
+
+
 def gaps(project: Project, target: str | None = None, section: str | None = None, limit: int = 40) -> dict[str, Any]:
     """Per section: how much splits.txt claims, and each unclaimed range with its symbols and the units whose code
     uses it (a range used by one unit is that unit's to claim)."""
@@ -268,6 +280,7 @@ def gaps(project: Project, target: str | None = None, section: str | None = None
         raise ValueError(f"Target {target} has no `splits` file in the manifest (a splits.txt)")
     db = connect(project)
     symbols, starts = _symbol_table(project, target)
+    linker = _linker_code(project, target)
     bounds: dict[str, list[int]] = {}
     for s in symbols:
         if s.type == "label":
@@ -278,7 +291,7 @@ def gaps(project: Project, target: str | None = None, section: str | None = None
     for name, (lo, hi) in sorted(bounds.items(), key=lambda kv: kv[1][0]):
         if section and name != section:
             continue
-        claimed = sorted((r[2], r[3]) for r in rows if r[1] == name)
+        claimed = sorted([(r[2], r[3]) for r in rows if r[1] == name] + (linker if name in CODE_SECTIONS else []))
         holes, cursor = [], lo
         for start, end in claimed:
             if start > cursor:
@@ -311,6 +324,7 @@ def gaps(project: Project, target: str | None = None, section: str | None = None
     ranges.sort(key=lambda r: (r["sole_user"] is None, r["section"] in CODE_SECTIONS, -r["size"]))
     return {"target": target, "sections": sections, "ranges": ranges[:limit], "total": len(ranges),
             "ready": sum(r["sole_user"] is not None for r in ranges),
-            "limits": "Section extents come from symbols.txt; unclaimed bytes belong to auto-generated units. "
+            "limits": "Section extents come from symbols.txt; unclaimed bytes belong to auto-generated units "
+                      "(the linker's own code, a module's PLT, counts as claimed). "
                       "Users are code references decoded from the original (direct calls for code); a range with one "
                       "split user is a claim candidate, not proof: check alignment and the decomp's split rules."}

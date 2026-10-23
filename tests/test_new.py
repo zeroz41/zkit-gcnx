@@ -74,18 +74,20 @@ class NewSwitchProjectTests(unittest.TestCase):
 
     def test_the_decomp_s_symbols_name_a_module_s_data(self):
         """Data a decomp names in its symbols.txt (the module exports none of it) is what the tools read, in the
-        file's dotted sections, and the splits claim the module's code."""
+        file's dotted sections, and the splits claim the module's code (its unwind table's functions; its PLT is
+        the linker's)."""
         from zkit import bridge, structure
         from zkit.elf import Elf
         from zkit.project import Project
+        flags = [f if f != "-fno-asynchronous-unwind-tables" else "-fasynchronous-unwind-tables" for f in FLAGS]
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             for name, text in SOURCES.items():
                 (root / name).write_text(text, encoding="utf-8")
-                subprocess.run([CLANG, *FLAGS, str(root / name), "-o", str(root / name.replace(".cpp", ".o"))],
+                subprocess.run([CLANG, *flags, str(root / name), "-o", str(root / name.replace(".cpp", ".o"))],
                                check=True, capture_output=True)
-            link = [LLD, "-shared", "--no-relax", "--unresolved-symbols=ignore-all", str(root / "a.o"),
-                    str(root / "b.o")]
+            link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                    str(root / "a.o"), str(root / "b.o")]
             subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
             subprocess.run([*link, "--strip-all", "-o", str(root / "main.elf")], check=True, capture_output=True)
             counter = next(s.value for s in Elf.load(root / "full.elf").symbols if s.name == "g_counter")
@@ -98,8 +100,10 @@ class NewSwitchProjectTests(unittest.TestCase):
             found = {s.name: s for s in bridge._symbol_table(project, "named")[0]}
             self.assertEqual((found["g_counter"].section, found["g_counter"].address), (".data", counter))
             self.assertIs(bridge.symbol_named(project, "named", "g_counter"), found["g_counter"])
-            text = next(s for s in structure.gaps(project, "named")["sections"] if s["section"] == ".text")
-            self.assertEqual(text["claimed"], text["size"])
+            found = structure.gaps(project, "named")
+            text = next(s for s in found["sections"] if s["section"] == ".text")
+            self.assertGreater(text["claimed"], 0)
+            self.assertFalse([r for r in found["ranges"] if r["section"] == ".text"])   # padding before the PLT only
 
 
 if __name__ == "__main__":

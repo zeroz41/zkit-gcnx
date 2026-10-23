@@ -893,6 +893,16 @@ def check_project(project, target: str | None = None, limit: int = 60) -> dict[s
     return {"target": target, **check(Program.from_project(project, target), rows, limit)}
 
 
+def linker_code(program: Program) -> set[int]:
+    """Indices of the functions in code the linker made itself (a Switch module's `.plt`: a stub per imported
+    function, `nx._plt`): no source compiles them, so they are no unit's."""
+    if program.platform.name != "switch":
+        return set()
+    tables = getattr(program.image, "tables", {})
+    spans = [tables[name] for name in LINKER_SECTIONS if name in tables and program.in_code(tables[name][0])]
+    return {i for i, f in enumerate(program.functions) if any(a <= f.address < b for a, b in spans)}
+
+
 def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
             placed: dict[int, str] | None = None) -> dict[str, Any]:
     """Units for every function from the evidence: boundaries, a name per unit, and the data each unit owns.
@@ -913,9 +923,11 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
                 if first < end:
                     held[(first, end)] = unit
     inside = {p for first, end in held for p in range(first + 1, end)}
+    linker = linker_code(program)                    # the linker's stubs: no unit's code
     edges = sorted({0, len(functions), *(c.position for c in cuts if c.position not in inside),
                     *(p for p in range(1, len(functions)) if sections[p] != sections[p - 1]),   # a unit never
-                    *(p for span in held for p in span)})                                       # spans two
+                    *(p for span in held for p in span),                                        # spans two
+                    *(p for p in range(1, len(functions)) if (p in linker) != (p - 1 in linker))})
     class_of = _function_classes(program)
     qualified = _function_classes(program, qualifiers=True)  # a unit no class names: what its names qualify
     qualified = {i: q for i, q in qualified.items() if re.fullmatch(r"[A-Za-z_][\w/]*", q)}
@@ -924,7 +936,7 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
     taken: collections.Counter = collections.Counter()
     named: list[tuple[int, int, str, str]] = []
     for first, end in zip(edges, edges[1:]):
-        if first >= end:
+        if first >= end or first in linker and (first, end) not in held:
             continue
         span = range(first, end)
         files = collections.Counter(ev.files[i] for i in span if i in ev.files and i not in ev.placed) or \
@@ -1676,6 +1688,8 @@ def check(program: Program, splits: list[tuple[str, str, int, int]], limit: int 
     units = Units([(start, end, unit, section) for unit, section, start, end in splits])
     text = program.platform.text
     unit_of = [units.at(f.address) for f in program.functions]
+    linker: collections.Counter = collections.Counter(unit_of[i] for i in linker_code(program))   # no unit's code
+    linker.pop(None, None)
     folds: dict[tuple[str, str], list[str]] = collections.defaultdict(list)
     for lo, hi, because in ev.joins:
         homes = sorted({unit_of[i] for i in range(lo, hi + 1)} - {None})
@@ -1716,11 +1730,13 @@ def check(program: Program, splits: list[tuple[str, str, int, int]], limit: int 
                           "example": rows[0][2]} for unit, rows in splits_needed.items()),
                         key=lambda r: -r["evidence"])
     claims.sort(key=lambda c: (c["unit"], c["address"]))
-    return {"folds": fold_rows[:limit], "folds_total": len(fold_rows), "splits": split_rows[:limit],
+    return {"linker": [{"unit": unit, "functions": n} for unit, n in sorted(linker.items())],
+            "folds": fold_rows[:limit], "folds_total": len(fold_rows), "splits": split_rows[:limit],
             "splits_total": len(split_rows), "claims": claims[:limit], "claims_total": len(claims),
             "claimed_bytes": sum(c["size"] for c in claims),
             "limits": "A fold means two units hold one unit's data (a literal, a static, a pool base, one file's "
                       "strings); a split means one unit holds two copies of one literal or code citing two files. "
                       "Claims are data in no unit that only one unit's code uses, and class tables in no unit whose "
-                      "constructors are all in one unit. A claim that crosses another unit's range is a fold or a "
+                      "constructors are all in one unit. Linker code (a module's PLT stubs) is no unit's. "
+                      "A claim that crosses another unit's range is a fold or a "
                       "data-only unit instead; the link order decides."}

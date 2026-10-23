@@ -165,22 +165,63 @@ class Module:
         """Import stubs (adrp x16 / ldr x17, [x16, #lo] / add x16, x16, #lo / br x17) -> the import they jump to."""
         if getattr(self, "_stubs", None) is not None:
             return self._stubs
-        found: dict[int, str] = {}
-        text = next((s for s in self.segments if s.name == "text"), None)
-        if text is not None:
-            words = struct.unpack_from(f"<{text.size // 4}I", self.image, text.offset)
-            for index in range(len(words) - 3):
-                first, second, third, fourth = words[index:index + 4]
-                if first & 0x9F00001F != 0x90000010 or second & 0xFFC003FF != 0xF9400211 or fourth != 0xD61F0220:
-                    continue
-                pc = text.offset + index * 4
-                imm = ((first >> 5 & 0x7FFFF) << 2) | (first >> 29 & 3)
-                imm = (imm - (1 << 21) if imm & (1 << 20) else imm) << 12
-                slot = (pc & ~0xFFF) + imm + ((second >> 10 & 0xFFF) << 3)
-                if slot in self.imports:
-                    found[pc] = self.imports[slot]
-        self._stubs = found
+        self._stubs = {pc: self.imports[slot] for pc, slot in _stub_slots(self).items() if slot in self.imports}
+        return self._stubs
+
+
+STUB_BRANCH = struct.pack("<I", 0xD61F0220)          # br x17: the last word of a PLT stub
+PLT_PUSH, NOP = 0xA9BF7BF0, 0xD503201F                 # stp x16, x30, [sp, #-16]!: the PLT header's first word
+
+
+def _stub_at(words: tuple[int, ...] | list[int], pc: int) -> int | None:
+    """The slot a stub (adrp x16 / ldr x17, [x16, #lo] / add x16, x16, #lo / br x17) at `pc` jumps through."""
+    first, second, third, fourth = words
+    if first & 0x9F00001F != 0x90000010 or second & 0xFFC003FF != 0xF9400211 or third & 0xFFC003FF != 0x91000210 \
+            or fourth != 0xD61F0220:
+        return None
+    imm = ((first >> 5 & 0x7FFFF) << 2) | (first >> 29 & 3)
+    imm = (imm - (1 << 21) if imm & (1 << 20) else imm) << 12
+    return (pc & ~0xFFF) + imm + ((second >> 10 & 0xFFF) << 3)
+
+
+def _stub_slots(module: Module) -> dict[int, int]:
+    """{stub address: the slot it jumps through} for every stub in the code segment."""
+    text = next((s for s in module.segments if s.name == "text"), None)
+    found: dict[int, int] = {}
+    if text is None:
         return found
+    image, end = module.image, text.offset + text.size
+    at = image.find(STUB_BRANCH, text.offset + 12, end)
+    while at != -1:
+        pc = at - 12
+        if pc % 4 == 0:
+            slot = _stub_at(struct.unpack_from("<4I", image, pc), pc)
+            if slot is not None:
+                found[pc] = slot
+        at = image.find(STUB_BRANCH, at + 4, end)
+    return found
+
+
+def _plt(module: Module) -> None:
+    """`.plt`: the linker's stubs, one per jump slot of `.got.plt` (after its three reserved words) in slot order,
+    16 bytes each, led by the header (stp x16, x30 / a stub's four words through the reserved slot that holds the
+    resolver / padding to 32 bytes). Recorded only when the stubs of every jump slot are one run, as lld and GNU ld
+    lay them out."""
+    got = module.tables.get(".got.plt")
+    if got is None or got[1] - got[0] <= 24:
+        return
+    first, count = got[0] + 24, (got[1] - got[0]) // 8 - 3
+    by_slot = {slot: pc for pc, slot in _stub_slots(module).items() if first <= slot < got[1] and slot % 8 == 0}
+    start = by_slot.get(first)
+    if start is None or any(by_slot.get(first + 8 * k) != start + 16 * k for k in range(count)):
+        return
+    head = start - 32
+    if head >= 0 and module.segment_at(head) is module.segment_at(start):
+        words = struct.unpack_from("<8I", module.image, head)
+        if words[0] == PLT_PUSH and _stub_at(words[1:5], head + 4) == got[0] + 16 \
+                and all(w == NOP for w in words[5:]):
+            start = head
+    module.tables[".plt"] = (start, by_slot[first] + 16 * count)
 
 
 def load(path: Path) -> Module:
@@ -389,6 +430,7 @@ def _read_dynamic(module: Module, dynamic: int) -> None:
         start = tags[DT_PLTGOT]
         module.tables[".got.plt"] = (start, start + 8 * (3 + (tags.get(DT_PLTRELSZ) or 0) // 24))
     _got(module, dynamic)
+    _plt(module)
 
 
 def _got(module: Module, dynamic: int) -> None:
