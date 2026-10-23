@@ -316,12 +316,12 @@ def _unchanged_since(project: Project, key: str, value: list) -> str | None:
 
 SUBAGENT_CONTEXT = (
     "zkit is available for {project}. Use its CLI via Bash: `zkit lookup <addr|name ...>` (state, owning file:line, "
-    "callers), `zkit asm <addr>`, `zkit decompile <addr ...>` (Ghidra's C; read it next to the decompiler seed), "
-    "`zkit data <addr> --type f32 --count 8`, `zkit xrefs <addr>`, `zkit refs <addr|name>` (where the source "
-    "defines and uses it), `zkit compiled <addr>` (built vs original), `zkit try <addr> <file>` (check a candidate "
-    "with the unit's own compiler; four attempts per function). Several addresses per call. Don't grep symbol or "
-    "split files or parse binaries with scripts. Edit only your own files, never build the tree, and report one "
-    "line per address.")
+    "callers), `zkit asm <addr>`, `zkit decompile <addr ...>` (Ghidra's C), `zkit data <addr> --type f32 --count 8`, "
+    "`zkit xrefs <addr>`, `zkit refs <addr|name>` (where the source defines and uses it), `zkit compiled <addr>` "
+    "(built vs original), `zkit try <addr> <file>` (a candidate with the unit's compiler; four attempts per "
+    "function). Several addresses per call; no greps of symbol or split files. Edit only your own files, never build "
+    "the tree, report one line per address. Each turn re-reads all you have seen: read file slices, not whole "
+    "headers, and keep your state in your files.")
 
 
 def subagent_context(project: Project) -> str:
