@@ -367,6 +367,9 @@ def _run_worker(info: dict, dol: Path, sda: dict[int, int], boundaries: list[tup
 
 FN_NAME = re.compile(r"\bfn_([0-9A-F]{8,16})\b")
 DATA_NAME = re.compile(r"\b(?:PTR_\w*?_|DAT_|[a-z]{1,6}Ram)([0-9a-fA-F]{8,16})\b")
+# Ghidra's names for the address of text it did not type or typed as a string, and placeholder labels (which only
+# spell the address): read as the literal they point to.
+STRING_NAME = re.compile(r"&?\b(?:UNK_|DAT_|lbl_|s_\w*?_)([0-9a-fA-F]{8,16})\b")
 # Ghidra notes dead paths it pruned; with GQR0 pinned these are paired-single dequantization paths, never source.
 UNREACHABLE = re.compile(r"^/\* WARNING: Removing unreachable block \(ram,0x[0-9a-f]+\) \*/\n", re.M)
 POINTER_GAMECUBE = re.compile(r"\b0x(8[01][0-9a-fA-F]{6})\b")  # lis/addi addresses Ghidra did not type as pointers
@@ -414,6 +417,21 @@ def _namer(project: Project, target: str, db):
             seen["data", address] = name
         return seen["data", address] or match[0]
 
+    image = []
+
+    def text_at(address: int) -> str | None:
+        if ("str", address) not in seen:
+            from .inspect_dol import _dol, cstring
+            if not image:
+                image.append(module if module is not None else _dol(project, target))
+            seen["str", address] = cstring(image[0], address)
+        return seen["str", address]
+
+    def string(match: re.Match) -> str:  # an address (&UNK_x, &lbl_x) or a string Ghidra typed (s_x); DAT_x is a value
+        if not match[0].startswith(("&", "s_")):
+            return match[0]
+        return text_at(key(match[1])) or match[0]
+
     def pointer(match: re.Match) -> str:
         address = key(match[1])
         if ("ptr", address) not in seen:
@@ -422,11 +440,14 @@ def _namer(project: Project, target: str, db):
             if symbol and symbol["type"] == "function" and not symbol["offset"]:
                 name = symbol["name"]
             elif symbol and symbol["type"] != "function":
-                name = "&" + symbol["name"] + (f".unk{symbol['offset']:X}" if symbol["offset"] else "")
+                name = text_at(address) or "&" + symbol["name"] + (f".unk{symbol['offset']:X}" if symbol["offset"]
+                                                                    else "")
             seen["ptr", address] = name
         return seen["ptr", address] or match[0]
 
-    return lambda text: pointers.sub(pointer, DATA_NAME.sub(data, FN_NAME.sub(function, UNREACHABLE.sub("", text))))
+
+    return lambda text: pointers.sub(pointer, DATA_NAME.sub(data, STRING_NAME.sub(string, FN_NAME.sub(
+        function, UNREACHABLE.sub("", text)))))
 
 
 def decompile(project: Project, target: str, addresses: list[int] | None, threads: int | None = None) -> dict:
