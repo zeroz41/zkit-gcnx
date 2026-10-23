@@ -417,6 +417,32 @@ class SwitchBuildTests(unittest.TestCase):
             self.assertEqual(good["collected"], 0)
             one = nxlink.link_unit(Project.load(manifest), "test", "b.cpp", game / "build/test/src/b.o")
             self.assertTrue(one["linked"], one)                     # one unit's object, alone, into the original
+
+            def candidate(text: str) -> dict:
+                (root / "candidate.cpp").write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, str(root / "candidate.cpp"), "-o", str(root / "candidate.o")],
+                               check=True, capture_output=True)
+                return nxlink.link_unit(Project.load(manifest), "test", "b.cpp", root / "candidate.o")
+
+            # a function the original lacks, reached only from a table the original lacks too: both dropped, also
+            # while the unit misses a byte (g_counter left to another file)
+            extra = ('__attribute__((section(".text.extra"))) static int extra(int v) { return v * 5; }\n'
+                     '__attribute__((section(".data.hook"))) int (*g_hook)(int) = extra;\n')
+            unreached = candidate(B_CPP + extra)
+            self.assertTrue(unreached["linked"], unreached)
+            self.assertEqual(sorted(unreached["collected"]), ["_ZL5extrai", "g_hook"])
+            missing = candidate(B_CPP.replace("int g_counter = 3;", "extern int g_counter;") + extra)
+            self.assertFalse(missing["linked"])
+            self.assertTrue(missing["gaps"], missing)
+            self.assertFalse(any("no such function" in p for p in missing["problems"]), missing["problems"])
+            self.assertEqual(len(missing["collected"]), 2)
+            # one placed code calls has no counterpart in the original: refused
+            called = candidate(B_CPP.replace("static int twice", "__attribute__((noinline)) " + extra.split("\n")[0]
+                                             + "\nstatic int twice").replace("twice(x) +", "twice(x) + extra(x) +"))
+            self.assertFalse(called["linked"])
+            self.assertTrue(any("_ZL5extrai" in p and "reaches it" in p for p in called["problems"]),
+                            called["problems"])
+            self.assertEqual(called["collected"], [])
             dropped = built(B_CPP + '__attribute__((section(".text.unused"))) int unused(int v) { return v - 1; }\n')
             self.assertTrue(dropped["identical"], dropped)
             self.assertEqual((dropped["linked_units"], dropped["collected"]), (["a.cpp", "b.cpp"], 1))

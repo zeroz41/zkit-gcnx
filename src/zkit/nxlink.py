@@ -704,14 +704,21 @@ def _cover(linker: Linker, obj: _Object, result: UnitLink, placed: dict | None =
     """A whole unit links when no problem stands and every byte of its ranges came from its object: its placed
     sections, the literals its code reaches, and every other literal of its mergeable sections that the original
     holds inside the unit (the linker keeps a literal no code reaches, in the unit that brought it). A section the
-    symbols do not name and no placed code reached is one `--gc-sections` dropped when nothing else is missing;
-    while a byte is, it may be that byte's original under another name."""
-    unnamed = [name for index, name in result.unnamed.items() if (obj.unit, index) not in (placed or {})]
-    unknown = [f"{name}: the symbols name no such function or object (its original is unnamed, or another "
-               "unit's): name it, or move it to the unit that holds it" for name in unnamed]
+    symbols do not name is one `--gc-sections` dropped when no relocation reaches it from a placed section (the
+    roots: what the original keeps, by name or by its references); one that is reached has no counterpart in the
+    original and is refused."""
+    placed = placed or {}
+    unnamed = {index: name for index, name in result.unnamed.items() if (obj.unit, index) not in placed}
+    reached = _reachable(obj, placed) if obj.whole else set(unnamed)
+    folded = set(result.folded)          # reached, and resolved to another unit's identical copy
+    refused = [name for index, name in unnamed.items()
+               if index in reached and not {name, obj.elf.sections[index].name} & folded]
+    result.problems += [f"{name}: the symbols name no such function or object (its original is unnamed, or "
+                        "another unit's), and placed code reaches it: name it, or move it to the unit that holds it"
+                        for name in refused]
     if not obj.whole:
-        result.problems += unknown
         return
+    result.collected += [name for index, name in unnamed.items() if index not in reached]
     for section in obj.elf.sections:
         if not (section.flags & SHF_ALLOC and section.flags & SHF_MERGE) or not section.size:
             continue
@@ -750,11 +757,25 @@ def _cover(linker: Linker, obj: _Object, result: UnitLink, placed: dict | None =
             if high - low >= PADDING or any(content):
                 result.gaps.append(f"{linker.platform.text(low)}..{linker.platform.text(high)} ({high - low} bytes) "
                                    "not from the compiled object")
-    if result.gaps:
-        result.problems += unknown
-    else:
-        result.collected += unnamed
     result.linked = not result.problems and not result.gaps
+
+
+def _reachable(obj: _Object, placed: dict) -> set[int]:
+    """The object's sections that relocations reach, directly or through each other, from its placed sections
+    (sections of groups another unit's copy holds are that unit's: not followed)."""
+    elf = obj.elf
+    seen = {index for unit, index in placed if unit == obj.unit}
+    queue = list(seen)
+    while queue:
+        section = elf.sections[queue.pop()]
+        if section.type == SHT_NOBITS:
+            continue
+        for r in elf.relocations(section):
+            index = elf.symbols[r.symbol].section
+            if 0 < index < 0xFF00 and index not in seen and index not in obj.discarded:
+                seen.add(index)
+                queue.append(index)
+    return seen
 
 
 def _write_nso(linker: Linker, path: Path) -> None:
