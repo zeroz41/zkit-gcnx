@@ -816,6 +816,7 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         return data, render.permute(data)
     if command == "delink":
         from . import delink
+        project = project.with_overlay(here, worktree) if here else project   # a worktree splits by its own symbols
         config = project.target(target)
         if args.splits:
             splits = args.splits.expanduser().resolve()

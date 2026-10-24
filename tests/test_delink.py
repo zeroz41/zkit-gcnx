@@ -101,6 +101,45 @@ class DelinkTests(unittest.TestCase):
                 if section.name.startswith((".rodata", ".data")) and not section.name.startswith(".rela"):
                     self.assertEqual(ours.data(section), theirs.data(theirs.section(section.name)), section.name)
 
+    def test_a_git_worktree_delinks_by_its_own_symbols(self):
+        """Run inside a git worktree of the decomp, delink names the functions by the worktree's symbols.txt, not
+        by the main checkout's (a branch renaming symbols builds target objects of its own names)."""
+        import contextlib
+        import io
+        import os
+        from zkit import cli
+        linked = Elf.load(self.root / "orig" / "main.elf")
+        lines = [f"{s.name} = {linked.sections[s.section].name}:0x{s.value:08X}; // type:"
+                 f"{'function' if s.kind == 'func' else 'object'} size:0x{s.size:X} scope:global"
+                 for s in linked.symbols if s.kind in ("func", "object") and s.size and 0 < s.section < 0xFF00]
+        manifest = json.loads((self.root / "project.json").read_text())
+        manifest["targets"]["main"]["symbols"] = "symbols.txt"
+        (self.root / "project.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (self.root / "symbols.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        splits = self.splits()
+        git = lambda where, *a: subprocess.run(["git", "-C", str(where), "-c", "user.name=t", "-c", "user.email=t@t",
+                                                *a], check=True, capture_output=True)
+        git(self.root, "init", "-q")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-qm", "base")
+        outside = tempfile.TemporaryDirectory()      # a worktree nested in the checkout would be that checkout
+        self.addCleanup(outside.cleanup)
+        tree = Path(outside.name) / "wt"
+        git(self.root, "worktree", "add", "-q", "-b", "wt", str(tree))
+        (tree / "symbols.txt").write_text((self.root / "symbols.txt").read_text().replace("_Z6helperi =", "renamed ="),
+                                          encoding="utf-8")
+        here = os.getcwd()
+        try:
+            os.chdir(tree)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(["--project", str(self.root / "project.json"), "--target", "main", "delink",
+                                           "--splits", str(splits), "--out", str(tree / "target")]), 0)
+        finally:
+            os.chdir(here)
+        names = {s.name for s in Elf.load(tree / "target" / "b.o").symbols}
+        self.assertIn("renamed", names)
+        self.assertNotIn("_Z6helperi", names)
+
     def test_unassigned_reference_is_reported(self):
         project = Project.load(self.root / "project.json")
         splits = self.splits()
