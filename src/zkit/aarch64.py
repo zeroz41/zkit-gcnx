@@ -343,8 +343,13 @@ class Reloc:
 
 
 def code_relocations(words: list[int], start: int, pointers: dict[int, int],
-                     resolved=lambda target: False) -> tuple[list[Reloc], dict[int, int]]:
+                     resolved=lambda target: False, got: tuple[int, int] | None = None
+                     ) -> tuple[list[Reloc], dict[int, int]]:
     """Relocations of a function's instructions, and the cleared instruction words by address.
+
+    A 64-bit load through an adrp page is a GOT load (to the pointee) when it reads a relocated pointer inside
+    `got`, the module's `.got` (start, end); any other load, of a pointer table's element in `.data` too, is a
+    plain load of the word's own address. Without a known `.got` every relocated pointer counts as a slot.
 
     Branches inside the function, and calls `resolved(target)` says the assembler resolves itself (an
     internal-linkage function in the same section), keep their encoded offset and get no relocation."""
@@ -402,10 +407,11 @@ def code_relocations(words: list[int], start: int, pointers: dict[int, int],
             if vector and word >> 23 & 1:
                 scale = 4
             target = page + ((word >> 10 & 0xFFF) << scale)
-            got = not vector and scale == 3 and word >> 22 & 3 == 1 and target in pointers
+            slot = not vector and scale == 3 and word >> 22 & 3 == 1 and target in pointers \
+                and (got is None or got[0] <= target < got[1])
             pending[origin].append(len(out))
-            out.append(Reloc(pc, LD64_GOT_LO12_NC if got else LDST.get(scale, LDST64),
-                             pointers[target] if got else target, got))
+            out.append(Reloc(pc, LD64_GOT_LO12_NC if slot else LDST.get(scale, LDST64),
+                             pointers[target] if slot else target, slot))
             cleared[pc] = word & ~(0xFFF << 10)
             if word >> 22 & 3 and not vector:  # a load writes its general register, whichever it is
                 pages.pop(rd, None)

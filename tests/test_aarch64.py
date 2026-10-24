@@ -66,6 +66,22 @@ class RelocationTests(unittest.TestCase):
                                                                             (0x100C, 0x1000)])
         self.assertEqual(sorted(aarch64.track_addresses(words, 0x1000).items()), [(0x1004, (0x5110, "addr"))])
 
+    def test_a_got_load_reads_a_slot_of_the_got_not_any_relocated_pointer(self):
+        """`ldr x, [page, #lo12]` of a relocated word is a GOT load (to the pointee) only when the word is a slot
+        of `.got`: element 0 of a pointer table in `.data` is relocated too, yet its load is a plain LDST64 of the
+        table, its adrp an ADR_PREL_PG_HI21. Without a known `.got` every relocated pointer counts as a slot."""
+        # adrp x8, page; ldr x9, [x8, #0x10]; adrp x11, page; ldr x10, [x11, #0x20]; ret
+        words = [0x90000028, 0xF9400909, 0x9000002B, 0xF940116A, 0xD65F03C0]
+        pointers = {0x5010: 0x9000, 0x5020: 0x9100}   # a table's element (to a string), a GOT slot
+        found, cleared = aarch64.code_relocations(words, 0x1000, pointers, got=(0x5020, 0x5030))
+        self.assertEqual(sorted((r.offset, r.kind, r.target, r.got) for r in found), [
+            (0x1000, aarch64.ADR_PREL_PG_HI21, 0x5010, False), (0x1004, aarch64.LDST64, 0x5010, False),
+            (0x1008, aarch64.ADR_GOT_PAGE, 0x9100, True), (0x100C, aarch64.LD64_GOT_LO12_NC, 0x9100, True)])
+        self.assertEqual(cleared[0x1004], 0xF9400109)
+        found, _ = aarch64.code_relocations(words, 0x1000, pointers)
+        self.assertEqual([r.kind for r in found], [aarch64.ADR_GOT_PAGE, aarch64.LD64_GOT_LO12_NC,
+                                                   aarch64.ADR_GOT_PAGE, aarch64.LD64_GOT_LO12_NC])
+
 
 if __name__ == "__main__":
     unittest.main()

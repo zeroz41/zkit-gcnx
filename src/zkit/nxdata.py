@@ -54,7 +54,7 @@ def objects(module, functions: Iterable[tuple[int, int]], sized: Iterable[tuple[
             words = module.words(start, size)
         except ValueError:
             continue
-        found, _ = aarch64.code_relocations(words, start, module.pointers)
+        found, _ = aarch64.code_relocations(words, start, module.pointers, got=module.tables.get(".got"))
         for r in found:
             if r.got or r.kind in FORMED:
                 whole.add(r.target)

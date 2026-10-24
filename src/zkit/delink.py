@@ -478,7 +478,8 @@ def _switch(project: Project, target: str, platform) -> Image:
     in_image = lambda address: module.segment_at(address) is not None
 
     def code(start: int, size: int, resolved) -> tuple[list, dict[int, int]]:
-        found, cleared = aarch64.code_relocations(module.words(start, size), start, module.pointers, resolved)
+        found, cleared = aarch64.code_relocations(module.words(start, size), start, module.pointers, resolved,
+                                                 module.tables.get(".got"))
         return [(r.offset, r.kind, r.target, r.got) for r in found], cleared
 
     def pointers(start: int, end: int) -> list[tuple[int, int]]:
