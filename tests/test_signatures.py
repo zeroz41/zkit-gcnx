@@ -643,6 +643,60 @@ class SwitchSignatureTests(unittest.TestCase):
         self.assertNotIn(at["_Z5extrai"], found)
         self.assertEqual(found.get(at["_Z6gamma_i"]), ("_Z6gamma_i", "layout+code"))
 
+    def test_seeds_name_what_they_call(self):
+        """A target name the caller trusts (one a decomp gave from matched code) names what its function calls,
+        as a function the donors named would: the update doubled `driver`, so neither its shape nor its place
+        names it, and only seeded with its name do its calls and its place name `alpha` and `beta`."""
+        bodies = ("{ int t = 1; for (int i = 0; i < n; i++) t = t * 31 + (v[i] >> 2) - i;\n"
+                  "  for (int i = n - 1; i >= 0; i--) t ^= v[i] * (i + 3); return t ^ 0x1234; }\n",
+                  "{ int t = 9; for (int i = 0; i < n; i++) t = t * 17 - (v[i] << 3) + i;\n"
+                  "  for (int i = 0; i < n; i++) t += v[i] * v[i]; return t ^ 0x4321; }\n")
+        source = ("#define NI __attribute__((noinline))\n"
+                  "int first(int *v, int n) " + bodies[0] +
+                  "NI int alpha(int x); NI int beta(int x);\n"
+                  "int driver(int *v, int n) { int t = alpha(n); t ^= beta(t); @MORE@ return t * 9; }\n"
+                  "int last(int *v, int n) " + bodies[1] +
+                  "NI int alpha(int x) { return ((x * 3 + 1) ^ (x >> 7)) - (x & 0x3C) * (x | 5)@A@; }\n"
+                  "NI int beta(int x) { return ((x ^ (x >> 5)) * 7 - (x >> 9)) | ((x << 3) + 11)@B@; }\n")
+        more = ("for (int i = 0; i < n; i++) { t = t * 37 + (v[i] ^ 0x15) - (i << 2); v[i] = t >> 3; }\n"
+                "  for (int i = 1; i < n; i += 2) { t ^= v[i] * 11 + v[i - 1]; v[i - 1] = t - i; }")
+        elf, symbols, _ = self.module("donor", source.replace("@MORE@", "").replace("@A@", "").replace("@B@", ""),
+                                      hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        elf, symbols, at = self.module("target", source.replace("@MORE@", more).replace("@A@", " + 9")
+                                       .replace("@B@", " - 4"), hide=True)
+        program = Program.from_symbols(Switch(), elf, symbols)
+        blind = {p.address: p.name for p in signatures.propose(program, [donor])}
+        self.assertNotIn(at["_Z6driverPii"], blind)
+        self.assertNotIn(at["_Z5alphai"], blind)
+        seeded = {p.address: (p.name, p.evidence) for p in
+                  signatures.propose(program, [donor], seeds={at["_Z6driverPii"]: "_Z6driverPii"})}
+        self.assertNotIn(at["_Z6driverPii"], seeded)                   # a seed is never proposed
+        self.assertEqual(seeded.get(at["_Z5alphai"], ("",))[0], "_Z5alphai")
+        self.assertEqual(seeded.get(at["_Z4betai"], ("",))[0], "_Z4betai")
+
+    def test_columns_name_their_readers(self):
+        """Getters of a table's columns read static slots an initializer filled by looking each column up by
+        its name: the update changed every getter and their order, so their code and places mislead, but the
+        column each reads (the text its slot was looked up by, the slots in the donor's order) names it."""
+        columns = ("ColumnAlpha", "ColumnBeta", "ColumnGamma", "ColumnDelta")
+        getter = lambda c: (f"__attribute__((noinline)) void *get{c}(void *t, int id) {{ return s_{c} ? "
+                            f"fetch(t, s_{c}, id @EXTRA@) : 0; }}\n")
+        head = ("void *lookup(void *table, const char *column); void *fetch(void *table, void *column, int id);\n"
+                + "".join(f"static void *s_{c};\n" for c in columns)
+                + "void init(void *t) {" + "".join(f" s_{c} = lookup(t, \"{c}\");" for c in columns) + " }\n")
+        elf, symbols, _ = self.module("donor", (head + "".join(getter(c) for c in columns)).replace("@EXTRA@", ""),
+                                      hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        self.assertEqual(donor.columns, list(columns))
+        later = head + "".join(getter(c) for c in reversed(columns))
+        elf, symbols, at = self.module("target", later.replace("@EXTRA@", "* 2 + 1"), hide=True)
+        found = {p.address: (p.name, p.evidence)
+                 for p in signatures.propose(Program.from_symbols(Switch(), elf, symbols), [donor])}
+        for c in columns:
+            name = f"_Z{3 + len(c)}get{c}Pvi"
+            self.assertEqual(found.get(at[name]), (name, "column"))
+
     def test_data_pairs_in_order(self):
         """An update changed the only function that uses three globals and added a fourth use: its data
         references, in order against its donor's between the ones both name (a text here), name the globals before

@@ -328,6 +328,8 @@ class Donor:
     platform: str = ""                                                   # gamecube or switch (empty: unknown)
     weak: list[str] = field(default_factory=list)                        # data keys that are weak (an inline's
                                                                          # static, a template's member or table)
+    columns: list[str] = field(default_factory=list)                     # texts naming static slots, in address
+    column_reads: dict[str, list[int]] = field(default_factory=dict)     # order; function key -> those it reads
 
 
 def _units(rows: list[tuple[int, int, str]]):
@@ -423,6 +425,14 @@ def add_program(donor: Donor, program: Program, units: list[tuple[int, int, str]
                                weak=inline))
     _neighbours(found, order)
     donor.signatures += found
+    if program.platform.name == "switch":
+        slots, reads = column_slots(program)
+        index = {address: len(donor.columns) + i for i, (address, _) in enumerate(slots)}
+        donor.columns += [text for _, text in slots]
+        for function in program.functions:
+            named = known(function.address, function.name, function.scope)
+            if named and (mine := sorted(index[a] for a in reads.get(function.address, ()))):
+                donor.column_reads[named] = mine
     # a table's slots: a function's key ("" when the donor does not name it), an import's name, None for any other
     # word (a pure virtual, a secondary table's header)
     switch = program.platform.name == "switch"
@@ -445,6 +455,34 @@ def add_program(donor: Donor, program: Program, units: list[tuple[int, int, str]
             known(w, starts[w].name, starts[w].scope) or "" if w in starts else None for w in words[2:]]
     donor.images.append(identity(program.image))
     donor.platform = program.platform.name
+
+
+def column_slots(program: Program) -> tuple[list[tuple[int, str]], dict[int, set[int]]]:
+    """Switch: static slots a text names, in address order, and the functions that read them. A slot is named by
+    the text of the call whose result code stores there (`aarch64.text_slots`: `s_member = lookup("Column")`) when
+    that is the only text stored there; a function reads the slots it loads."""
+    from .aarch64 import text_slots
+    texts: dict[int, str | None] = {}
+
+    def text(address: int) -> str | None:
+        if address not in texts:
+            texts[address] = text_at(program.read, address)
+        return texts[address]
+    named: dict[int, set[str]] = collections.defaultdict(set)
+    loads: dict[int, set[int]] = {}
+    for function in program.functions:
+        try:
+            words = program.platform.words(program.image, function.address, function.size)
+        except ValueError:
+            continue
+        stored, read = text_slots(words, function.address, text)
+        for slot, (_, found) in stored.items():
+            named[slot].add(found)
+        if read:
+            loads[function.address] = read
+    slots = sorted((a, next(iter(t))) for a, t in named.items() if len(t) == 1)
+    known = {a for a, _ in slots}
+    return slots, {f: read & known for f, read in loads.items() if read & known}
 
 
 def add_object(donor: Donor, elf, unit: str = "") -> None:
@@ -620,7 +658,8 @@ def save(donor: Donor) -> Path:
              s.weak] for s in donor.signatures]
     data = {"version": VERSION, "name": donor.name, "built": donor.built, "sources": donor.sources,
             "images": donor.images, "tables": donor.tables, "sizes": donor.sizes, "layout": donor.layout,
-            "platform": donor.platform, "functions": rows, "weak": donor.weak}
+            "platform": donor.platform, "functions": rows, "weak": donor.weak, "columns": donor.columns,
+            "column_reads": donor.column_reads}
     temporary = path.with_name(path.name + ".partial")
     with gzip.open(temporary, "wt", encoding="utf-8") as stream:
         json.dump(data, stream, separators=(",", ":"))
@@ -641,7 +680,8 @@ def load(name: str) -> Donor:
                             unit, data["name"], before, after, place, code, bool(weak and weak[0]))
                   for shape, k, size, unit, before, after, refs, place, code, *weak in data["functions"]]
     return Donor(data["name"], signatures, data["tables"], data["sizes"], data["images"], data["sources"],
-                 data["built"], data["layout"], data["platform"], data.get("weak", []))
+                 data["built"], data["layout"], data["platform"], data.get("weak", []), data.get("columns", []),
+                 data.get("column_reads", {}))
 
 
 def listed() -> list[str]:
@@ -716,6 +756,9 @@ class Matcher:
                 self.tables[same.get(name, name)].append([same.get(k, k) for k in slots])
             for name, size in donor.sizes.items():
                 self.sizes[same.get(name, name)].add(size)
+        self.donor_columns = [(donor.columns, {same.get(k, k): v for k, v in donor.column_reads.items()})
+                              for donor in donors if donor.columns]
+        self._columns: list | None = None
         self._arguments: dict[int, set[int]] = {}           # address -> argument registers its code reads
         self._capacity: dict[str, tuple[int, int] | None] | None = None
         self._donor_arguments: dict[str, set[int]] = {}     # key -> argument registers its donors' code reads
@@ -780,6 +823,51 @@ class Matcher:
         self.placed = {(s.donor, s.place): s for entries in self.by_key.values() for s in entries
                        if s.place is not None}
         self._weights: dict[tuple, float] | None = None
+        self._structors: dict[str, str] | None = None
+
+    def structor(self, key: str) -> str | None:
+        """A donor constructor's or destructor's name without its variant (C1, C2, C3; D0, D1, D2), as its
+        demangled text: the same for every variant of one class's structor, None for any other name."""
+        if self._structors is None:
+            from .platform import demangle_itanium
+            keys = sorted({display(k) for k in self.by_key if display(k).startswith("_ZN")})
+            self._structors = {}
+            for k, text in zip(keys, demangle_itanium(keys)):
+                head, depth = "", 0
+                for c in (text or "").split("(", 1)[0]:          # the name without template arguments
+                    depth += (c == "<") - (c == ">")
+                    head += c if depth == 0 and c != ">" else ""
+                last, _, member = head.rpartition("::")
+                if text and last and member.lstrip("~") == last.rpartition("::")[2]:
+                    self._structors[k] = text
+        return self._structors.get(display(key)) if key else None
+
+    def columns(self) -> list[dict[int, list[str]]]:
+        """Per donor with column slots: {target function: the donor keys reading the slots it reads}. The target's
+        slots a text names (`column_slots`) pair with the donor's in order where runs of three or more texts agree
+        (tables keep their columns' order; one text, a common column name, proves nothing alone); a function reads
+        the donor slots its slots pair with when every slot it reads pairs, and the donor functions reading
+        exactly those are its candidates."""
+        if self._columns is None:
+            import difflib
+            self._columns = []
+            slots, reads = column_slots(self.program) if self.donor_columns else ([], {})
+            ours = [text for _, text in slots]
+            for texts, donor_reads in self.donor_columns:
+                pairs: dict[int, int] = {}
+                for i, j, size in difflib.SequenceMatcher(None, ours, texts, autojunk=False).get_matching_blocks():
+                    if size >= 3:
+                        pairs.update((slots[i + k][0], j + k) for k in range(size))
+                readers: dict[tuple[int, ...], list[str]] = collections.defaultdict(list)
+                for k, indices in donor_reads.items():
+                    readers[tuple(indices)].append(k)
+                found = {}
+                for function, read in reads.items():
+                    if all(a in pairs for a in read):
+                        if keys := readers.get(tuple(sorted(pairs[a] for a in read))):
+                            found[function] = keys
+                self._columns.append(found)
+        return self._columns
 
     def uses(self, signature: Signature) -> set[tuple]:
         """What a donor function refers to by name or by text: ("n", key) and ("s", text) of four characters or
@@ -961,13 +1049,16 @@ class Matcher:
             self._donor_arguments[key] = reads
         return extra <= self._donor_arguments[key]
 
-    def run(self, strings: bool = True, rounds: int = 8) -> list[Proposal]:
-        """Proposals, after withdrawing every name some evidence contradicts and matching again without it."""
+    def run(self, strings: bool = True, rounds: int = 8, seeds: dict[int, str] | None = None) -> list[Proposal]:
+        """Proposals, after withdrawing every name some evidence contradicts and matching again without it.
+        `seeds` ({address: key}) are names the target already has that the caller trusts: known from the start,
+        never proposed, they name what they refer to, call and hold as named functions do; evidence naming one
+        otherwise is kept in `self.contradictions`."""
         banned_addresses: set[int] = set()
         banned_keys: set[str] = set()
         refuted: set[tuple[int, str]] = set()
         for _ in range(rounds):
-            state = _State(self, banned_addresses, banned_keys, refuted)
+            state = _State(self, banned_addresses, banned_keys, refuted, seeds or {})
             state.settle(strings)
             addresses, keys, pairs = state.conflicts()
             if addresses <= banned_addresses and keys <= banned_keys and pairs <= refuted:
@@ -975,12 +1066,13 @@ class Matcher:
             banned_addresses |= addresses
             banned_keys |= keys
             refuted |= pairs
+        self.contradictions = state.seed_conflicts()
         return sorted(state.proposals.values(), key=lambda p: p.address)
 
 
 class _State:
     def __init__(self, matcher: Matcher, banned_addresses: set[int], banned_keys: set[str],
-                 refuted: set[tuple[int, str]] = frozenset()):
+                 refuted: set[tuple[int, str]] = frozenset(), seeds: dict[int, str] | None = None):
         self.m = matcher
         self.banned_addresses, self.banned_keys = banned_addresses, banned_keys
         self.refuted = refuted                         # (address, key): that address is not that key
@@ -996,6 +1088,26 @@ class _State:
         self.regrown: list[tuple[int, str, int, str]] = []  # votes for a function whose size changed past plausible
         self.cached: dict[tuple[str, int], dict] = {}  # (shape, address) -> its options, until a name they use
         self.changed = False
+        self.seeds = seeds or {}
+        self.columns_seen: set[int] = set()
+        self.misread: set[tuple[int, str]] = set()     # (address, key) another function's column says it is not
+        self.against: list[tuple[int, str, str, int | None]] = []   # (address, name, evidence, source) vs a seed
+        for address, named in self.seeds.items():
+            self.known[address], self.owner[named] = named, address
+            self.dirty |= matcher.dependents.get(address, set()) | matcher.key_groups.get(named, set())
+            shape = matcher.shapes.get(address)
+            same = [s for s in matcher.by_key.get(named, ()) if shape is not None and s.shape == shape.shape]
+            if same:
+                self.later.append((address, same))
+
+    def seed_conflicts(self) -> list[dict]:
+        """Seeds some evidence names otherwise: another name for a seed's address, the seed's name for another
+        address, or code citing files its name's donor functions never cite (`miscited`)."""
+        rows = [{"address": a, "seed": display(self.seeds[a]) if a in self.seeds else None, "name": display(n),
+                 "evidence": e, "source": s} for a, n, e, s in self.against]
+        rows += [{"address": a, "seed": display(k), "name": None, "evidence": "file", "source": None}
+                 for a, k in self.seeds.items() if self.miscited(a, k)]
+        return rows
 
     # evidence
 
@@ -1034,9 +1146,13 @@ class _State:
             return False
         if address in self.known:
             self.contradicted.add(address)
+            if address in self.seeds:
+                self.against.append((address, named, evidence, source))
             return False
         if named in self.owner:
             self.clashes.add(named)
+            if self.owner[named] in self.seeds:
+                self.against.append((address, named, evidence, source))
             return False
         self.known[address], self.owner[named] = named, address
         self.dirty |= self.m.dependents.get(address, set()) | self.m.key_groups.get(named, set())
@@ -1382,7 +1498,9 @@ class _State:
         reaches `SIMILAR`, beats every other pairing of either function in the gap by `SIMILAR_MARGIN`, and both
         are `MINIMUM_WORDS` long or more and of plausible sizes (layout+code). Shorter code stays: a getter whose
         field moved reads exactly like its neighbour did. (On Xenoblade 2's 3.0.1 against 1.0.0 this named 1,220
-        functions whose names callers and class tables also gave, all alike, and none otherwise.)"""
+        functions whose names callers and class tables also gave, all alike, and none otherwise.) A constructor or
+        destructor whose class has another of its variants (C1/C2, D0/D1/D2) left in the gap stays too: one
+        variant's code is another's inlined, as alike to either."""
         import difflib
         if not rest or not left or len(rest) * len(left) > SIMILAR_PAIRS or not all(s.code for s in left):
             return []
@@ -1412,7 +1530,9 @@ class _State:
                 t, s, value = rest[i], left[j], score[i][j]
                 rivals = [v for k, v in enumerate(score[i]) if k != j] + [score[k][j] for k in range(n) if k != i]
                 if (value >= max(rivals, default=0.0) + SIMILAR_MARGIN and self.plausible(t, s.key)
-                        and min(self.m.shapes[t].size, s.size) >= 4 * MINIMUM_WORDS):
+                        and min(self.m.shapes[t].size, s.size) >= 4 * MINIMUM_WORDS
+                        and not any(o is not s and self.m.structor(o.key) == self.m.structor(s.key) is not None
+                                    for o in left)):
                     chosen.append((t, s, "layout+code"))
                 i, j = i + 1, j + 1
             elif best[i][j] == best[i + 1][j]:
@@ -1440,7 +1560,8 @@ class _State:
 
     def calls(self) -> None:
         """A named function whose code changed still calls what its donors' code calls: when one function it
-        calls is unnamed and one function its donors call is unclaimed, they are one function, and its calls pair
+        calls is unnamed and one function its donors call is unclaimed, they are one function unless a function it
+        calls that is named is one its donors never call (an update inlined or outlined other calls), and its calls pair
         with its donors' in order (`call_order`). A caller one of whose pairings in order more callers contradict
         (another name for its callee, or another callee for its name) is misaligned, an update having moved its
         calls, and names nothing in order. Each pairing left needs no other caller saying otherwise, and a
@@ -1459,7 +1580,10 @@ class _State:
             theirs = {frozenset(r.token[1] for r in e.references if r.kind in kinds and r.token and r.token[0] == "n"
                                 and r.token[1] in self.m.by_key and r.token[1] not in self.owner
                                 and r.token[1] not in self.banned_keys) for e in entries}
-            if len(ours) == 1 and len(theirs) == 1 and len(next(iter(theirs))) == 1:
+            called = {self.known[t] for _, kind, t in shape.references if kind in kinds and t in self.known}
+            donor_calls = {r.token[1] for e in entries for r in e.references
+                           if r.kind in kinds and r.token and r.token[0] == "n"}
+            if len(ours) == 1 and len(theirs) == 1 and len(next(iter(theirs))) == 1 and called <= donor_calls:
                 found[next(iter(ours))][next(iter(next(iter(theirs))))] = address
             pairs = set(self.call_order(shape, entries, kinds))
             if pairs:
@@ -1592,6 +1716,38 @@ class _State:
             i0, j0 = i1 + size, j1 + size
         return pairs
 
+    def columns(self) -> None:
+        """A function reading static slots a text names (`Matcher.columns`) is the donor function reading those
+        slots whose code is most alike (difflib's ratio of the masked words), by `SIMILAR_MARGIN` over any other
+        (a class's getter and the free function it wraps read one column), where no other name has it. A seed
+        such evidence names otherwise is contradicted, and a name other evidence gave refuted. (Xenoblade 2's 3.0.1 against 1.0.0, BDAT getters by
+        column name: 1,102 of 1,105 named getters again; the other three read another column than their names
+        say.)"""
+        import difflib
+        for found in self.m.columns():
+            for address, keys in found.items():
+                if address in self.columns_seen:
+                    continue
+                self.columns_seen.add(address)
+                shape = self.m.shapes.get(address)
+                if shape is None or address in self.banned_addresses:
+                    continue
+                ours = self.m.code(shape)
+                scored = sorted(((max(difflib.SequenceMatcher(None, ours, self.m.code(e), autojunk=False).ratio()
+                                      for e in self.m.by_key[k]), k) for k in keys if self.m.by_key.get(k)),
+                                reverse=True)
+                if not scored or len(scored) > 1 and scored[0][0] < scored[1][0] + SIMILAR_MARGIN:
+                    continue
+                named = scored[0][1]
+                if address in self.seeds:
+                    if named != self.seeds[address]:
+                        self.against.append((address, named, "column", None))
+                elif address in self.known:
+                    if named != self.known[address]:
+                        self.misread.add((address, self.known[address]))
+                elif self.plausible(address, named):
+                    self.name(address, named, "function", "column")
+
     def strings(self) -> None:
         """Functions whose shape matched nothing, by the exact set of texts they refer to, where one donor name
         and one target function have that set. Only C names: the code changed, and a C++ name's parameters
@@ -1614,6 +1770,9 @@ class _State:
             else:
                 self.tables()
             self.drain()
+            if not self.changed:
+                self.columns()
+                self.drain()
             if not self.changed and strings:
                 self.strings()
             if not self.changed:
@@ -1646,7 +1805,7 @@ class _State:
                 pairs.add((address, named))
                 pairs |= {(v, key) for i, _, v, key in rows
                           if self.known.get(v) == key and self.m.slot_classes().get((i, key)) == {named}}
-        return addresses, set(self.clashes), pairs
+        return addresses, set(self.clashes), pairs | self.misread
 
     def miscited(self, address: int, key: str) -> bool:
         ours = self.m.sources(address)
@@ -1654,13 +1813,87 @@ class _State:
         return bool(theirs) and not ours & theirs
 
 
-def propose(program: Program, donors: list[Donor], strings: bool = True) -> list[Proposal]:
+def propose(program: Program, donors: list[Donor], strings: bool = True, seeds: dict[int, str] | None = None,
+            matcher: list | None = None) -> list[Proposal]:
     """Names for a target's functions and data from donors' signatures, read blind: the target's own names are
-    never evidence (compare them with the proposals afterwards). A donor read from this very original is left
-    out."""
+    never evidence (compare them with the proposals afterwards), unless the caller trusts some as `seeds`
+    ({address: donor key}, `seeds`), which are then known from the start and never proposed (on Xenoblade 2's
+    3.0.1 against 1.0.0, hiding a fifth of the names a decomp kept, seeded with the rest, named 102 to 109 of them
+    again in each of three draws beyond what the blind run named, and none otherwise). `matcher`, a list, receives
+    the matcher (its `contradictions`). A donor read from this very original is left out."""
     image = identity(program.image) if hasattr(program.image, "raw") or hasattr(program.image, "image") else None
-    return Matcher(program, [d for d in donors if (image is None or image not in d.images)
-                             and d.platform in ("", program.platform.name)]).run(strings)
+    m = Matcher(program, [d for d in donors if (image is None or image not in d.images)
+                          and d.platform in ("", program.platform.name)])
+    if matcher is not None:
+        matcher.append(m)
+    return m.run(strings, seeds=seeds)
+
+
+def qualified(text: str | None) -> str | None:
+    """A demangled function name without its parameters and qualifiers: `ns::Class::method`."""
+    if not text or "(" not in text:
+        return None
+    depth = 0
+    for i, c in enumerate(text):
+        depth += (c == "<") - (c == ">")
+        if c == "(" and depth == 0 and i:
+            return text[:i]
+    return None
+
+
+def seeds(program: Program, matcher: Matcher) -> tuple[dict[int, str], dict[int, str]]:
+    """The target's own names as seeds for `Matcher.run`, each as its donors' key: a name the donors have (a
+    file-local one by its name where only one file has it), else a function whose parameters changed: the
+    donors' only function of the same qualified name, where no target name is that function's and the target has
+    only that one name of it (an update added a parameter and the decomp named the function so), or a complete
+    (C1, D1) or base (C2, D2) structor whose donors spell the alias the other way. Placeholders and names two
+    addresses share are none (a C++ name around an address placeholder or a `TUnk_` class too). Returns (seeds, those of changed
+    parameters)."""
+    from .platform import demangle_itanium
+    from .score import placeholder
+    plain: dict[str, set[str]] = collections.defaultdict(set)
+    for k in list(matcher.by_key) + list(matcher.sizes) + list(matcher.tables):
+        plain[display(k)].add(k)
+    rows = [(f.address, f.name) for f in program.functions] + [(o.address, o.name) for o in program.objects]
+    rows = [(a, n) for a, n in rows if n and not placeholder(n) and not unnamed(n)
+            and not re.search(r"(?:fn|lbl)_[0-9A-Fa-f]{8,}|TUnk_[0-9A-Fa-f]{6,}", n)]  # a placeholder inside a C++ name
+    count = collections.Counter(n for _, n in rows)
+    out, changed, missing = {}, {}, []
+    for address, name in rows:
+        if count[name] != 1:
+            continue
+        keys = plain.get(name, set())
+        if len(keys) == 1:
+            out[address] = next(iter(keys))
+        elif not keys:
+            missing.append((address, name))
+            out[address] = name
+    functions = [(a, n) for a, n in missing if a in matcher.extent and n.startswith("_Z")]
+    donor = sorted({display(k) for k in matcher.by_key if display(k).startswith("_Z")})
+    texts = dict(zip(donor, demangle_itanium(donor))) if functions else {}
+    by_qualified: dict[str, list[str]] = collections.defaultdict(list)
+    for k, text in texts.items():
+        if (q := qualified(text)) is not None:
+            by_qualified[q].append(k)
+    names = sorted({n for a, n in rows if a in matcher.extent and n.startswith("_Z")}) if functions else []
+    ours = dict(zip(names, demangle_itanium(names)))
+    target_qualified = collections.Counter(qualified(t) for t in ours.values())
+    # C1 and C2 (D1 and D2) are one code where the class has no virtual base, and a symbols file may keep
+    # either spelling of the alias; D0 (deleting) and C3 are others
+    variant = lambda n: frozenset(v.replace("C2", "C1").replace("D2", "D1")
+                                  for v in re.findall(r"(?<=[0-9A-Za-z_])(?:C[123]|D[012])E", n))
+    same_variant = collections.Counter((qualified(t), variant(n)) for n, t in ours.items())
+    for address, name in functions:
+        q = qualified(ours.get(name))
+        found = [k for k in by_qualified.get(q, [])] if q else []
+        if variant(name):                                        # a structor: its own variant only
+            found = [k for k in found if variant(k) == variant(name)]
+            alone = same_variant[(q, variant(name))] == 1
+        else:
+            alone = target_qualified[q] == 1
+        if len(found) == 1 and found[0] not in count and alone and len(plain[found[0]]) == 1:
+            out[address] = changed[address] = next(iter(plain[found[0]]))
+    return out, changed
 
 
 def renamed(program: Program, proposals: list[Proposal]) -> Program:
@@ -1719,7 +1952,7 @@ def build_project(project, target: str, name: str, complete: bool = False) -> Do
     return donor
 
 
-def match_project(project, target: str, names: Iterable[str] = (), every: bool = False) -> dict:
+def match_project(project, target: str, names: Iterable[str] = (), every: bool = False, seeded: bool = False) -> dict:
     """Proposals for a project target against the donors, each with the target's current name: new where that
     is a placeholder, differs where the target names it otherwise, same (listed with `every`)."""
     from .score import placeholder
@@ -1729,7 +1962,12 @@ def match_project(project, target: str, names: Iterable[str] = (), every: bool =
         raise ValueError("No signatures in the cache yet; build a donor with `zkit signatures build`")
     current = {f.address: f.name for f in program.functions} | {o.address: o.name for o in program.objects}
     rows, counts = [], collections.Counter()
-    for p in propose(program, chosen):
+    made: list = []
+    planted = None
+    if seeded:
+        planted, _ = seeds(program, Matcher(program, chosen))
+    proposals = propose(program, chosen, seeds=planted, matcher=made)
+    for p in proposals:
         now = current.get(p.address)
         status = "new" if not now or placeholder(now) else "same" if now == p.name else "differs"
         counts[status] += 1
@@ -1738,7 +1976,10 @@ def match_project(project, target: str, names: Iterable[str] = (), every: bool =
             rows.append({"address": f"0x{p.address:08X}", "name": p.name, "current": now, "status": status,
                          "kind": p.kind, "evidence": p.evidence, "size": p.size, "donors": list(p.donors),
                          "unit": p.unit, "source": f"0x{p.source:08X}" if p.source is not None else None})
-    return {"target": target, "donors": [d.name for d in chosen], "counts": dict(counts), "rows": rows}
+    out = {"target": target, "donors": [d.name for d in chosen], "counts": dict(counts), "rows": rows}
+    if seeded and made:
+        out["contradicted"] = [{**c, "address": f"0x{c['address']:08X}"} for c in made[0].contradictions]
+    return out
 
 
 def command(args, project=None, target: str | None = None) -> tuple[dict, str]:
@@ -1776,7 +2017,7 @@ def command(args, project=None, target: str | None = None) -> tuple[dict, str]:
     if args.action == "match":
         if project is None:
             raise ValueError("Run inside a project (or pass --project) to match its target")
-        data = match_project(project, target, args.donor, args.all)
+        data = match_project(project, target, args.donor, args.all, getattr(args, "seeded", False))
         return data, match_text(data, args.limit)
     raise ValueError(f"Unknown signatures action {args.action}")
 

@@ -686,3 +686,50 @@ def argument_reads(words: list[int], start: int) -> set[int]:
             if new != live[n]:
                 live[n], changed = new, True
     return live[0] if live else set()
+
+
+def text_slots(words: list[int], start: int, text) -> tuple[dict[int, tuple[int, str]], set[int]]:
+    """A function's static slots named by text, and the static slots it reads: ({slot: (callee, text)} for each
+    64-bit store of what a call returned when the call's first, second or third argument was the address of a text
+    (`text(address)` returns it, else None: `slot = lookup("Name")`), {slot} for each 64-bit load of an address
+    formed by adrp (+ add) plus its offset). Straight-line tracking: a call keeps only the callee-saved registers."""
+    held: dict[int, tuple] = {}            # register -> ("a", address) | ("r", callee, text)
+    named: dict[int, tuple[int, str]] = {}
+    loads: set[int] = set()
+    for index, word in enumerate(words):
+        pc = start + 4 * index
+        rd, rn = word & 31, word >> 5 & 31
+        base = held.get(rn) if rn != 31 else None
+        if word & 0x9F000000 == 0x90000000:                                   # adrp
+            held[rd] = ("a", (pc & ~0xFFF) + (_sign(((word >> 5 & 0x7FFFF) << 2) | (word >> 29 & 3), 21) << 12))
+        elif word & 0x9F000000 == 0x10000000:                                 # adr
+            held[rd] = ("a", pc + _sign(((word >> 5 & 0x7FFFF) << 2) | (word >> 29 & 3), 21))
+        elif word & 0xFF800000 == 0x91000000 and base and base[0] == "a":     # add (immediate), 64 bit
+            held[rd] = ("a", base[1] + ((word >> 10 & 0xFFF) << (12 if word >> 22 & 1 else 0)))
+        elif word & 0xFFE0FFE0 == 0xAA0003E0:                                 # mov xd, xm
+            source = held.get(word >> 16 & 31)
+            if source is not None:
+                held[rd] = source
+            else:
+                held.pop(rd, None)
+        elif word & 0xFFC00000 == 0xF9000000 and base and base[0] == "a":     # str x, [xn, #imm]
+            value = held.get(rd) if rd != 31 else None
+            if value and value[0] == "r":
+                named[base[1] + ((word >> 10 & 0xFFF) << 3)] = value[1:]
+        elif word & 0xFFC00000 == 0xF9400000 and base and base[0] == "a":     # ldr x, [xn, #imm]
+            loads.add(base[1] + ((word >> 10 & 0xFFF) << 3))
+            held.pop(rd, None)
+        elif word & 0xFC000000 == 0x94000000 or word & 0xFFFFFC1F == 0xD63F0000:   # bl / blr
+            found = None
+            if word & 0xFC000000 == 0x94000000:
+                for register in (1, 0, 2):
+                    value = held.get(register)
+                    if value and value[0] == "a" and (found := text(value[1])) is not None:
+                        break
+            held = {r: v for r, v in held.items() if 19 <= r <= 29}
+            if found is not None:
+                held[0] = ("r", pc + _sign(word & 0x3FFFFFF, 26) * 4, found)
+        else:
+            for register in written(word):
+                held.pop(register, None)
+    return named, loads

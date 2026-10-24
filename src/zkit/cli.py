@@ -224,6 +224,8 @@ def build_parser() -> argparse.ArgumentParser:
                                                            "of the units its report marks complete")
     c.add_argument("--donor", action="append", default=[], help="match: only this donor (repeatable)")
     c.add_argument("--all", action="store_true", help="match: also list names the target already has")
+    c.add_argument("--seeded", action="store_true", help="match: start from the target's own names (a decomp's "
+                   "matched names name what they call, read and hold) and list the names evidence contradicts")
     c.add_argument("--limit", type=int, default=60)
     c = add("units", help="Translation units from evidence in the original (source paths its code cites, literal "
                           "copies, data one run of code uses, classes): a fresh proposal, or --check the current splits")
