@@ -523,6 +523,28 @@ class DeferredTailTests(unittest.TestCase):
         self.assertEqual(units._shared_data(code), {0x9000})
 
 
+class DirectReachTests(unittest.TestCase):
+    def test_a_static_every_user_forms_directly_is_one_unit_s_however_far_apart(self):
+        """s (users 0 and 70, both forming its address with adrp) is a file's static: one span; g's user 70 loads
+        it through a slot (no address formed), so g is a global; t's users are near each other (the tight joins'
+        business); weak w is every unit's. Not on the GameCube."""
+        from unittest import mock
+        code = _Code(80)
+        code.platform.words = lambda image, address, size: [address]
+        s, g = DataObject(0x9000, 8, "lbl_9000", ".bss"), DataObject(0x9100, 8, "lbl_9100", ".bss")
+        t, w = DataObject(0x9200, 8, "lbl_9200", ".bss"), DataObject(0x9300, 8, "_ZGV", ".bss", "weak")
+        formed = {0: [0x9000, 0x9100, 0x9200, 0x9300], 3: [0x9200], 70: [0x9000, 0x9300]}
+        rows = lambda words, start, load64: {start + 4 * k: (a, "addr") for k, a in
+                                             enumerate(formed.get((start - 0x1000) // 0x40, []))}
+        users = {s: {0, 70}, g: {0, 70}, t: {0, 3}, w: {0, 70}}
+        with mock.patch("zkit.aarch64.track_addresses", rows):
+            spans = units._direct_reach(code, users, {0x9300})
+        self.assertEqual([(lo, hi) for lo, hi, _ in spans], [(0, 70)])
+        from zkit.platform import GameCube
+        code.platform = GameCube()
+        self.assertEqual(units._direct_reach(code, users, set()), [])
+
+
 class AnotherBuildNameTests(unittest.TestCase):
     def test_a_file_s_name_from_another_build_yields_to_its_own_citations_anywhere(self):
         """a.cpp's own code is unit 3; another build also names units 0 and 2 after it (its coarser unit): on the

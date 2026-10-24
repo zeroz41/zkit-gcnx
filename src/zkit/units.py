@@ -71,6 +71,7 @@ class Evidence:
     firsts: list[tuple[int, int, str]] = field(default_factory=list)  # joins of a weak function and its first user
     direct: set[tuple[int, int, str]] = field(default_factory=set)    # separations the code itself states
     borrowed: set[tuple[int, int, str]] = field(default_factory=set)  # separations only another build gives
+    reach: list[tuple[int, int, str]] = field(default_factory=list)   # a unit-local object's users (`_direct_reach`)
     inlines: dict[int, str] = field(default_factory=dict)      # function index -> header it cites (inline)
     names: dict[int, str] = field(default_factory=dict)        # function index -> `Class::method` it cites
     placed: set[int] = field(default_factory=set)              # function indexes whose file is another build's unit
@@ -153,6 +154,7 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
                                         f"two copies of one constant: {text(a.address)} and {text(b.address)}"))
     firsts = _first_users(program)
     ev = Evidence(local, joins + firsts, separations, firsts=firsts)
+    ev.reach = _direct_reach(program, users, shared | initialized)
     _file_evidence(program, ev, placed)
     ev.joins += _table_joins(program, ev)
     _out_of_line_calls(program, ev)
@@ -160,6 +162,30 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     _initializer_ends(program, ev)
     _start_up_object(program, ev)
     return ev
+
+
+def _direct_reach(program: Program, users, skip: set[int]) -> list[tuple[int, int, str]]:
+    """Switch (a PIC module): code reaches a global of default visibility through its `.got` slot, its own unit's
+    too; a writable object every user forms the address of directly (adrp, no slot) is a file's static (or
+    hidden): all its users are the unit defining it, however far apart. Another build's placements do not cut them
+    apart (`boundaries`); the code's own citations still do."""
+    if program.platform.name != "switch":
+        return []
+    from .aarch64 import track_addresses
+    out = []
+    for o, fs in users.items():
+        if o.section not in WRITABLE_SECTIONS or o.address in skip or len(fs) < 2 or max(fs) - min(fs) <= TIGHT:
+            continue
+        direct = True
+        for i in fs:
+            f = program.functions[i]
+            rows = track_addresses(program.platform.words(program.image, f.address, f.size), f.address, None)
+            if not any(o.address <= a < o.address + max(o.size, 1) for a, _ in rows.values()):
+                direct = False                         # its address comes from a slot: a global
+                break
+        if direct:
+            out.append((min(fs), max(fs), f"{o.name} ({o.section}) is formed directly, never through the GOT"))
+    return out
 
 
 def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
@@ -927,6 +953,7 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     joined = ev.joined(count)
     cited = ev.joined(count, ev.cited)
     first = ev.joined(count, ev.firsts)
+    reach = ev.joined(count, ev.reach)
     index = program.function_index
     taken = ((i, index[address]) for i, rows in program.refs.items() for _, address, kind in rows
              if kind == "addr" and address in index)     # a callback whose address the code takes, like a call
@@ -958,7 +985,7 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
         toward = ev.edges.get(row, lo)  # among equal places, the one nearest the evidence (else the earliest)
         if any(lo <= c.position <= hi for c in chosen):
             continue
-        candidates = [p for p in range(lo, hi + 1) if not joined[p]]
+        candidates = [p for p in range(lo, hi + 1) if not joined[p] and not (row in ev.borrowed and reach[p])]
         if not candidates and (lo, hi, because) in ev.direct:   # data one run uses across what the code itself
             candidates = [p for p in range(lo, hi + 1) if not cited[p] and not first[p]]   # separates is shared
             # (a template's table, an inline's static, a class's static member); a weak function is in its first
