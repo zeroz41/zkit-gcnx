@@ -156,6 +156,7 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     ev = Evidence(local, joins + firsts, separations, firsts=firsts)
     ev.reach = _direct_reach(program, users, shared | initialized)
     _file_evidence(program, ev, placed)
+    ev.reach = _cited_reach(ev)
     ev.joins += _table_joins(program, ev)
     _out_of_line_calls(program, ev)
     _deferred_tails(program, ev)
@@ -168,7 +169,7 @@ def _direct_reach(program: Program, users, skip: set[int]) -> list[tuple[int, in
     """Switch (a PIC module): code reaches a global of default visibility through its `.got` slot, its own unit's
     too; a writable object every user forms the address of directly (adrp, no slot) is a file's static (or
     hidden): all its users are the unit defining it, however far apart. Another build's placements do not cut them
-    apart (`boundaries`); the code's own citations still do."""
+    apart (`boundaries`) where the code in the span cites its file (`_cited_reach`); its own citations still do."""
     if program.platform.name != "switch":
         return []
     from .aarch64 import track_addresses
@@ -186,6 +187,15 @@ def _direct_reach(program: Program, users, skip: set[int]) -> list[tuple[int, in
         if direct:
             out.append((min(fs), max(fs), f"{o.name} ({o.section}) is formed directly, never through the GOT"))
     return out
+
+
+def _cited_reach(ev: Evidence) -> list[tuple[int, int, str]]:
+    """The `_direct_reach` spans whose code cites one file itself: with no citation in it, only another build's
+    files are there (a library's hidden global between two of its files is formed directly too); citing two, the
+    code itself shows the object is no one file's static."""
+    own = {i: f for i, f in ev.files.items() if i not in ev.placed and i not in ev.classed}
+    return [(lo, hi, because) for lo, hi, because in ev.reach
+            if len({own[i] for i in range(lo, hi + 1) if i in own}) == 1]
 
 
 def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
@@ -326,6 +336,7 @@ def _bindings(program: Program) -> tuple[set[int], set[int], list[bool]]:
 
 
 TAIL_REACH = 400    # functions: how far after a unit's deferred tail its next external definition is looked for
+INITIALIZER_SECTIONS = (".init_array", ".fini_array", ".preinit_array", ".ctors", ".dtors")
 
 
 def _deferred_tails(program: Program, ev: Evidence) -> None:
@@ -338,7 +349,11 @@ def _deferred_tails(program: Program, ev: Evidence) -> None:
     called it and inlined the call would have created it among the definitions, so not for a constructor's or a
     destructor's complete or base variant (a derived or enclosing class's destructor calls them), nor before a
     definition of the function's own class (its own methods call it). Weak is the module's mark (or the binding
-    a name came with); file-local is no entry in a module whose symbol table lists its other functions."""
+    a name came with); file-local is no entry in a module whose symbol table lists its other functions. Such a
+    function joins the code before it only when that code forms the address of data holding it: a unit can lose
+    all its definitions to the linker's garbage collection and keep only its tail (an inline virtual of a class
+    whose table later units emit too, the first copy kept) and its static initializer. A start-up list
+    (`.init_array`) holds initializers, created where their variable is or after everything: no tails."""
     if program.platform.name != "switch":
         return
     from .platform import demangle_itanium
@@ -354,13 +369,18 @@ def _deferred_tails(program: Program, ev: Evidence) -> None:
             target = index.get(address)
             if target is not None and target != user:
                 referred.add(target)
-    held = {index[pointee] for _, pointee in program.pointers if pointee in index}
-    tails = [i for i in sorted(held - referred) if functions[i].address in weak or i in local]
+    tables: dict[int, set] = collections.defaultdict(set)   # function -> the data holding it, not an initializer
+    for holder, pointee in program.pointers:              # list (`.init_array`: run at start-up, created where
+        table = program.object_at(holder) if pointee in index else None    # its variable is, or at the very end)
+        if table is not None and table.section not in INITIALIZER_SECTIONS:
+            tables[index[pointee]].add(table)
+    tails = [i for i in sorted(set(tables) - referred) if functions[i].address in weak or i in local]
     if not tails:
         return
     text = program.platform.text
-    for i in tails:                                      # in the unit of the code before it
-        if i:
+    users = program.users()
+    for i in tails:                     # in the unit of the code before it, when that code emits data holding it
+        if i and any(i - TAIL_REACH <= user < i for table in tables[i] for user in users.get(table, ())):
             ev.joins.append((i - 1, i, f"{functions[i].name} ({text(functions[i].address)}) is created only by "
                                        f"data, after {functions[i - 1].name}"))
     texts = dict(zip(tails, demangle_itanium([functions[i].name for i in tails])))

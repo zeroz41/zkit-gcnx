@@ -502,6 +502,23 @@ class DeferredTailTests(unittest.TestCase):
         units._deferred_tails(code, ev)
         self.assertEqual((ev.tails, ev.joins), ([], []))
 
+    def test_a_tail_joins_only_code_emitting_data_that_holds_it(self):
+        """6 is held only by a table code after it (8) forms: no join with 5 (its unit may have lost every
+        definition to the linker); an initializer list's function (2) is no tail."""
+        code = self._code()
+        init = DataObject(0x9800, 0x8, "lbl_9800", ".init_array")
+        later = DataObject(0x9400, 0x10, "lbl_9400", ".data")
+        address = lambda i: code.functions[i].address
+        code.pointers = [(0x9800, address(2)), (0x9008, address(3)), (0x9010, address(4)), (0x9400, address(6))]
+        table = code.object_at(0x9000)
+        code.object_at = lambda a: init if a == 0x9800 else later if a == 0x9400 else table if 0x9000 <= a < 0x9040 \
+            else None
+        code.users = lambda: {table: {1}, later: {8}}
+        ev = units.Evidence({}, [], [])
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            units._deferred_tails(code, ev)
+        self.assertEqual([(lo, hi) for lo, hi, _ in ev.joins], [(2, 3), (3, 4)])
+
     def test_a_named_function_a_table_holds_is_not_known_strong_without_the_module_s_listing(self):
         """Without a symbol table listing the module's functions, a name's binding is known only where it is weak:
         named 5 is strong, held 6 is not (its weak mark may not have come with its name), placeholders never."""
@@ -543,6 +560,16 @@ class DirectReachTests(unittest.TestCase):
         from zkit.platform import GameCube
         code.platform = GameCube()
         self.assertEqual(units._direct_reach(code, users, set()), [])
+
+
+    def test_a_span_counts_only_where_its_code_cites_one_file(self):
+        """Spans 0-10 (cites a.cpp, another build places b.cpp), 20-30 (only another build's files), 40-50 (cites
+        two files): only the first holds its users together."""
+        ev = units.Evidence({}, [], [])
+        ev.files = {2: "a.cpp", 5: "b.cpp", 22: "b.cpp", 25: "c.cpp", 42: "a.cpp", 48: "d.cpp"}
+        ev.placed = {5, 22, 25}
+        ev.reach = [(0, 10, "s"), (20, 30, "t"), (40, 50, "u")]
+        self.assertEqual(units._cited_reach(ev), [(0, 10, "s")])
 
 
 class AnotherBuildNameTests(unittest.TestCase):
