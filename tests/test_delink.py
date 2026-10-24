@@ -2,6 +2,7 @@ import support  # noqa: F401  (isolates config, cache and state)
 import json
 import shutil
 import subprocess
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -162,6 +163,40 @@ class LabelLiteralTests(unittest.TestCase):
         self.assertTrue(same["exact"], same)
         self.assertFalse(other["exact"])
         self.assertTrue(unread["reloc_only"] and not unread["exact"])
+
+    def test_resolved_aarch64_jump_table_matches_a_relocated_one(self):
+        """A split object holds an AArch64 jump table resolved (s32 entries relative to the table, no relocations);
+        the compiled one relocates each entry (R_AARCH64_PREL32, clang's `.word .LBB - .LJTI`). Read at the
+        original addresses `.note.split` records, the same case targets are the same table; one other target is a
+        difference."""
+        from zkit import objects
+        code = bytes.fromhex("08000090" "08010091" "1fd61fd6" "c0035fd6" "c0035fd6" "c0035fd6")
+        cases, fn, table = (0x0C, 0x10, 0x14), 0x7100001000, 0x7100002000
+        f = {"name": "f", "section": ".text", "value": 0, "size": len(code), "kind": "func", "bind": "global",
+             "address": fn}
+        label = {"name": "lbl_7100002000", "section": ".rodata", "value": 0, "size": 12, "kind": "object",
+                 "bind": "global", "address": table}
+        entries = b"".join(struct.pack("<i", fn + case - table) for case in cases)
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "t.o"
+            delink.write_object(delink.AARCH64, [(".text", 1, code, 4), (".rodata", 1, entries, 4)], [f, label],
+                                {".text": [(0, 275, 1, 0), (4, 277, 1, 0)]}, target)
+
+            def compiled(name: str, targets: tuple) -> Path:
+                g = dict(f, section=".text.f", address=0)
+                jt = {"name": "jt", "section": ".rodata.f", "value": 0, "size": 0, "kind": "notype",
+                      "bind": "local", "address": 0}
+                path = Path(folder) / name
+                delink.write_object(delink.AARCH64, [(".text.f", 1, code, 4), (".rodata.f", 1, bytes(12), 4)],
+                                    [g, jt], {".text.f": [(0, 275, 1, 0), (4, 277, 1, 0)],
+                                              ".rodata.f": [(4 * k, 261, 0, case + 4 * k)
+                                                            for k, case in enumerate(targets)]}, path)
+                return path
+            same = objects.function_diff(target, compiled("b.o", cases), "f")
+            other = objects.function_diff(target, compiled("c.o", (0x0C, 0x14, 0x14)), "f")
+        self.assertTrue(same["exact"], same)
+        self.assertTrue(other["reloc_only"] and not other["exact"], other)
+        self.assertIn("jump table entries differ: +0x4 -> f+0x10 vs f+0x14", other["rows"][0].get("note", ""), other)
 
 
 if __name__ == "__main__":

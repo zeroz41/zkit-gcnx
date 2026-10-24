@@ -229,12 +229,46 @@ def _code_targets(elf: Elf, index: int, addend: int, length: int) -> list[tuple]
             continue
         target = elf.symbols[reloc.symbol]
         where = target.value + reloc.addend
+        if elf.machine == "aarch64" and reloc.type == R_AARCH64_PREL32:
+            where -= reloc.offset - start  # clang's `.word .LBB - .LJTI`: the code adds the entry to the table
         owner = next((f for f in functions if f.section == target.section and f.value <= where < f.value + f.size),
                      None)
         if owner is None:
             return None
         out.append((reloc.offset - start, owner.name, where - owner.value))
+    if not out and elf.machine == "aarch64" and not section.flags & SHF_WRITE:
+        return _resolved_targets(elf, index, start, length)
     return out or None
+
+
+R_AARCH64_PREL32 = 261
+
+
+def _resolved_targets(elf: Elf, index: int, start: int, length: int) -> list[tuple] | None:
+    """`_code_targets` of an AArch64 jump table a split object holds resolved (s32 entries, each relative to the
+    table, and no relocations), read at the original addresses its `.note.split` records: the same (offset,
+    function, offset into it) a compiled table's relocations give. None without addresses, or when an entry lands
+    in no function (the bytes are not a table of this unit's code)."""
+    from .apply import _virtual
+    virtual, symbol = _virtual(elf), elf.symbols[index]
+    if len(virtual) != len(elf.symbols) or length % 4:
+        return None
+    placed = [i for i in [index] + list(range(len(elf.symbols))) if elf.symbols[i].section == symbol.section
+              and elf.symbols[i].kind != "section" and virtual[i]]
+    if not placed:
+        return None
+    base = virtual[placed[0]] - elf.symbols[placed[0]].value + start  # the table's original address
+    functions = [(virtual[i], s) for i, s in enumerate(elf.symbols) if s.kind == "func" and s.size and virtual[i]]
+    data, out = elf.data(elf.sections[symbol.section])[start:start + length], []
+    if len(data) != length:
+        return None
+    for offset in range(0, length, 4):
+        where = base + struct.unpack_from(elf.endian + "i", data, offset)[0]
+        owner = next(((va, f) for va, f in functions if va <= where < va + f.size), None)
+        if owner is None:
+            return None
+        out.append((offset, owner[1].name, where - owner[0]))
+    return out
 
 
 def _tables(a: Elf, xa: tuple, b: Elf, xb: tuple) -> list[tuple]:
