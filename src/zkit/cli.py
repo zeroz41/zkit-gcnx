@@ -168,7 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--unit", action="store_true", help="the candidate is the whole unit (query: the unit or an "
                    "address in it): every function compared and, on Switch, the object linked into the original; "
                    "records no attempts")
-    c = add("sweep", help="Switch near-misses: rewrite one function's source site by site (operand order, compound "
+    c = add("sweep", help="Near-misses (Switch and GameCube): rewrite one function's source site by site (operand order, compound "
                           "assignment, ++ form, if/else, counter type, loop direction, statement order), compile "
                           "each with its unit's command and climb to the closest; writes the best text, records "
                           "no attempts")

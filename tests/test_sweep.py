@@ -139,3 +139,15 @@ class ClimbTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_mwcc_parse_flags(tmp_path):
+    from zkit.sweep import parse_command
+    argv = ["build/tools/wibo", "build/compilers/GC/2.6/mwcceppc.exe", "-nodefaults", "-proc", "gekko", "-i",
+            "build/GPOE8P/include", "-i", "include", "-d", "VERSION=1", "-char", "unsigned", "-lang=c++", "-c",
+            "src/a.cpp", "-o", "build/a"]
+    cmd = parse_command(argv, "clang++", tmp_path / "parse.cpp", "f")
+    assert "--target=powerpc-eabi" in cmd and "-funsigned-char" in cmd
+    assert "-Ibuild/GPOE8P/include" in cmd and "-Iinclude" in cmd and "-DVERSION=1" in cmd
+    assert cmd[cmd.index("-x") + 1] == "c++" and (tmp_path / "mwcc_intrinsics.h").exists()
+    assert "-proc" not in cmd and "gekko" not in cmd

@@ -1,4 +1,4 @@
-"""Variant sweep for clang near-misses (Switch): the permuter's job where it does not run.
+"""Variant sweep for near-misses (Switch clang, GameCube CodeWarrior): single-site source rewrites.
 
 A function whose candidate differs from the original only by register choice, instruction order or operand
 order usually has a source spelling that clang compiles to the original's code: the other operand order of a
@@ -84,12 +84,13 @@ def definitions(ast_text: str) -> list[dict]:
             out.append(node)
 
 
-def body_of(decls: Iterable[dict], text: str, name: str) -> dict | None:
-    """The body (CompoundStmt) of the definition of `name` (the function's unqualified name) in the parsed text."""
+def body_of(decls: Iterable[dict], text: str, name: str, symbol: str | None = None) -> dict | None:
+    """The body (CompoundStmt) of the definition of `name` (the function's unqualified name, or its `symbol` when
+    the source spells the mangled name with C linkage) in the parsed text."""
     for decl in decls:
         if decl.get("kind") not in ("FunctionDecl", "CXXMethodDecl", "CXXConstructorDecl", "CXXDestructorDecl"):
             continue
-        if decl.get("name") != name:
+        if decl.get("name") not in (name, symbol):
             continue
         body = next((c for c in _children(decl) if c.get("kind") == "CompoundStmt"), None)
         span = _span(body) if body else None
@@ -422,6 +423,7 @@ def _adjacent(text: str, kids: list[dict], out: list[Rewrite]) -> None:
 
 
 REGISTERS = 0x001F03FF          # Rm, Rn, Rd/Rt: what register allocation changes in most AArch64 encodings
+PPC_REGISTERS = 0x03FFF800      # rD/rS, rA, rB (frD, frA, frB): the same for PowerPC's big-endian words
 
 
 @dataclass(frozen=True)
@@ -464,16 +466,19 @@ def score(original_path: Path, built_path: Path, name: str, labels=None) -> Scor
     if diff.get("exact"):
         return Score(True, 0, 0, 0)
     streams = []
+    mask = REGISTERS
     for path in (original_path, built_path):
         elf = Elf.load(path)
+        if elf.endian == ">":
+            mask = PPC_REGISTERS
         symbol = objects._find(elf, name)
         section = elf.sections[symbol.section]
         raw = elf.data(section)[symbol.value:symbol.value + symbol.size]
         relocated = objects._relocs(elf, section, symbol.value, symbol.value + symbol.size, {})
-        words = list(struct.unpack(f"<{len(raw) // 4}I", raw[:len(raw) // 4 * 4]))
+        words = list(struct.unpack(f"{elf.endian}{len(raw) // 4}I", raw[:len(raw) // 4 * 4]))
         words = [w >> 24 | 1 << 40 if offset * 4 in relocated else w for offset, w in enumerate(words)]
         streams.append(words)
-    shapes = [[w & ~REGISTERS if w < 1 << 32 else w for w in words] for words in streams]
+    shapes = [[w & ~mask if w < 1 << 32 else w for w in words] for words in streams]
     gap = abs(diff.get("size", 0) - diff.get("compiled_size", 0))
     return Score(False, _distance(*shapes), _distance(*streams), gap)
 
@@ -533,8 +538,61 @@ def host_clang() -> str | None:
     return os.environ.get("ZKIT_SWEEP_CLANG") or shutil.which("clang++") or shutil.which("clang")
 
 
+MWCC_SHIM = """\
+double __fabs(double); float __fabsf(float); double __frsqrte(double); float __fres(float);
+double __fnabs(double); float __fnabsf(float); double __fmadd(double, double, double);
+float __fmadds(float, float, float); double __fmsub(double, double, double); float __fmsubs(float, float, float);
+double __fnmadd(double, double, double); float __fnmadds(float, float, float); double __fnmsub(double, double, double);
+float __fnmsubs(float, float, float); double __fsel(double, double, double); float __fsels(float, float, float);
+int __cntlzw(unsigned int); int __rlwinm(int, int, int, int); int __rlwimi(int, int, int, int, int);
+void __sync(void); void __eieio(void); void __isync(void); void __dcbf(void *, int); void __dcbt(void *, int);
+void __dcbst(void *, int); void __dcbz(void *, int); void __dcbi(void *, int); void __icbi(void *, int);
+int __lhbrx(void *, int); int __lwbrx(void *, int); void __sthbrx(unsigned short, void *, int);
+void __stwbrx(unsigned int, void *, int); unsigned int __mulhwu(unsigned int, unsigned int);
+int __mulhw(int, int); void *__alloca(unsigned long); void *__memcpy(void *, const void *, unsigned long);
+"""
+
+
+def _mwcc_parse_flags(argv: list[str], shim: Path) -> list[str]:
+    """CodeWarrior's flags as a host clang's: big-endian PowerPC, its include paths, defines and language."""
+    keep = ["--target=powerpc-eabi", "-nostdinc", "-fno-builtin", "-fno-short-enums", "-fno-exceptions",
+            "-fno-rtti", "-fsigned-char", "-include", str(shim)]
+    lang = None
+    args = argv[1:]
+    for i, arg in enumerate(args):
+        nxt = args[i + 1] if i + 1 < len(args) else ""
+        if arg in ("-i", "-I", "-ir") and nxt:
+            keep.append(f"-I{nxt}")
+        elif arg.startswith("-i") and len(arg) > 2 and not arg.startswith("-inline"):
+            keep.append(f"-I{arg[2:]}")
+        elif arg.startswith("-I") and len(arg) > 2 and arg != "-I-":
+            keep.append(arg)
+        elif arg in ("-d", "-D", "-define") and nxt:
+            keep.append(f"-D{nxt}")
+        elif arg.startswith("-D") and len(arg) > 2:
+            keep.append(arg)
+        elif arg.startswith("-lang"):
+            lang = arg.split("=", 1)[-1] if "=" in arg else nxt
+        elif arg == "-char" and nxt == "unsigned":
+            keep[keep.index("-fsigned-char")] = "-funsigned-char"
+    if lang in ("c++", "cplus", "cpp", "ec++"):
+        keep += ["-x", "c++", "-std=c++98"]
+    elif lang == "c":
+        keep += ["-x", "c"]
+    return keep
+
+
 def parse_command(argv: list[str], clang: str, source: Path, name: str) -> list[str]:
     """The unit's compile flags (target, standard, includes, defines) for a syntax-only JSON dump of `name`."""
+    if any("mwcc" in Path(a).name.lower() for a in argv[:3]):
+        shim = source.parent / "mwcc_intrinsics.h"
+        if not shim.exists():
+            shim.write_text(MWCC_SHIM, encoding="utf-8")
+        keep = _mwcc_parse_flags(argv, shim)
+        if source.suffix in (".cpp", ".cp", ".cc", ".cxx") and "-x" not in keep:
+            keep += ["-x", "c++", "-std=c++98"]
+        return [clang, *keep, "-fsyntax-only", "-Wno-everything", "-ferror-limit=0", "-Xclang", "-ast-dump=json",
+                "-Xclang", f"-ast-dump-filter={name}", str(source)]
     keep: list[str] = []
     skip = False
     for i, arg in enumerate(argv[1:], 1):
@@ -586,7 +644,7 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
         path.write_text(source, encoding="utf-8")
         dump = subprocess.run(parse_command(argv, clang, path, simple), capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=120)
-        body = body_of(definitions(dump.stdout), source, simple)
+        body = body_of(definitions(dump.stdout), source, simple, row["name"])
         return rewrites(source, body) if body else []
 
     def evaluate(source: str) -> Score:
