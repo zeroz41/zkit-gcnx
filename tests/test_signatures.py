@@ -697,6 +697,65 @@ class SwitchSignatureTests(unittest.TestCase):
             name = f"_Z{3 + len(c)}get{c}Pvi"
             self.assertEqual(found.get(at[name]), (name, "column"))
 
+    def test_lone_call_pairs_only_where_named_calls_agree(self):
+        """A changed caller's one unnamed callee is its donors' one unclaimed callee, unless a function it calls
+        that is named is one its donors never call: then an update inlined or outlined calls, and the one left on
+        each side need not be one function. Here the target's `driver` also calls `gamma_`, the donor's does not,
+        so `alpha` stays unnamed; calling `gamma_` on both sides, the pairing names it."""
+        bodies = ("{ int t = 1; for (int i = 0; i < n; i++) t = t * 31 + (v[i] >> 2) - i;\n"
+                  "  for (int i = n - 1; i >= 0; i--) t ^= v[i] * (i + 3); return t ^ 0x1234; }\n",
+                  "{ int t = 9; for (int i = 0; i < n; i++) t = t * 17 - (v[i] << 3) + i;\n"
+                  "  for (int i = 0; i < n; i++) t += v[i] * v[i]; return t ^ 0x4321; }\n")
+        source = ("#define NI __attribute__((noinline))\n"
+                  "int first(int *v, int n) " + bodies[0] +
+                  "NI int gamma_(int x) { return ((x * 5 + 2) ^ (x >> 3)) - (x & 0x7C) * (x | 9); }\n"
+                  "NI int alpha(int x) { return ((x * 3 + 1) ^ (x >> 7)) - (x & 0x3C) * (x | 5)@A@; }\n@GONE@"
+                  "int driver(int *v, int n) { int t = alpha(n); @G@ return t * 9 + v[0]; }\n"
+                  "int last(int *v, int n) " + bodies[1])
+        gone = "NI int gone(int x) { return ((x * 7 - 3) ^ (x << 2)) + (x & 0x1F) * (x | 3); }\n"
+        for donor_calls, target_calls, named in (("", "t ^= gamma_(t);", False),
+                                                 ("t ^= gamma_(t);", "t ^= gamma_(t); t += v[1] * 3;", True)):
+            with self.subTest(donor_calls=donor_calls):
+                elf, symbols, _ = self.module("donor", source.replace("@G@", donor_calls).replace("@A@", "")
+                                              .replace("@GONE@", gone), hide=False)
+                donor = signatures.build("earlier", elf, symbols)
+                elf, symbols, at = self.module("target", source.replace("@G@", target_calls)
+                                               .replace("@A@", " + 9").replace("@GONE@", ""), hide=True)
+                program = Program.from_symbols(Switch(), elf, symbols)
+                seeds = {at[n]: n for n in ("_Z6driverPii", "_Z6gamma_i")}
+                found = {p.address: (p.name, p.evidence)
+                         for p in signatures.propose(program, [donor], seeds=seeds)}
+                if named:
+                    self.assertEqual(found.get(at["_Z5alphai"]), ("_Z5alphai", "call"))
+                else:
+                    self.assertNotIn(at["_Z5alphai"], found)
+
+    def test_similar_leaves_structor_variants(self):
+        """Code likeness does not pair a constructor or destructor while another variant of it (C1/C2, D0/D1/D2)
+        is open in the same gap: one variant's code is the other's inlined, as alike to either. A class with a
+        virtual base has complete (C1) and base (C2) constructors, both the changed body; `middle` in the same
+        gap still pairs by likeness."""
+        source = ("void release(int x);\n"
+                  "int first(int *v, int n) { int t = 1; for (int i = 0; i < n; i++) t = t * 31 + (v[i] >> 2) - i;\n"
+                  "  for (int i = n - 1; i >= 0; i--) t ^= v[i] * (i + 3); return t ^ 0x1234; }\n"
+                  "struct V { int q; V(); };\n"
+                  "struct Big : virtual V { Big(int *a, int m); int *v; int n; int k; };\n"
+                  "Big::Big(int *a, int m) : v(a), n(m), k(m * 3) {\n"
+                  "  for (int i = 0; i < n; i++) { release(v[i] * 3 + k); v[i] = i ^ k; }\n"
+                  "  for (int i = n - 1; i > 0; i--) { release((v[i] - v[i - 1]) << 2); k += v[i]; } release(k @X@); }\n"
+                  "int middle(int *v, int n) { int t = 3; for (int i = 0; i < n; i++) t = t * 13 + (v[i] ^ (i << 1));\n"
+                  "  for (int i = 1; i < n; i++) t -= v[i] * v[i - 1] @X@; return t; }\n"
+                  "int last(int *v, int n) { int t = 9; for (int i = 0; i < n; i++) t = t * 17 - (v[i] << 3) + i;\n"
+                  "  for (int i = 0; i < n; i++) t += v[i] * v[i]; return t ^ 0x4321; }\n")
+        elf, symbols, _ = self.module("donor", source.replace("@X@", ""), hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        elf, symbols, at = self.module("target", source.replace("@X@", "+ 7"), hide=True)
+        found = {p.address: (p.name, p.evidence)
+                 for p in signatures.propose(Program.from_symbols(Switch(), elf, symbols), [donor])}
+        self.assertEqual(found.get(at["_Z6middlePii"]), ("_Z6middlePii", "layout+code"))
+        for name in ("_ZN3BigC1EPii", "_ZN3BigC2EPii"):
+            self.assertNotEqual(found.get(at[name], (None, None))[1], "layout+code")
+
     def test_data_pairs_in_order(self):
         """An update changed the only function that uses three globals and added a fourth use: its data
         references, in order against its donor's between the ones both name (a text here), name the globals before
