@@ -81,6 +81,8 @@ class Evidence:
     roots: list[str] = field(default_factory=list)
     apart: list[tuple[int, int, str]] = field(default_factory=list)   # separations placed after all the others:
                                                                       # only where those left none
+    tails: list[tuple[int, int, str]] = field(default_factory=list)   # separations placed after the stated ones,
+                                                                      # before `apart`: only where those left none
 
     def joined(self, count: int, joins: list[tuple[int, int, str]] | None = None) -> list[bool]:
         """joined[p]: a boundary before function p would split one unit (by `joins`, default all of them)."""
@@ -94,6 +96,16 @@ class Evidence:
             running += cover[p]
             out[p] = running > 0
         return out
+
+
+def _shared_data(program: Program) -> set[int]:
+    """Switch (ELF): data the module marks weak (a template's or an inline class's table, an inline function's
+    static, its guard) is compiled into every unit using it and kept from the first: the functions using it are
+    no one unit's for it."""
+    if program.platform.name != "switch":
+        return set()
+    weak = set(getattr(program.image, "weak", ()))
+    return {o.address for o in getattr(program, "objects", ()) if o.scope == "weak" or o.address in weak}
 
 
 def _initialized(program: Program) -> set[int]:
@@ -120,8 +132,10 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     initialized = _initialized(program)
     per_unit = program.platform.literals_per_unit
     text = program.platform.text
+    shared = _shared_data(program)
     joins = [(fs[0], fs[-1], f"{o.name} ({o.section}) is one unit's") for o, fs in local.items()
-             if fs[-1] > fs[0] and (o.section in WRITABLE_SECTIONS or per_unit) and o.address not in initialized]
+             if fs[-1] > fs[0] and (o.section in WRITABLE_SECTIONS or per_unit) and o.address not in initialized
+             and o.address not in shared]
     separations = []
     if per_unit:
         copies: dict[tuple[str, bytes], list[DataObject]] = collections.defaultdict(list)
@@ -142,6 +156,7 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     _file_evidence(program, ev, placed)
     ev.joins += _table_joins(program, ev)
     _out_of_line_calls(program, ev)
+    _deferred_tails(program, ev)
     _initializer_ends(program, ev)
     _start_up_object(program, ev)
     return ev
@@ -262,6 +277,78 @@ def _out_of_line_calls(program: Program, ev: Evidence) -> None:
             lo, hi = min(caller, callee) + 1, max(caller, callee)
             ev.apart.append((lo, hi, f"{functions[caller].name} calls {function.name} "
                                      f"({function.size} bytes) without inlining it"))
+
+
+def _bindings(program: Program) -> tuple[set[int], set[int], list[bool]]:
+    """(weak addresses, file-local function indexes, strong[index]): weak is the module's mark (or the binding a
+    name came with); file-local is no entry in a module whose symbol table lists its other functions; strong is
+    an external definition either lists (a thunk, a compiler's own function never is). Without the module's
+    listing, a name's binding is known only where it is weak, so a named function a table holds (an inline virtual
+    whose weak mark did not come with its name, one the linker folded with another) is not known strong."""
+    from .score import placeholder
+    functions = program.functions
+    weak = set(getattr(program.image, "weak", ())) | {f.address for f in functions if f.scope == "weak"}
+    bound = getattr(program.image, "symbols", None) or {}
+    listing = len(bound) * 2 >= len(functions)           # the module lists its external functions
+    local = {i for i, f in enumerate(functions) if f.scope == "local" or listing and f.address not in bound}
+    held = set() if listing else {pointee for _, pointee in getattr(program, "pointers", ())}
+    strong = [f.address not in weak and i not in local
+              and (f.address in bound if listing else not placeholder(f.name) and f.address not in held)
+              and not f.name.startswith(("_ZTh", "_ZTv", "_ZTc", "_GLOBAL__", "__cxx_"))
+              for i, f in enumerate(functions)]
+    return weak, local, strong
+
+
+TAIL_REACH = 400    # functions: how far after a unit's deferred tail its next external definition is looked for
+
+
+def _deferred_tails(program: Program, ev: Evidence) -> None:
+    """Switch (clang): a unit's functions come out in the order their LLVM functions were created, at a function's
+    definition or first reference. An external definition is created at the latest where it is defined, but an
+    inline, a template instance or a file-local function only data refers to (a class's table, a static table of
+    callbacks) is created when that data is emitted, after all of the unit's definitions: it is in its unit's
+    tail, in the unit of the definitions before it. So an external definition after it is another unit's: a
+    boundary lies between the two. Code that once
+    called it and inlined the call would have created it among the definitions, so not for a constructor's or a
+    destructor's complete or base variant (a derived or enclosing class's destructor calls them), nor before a
+    definition of the function's own class (its own methods call it). Weak is the module's mark (or the binding
+    a name came with); file-local is no entry in a module whose symbol table lists its other functions."""
+    if program.platform.name != "switch":
+        return
+    from .platform import demangle_itanium
+    functions, index = program.functions, program.function_index
+    weak, local, strong = _bindings(program)
+    if not any(strong) or not (weak or local):
+        return
+    referred = set()                                     # functions some code calls or takes the address of
+    for caller, callees in program.calls.items():
+        referred.update(c for c in callees if c != caller)
+    for user, rows in program.refs.items():
+        for _, address, _ in rows:
+            target = index.get(address)
+            if target is not None and target != user:
+                referred.add(target)
+    held = {index[pointee] for _, pointee in program.pointers if pointee in index}
+    tails = [i for i in sorted(held - referred) if functions[i].address in weak or i in local]
+    if not tails:
+        return
+    text = program.platform.text
+    for i in tails:                                      # in the unit of the code before it
+        if i:
+            ev.joins.append((i - 1, i, f"{functions[i].name} ({text(functions[i].address)}) is created only by "
+                                       f"data, after {functions[i - 1].name}"))
+    texts = dict(zip(tails, demangle_itanium([functions[i].name for i in tails])))
+    owner = _function_classes(program, qualifiers=True)
+    for i in tails:
+        parts = _qualified(texts[i]) if texts.get(i) else None
+        if parts and len(parts) > 1 and parts[-1].lstrip("~") == re.sub(r"<.*>$", "", parts[-2]) and \
+                not re.search(r"D0E", functions[i].name):  # a complete or base structor variant
+            continue
+        after = next((k for k in range(i + 1, min(i + 1 + TAIL_REACH, len(functions))) if strong[k]), None)
+        if after is None or (owner.get(i) and owner.get(i) == owner.get(after)):
+            continue
+        ev.tails.append((i + 1, after, f"{functions[i].name} ({text(functions[i].address)}) is created only by "
+                                       f"data, at its unit's end; {functions[after].name} is defined before it"))
 
 
 def _first_users(program: Program) -> list[tuple[int, int, str]]:
@@ -784,6 +871,55 @@ SHORT_CALL = 16     # functions: a call this close is usually to a static helper
 CLASS_SPAN = 200    # functions: a class whose own functions spread wider is split across units anyway
 
 
+def _held_reach(program: Program) -> list[tuple[int, int]]:
+    """Switch: a function no strong binding names that only data holds (a static table of callbacks, a class's
+    table) is created when that data is, with the code using the data, and one only code takes the address of (a
+    callback) with that code: like a call, the two are best not parted, however far apart (within `TAIL_REACH`).
+    A class's own table (no weak mark) is emitted with the class's key function: only the class's own code counts
+    for it, not a derived class's constructor storing it. One several tables hold is kept from the first unit
+    emitting one: only the earliest code using any counts, and only code before it."""
+    if program.platform.name != "switch" or not getattr(program, "pointers", None):
+        return []
+    _, _, strong = _bindings(program)
+    shared = _shared_data(program)
+    index = program.function_index
+    held: dict[DataObject, set[int]] = collections.defaultdict(set)
+    for holder, pointee in program.pointers:
+        target = index.get(pointee)
+        if target is not None and not strong[target]:
+            found = program.object_at(holder)
+            if found is not None:
+                held[found].add(target)
+    if not held:
+        return []
+    referred = set()
+    for caller, callees in program.calls.items():
+        referred.update(c for c in callees if c != caller)
+    takers: dict[int, set[int]] = collections.defaultdict(set)   # a callback only code takes the address of
+    for user, rows in program.refs.items():
+        for _, address, _ in rows:
+            target = index.get(address)
+            if target is not None and target != user and not strong[target]:
+                takers[target].add(user)
+    out = [(min(i, j), max(i, j)) for j, users in takers.items() if j not in referred
+           for i in users if SHORT_CALL < abs(i - j) <= TAIL_REACH]
+    own = [o for o in held if o.name.startswith("_ZTV") and o.address not in shared]   # a class's own table
+    if own:
+        from .platform import demangle_itanium
+        owner = _function_classes(program, qualifiers=True)
+        classes = {o: (text or "").removeprefix("vtable for ").replace("::", "/")
+                   for o, text in zip(own, demangle_itanium([o.name for o in own]))}
+    first: dict[int, int] = {}                        # held function -> the earliest code using data holding it
+    for o, users in program.users().items():
+        if o in held and o.name.startswith("_ZTV") and o.address not in shared:
+            users = {i for i in users if owner.get(i) == classes[o]}
+        for j in held.get(o, ()):
+            if j not in referred and users:
+                first[j] = min(first.get(j, j), min(users))
+    out += [(i, j) for j, i in first.items() if 0 < j - i <= TAIL_REACH]
+    return out
+
+
 def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     """The boundaries the evidence requires, each where the fewest references, classes and short calls cross."""
     ev = ev or evidence(program)
@@ -794,9 +930,9 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     index = program.function_index
     taken = ((i, index[address]) for i, rows in program.refs.items() for _, address, kind in rows
              if kind == "addr" and address in index)     # a callback whose address the code takes, like a call
-    calls = _cover(((min(i, j), max(i, j)) for i, j in
+    calls = _cover([(min(i, j), max(i, j)) for i, j in
                     [(i, j) for i, callees in program.calls.items() for j in callees] + list(taken)
-                    if 0 < abs(i - j) <= SHORT_CALL), count)
+                    if 0 < abs(i - j) <= SHORT_CALL] + _held_reach(program), count)
     members: dict[str, list[int]] = collections.defaultdict(list)
     for index, cls in _function_classes(program).items():
         members[cls].append(index)
@@ -815,8 +951,9 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     rest = sorted(set(rows) - set(stated), key=lambda r: (r[1] - r[0], r[0]))
     apart = sorted(set(ev.apart), key=lambda r: (r[1] - r[0], r[0]))
     apart_rows = set(apart)
+    tails = sorted(set(ev.tails) - set(rows), key=lambda r: (r[1] - r[0], r[0]))
     owner = _function_classes(program, qualifiers=True) if apart else {}
-    for row in [r for r in stated if r not in ev.edges] + [r for r in stated if r in ev.edges] + rest + apart:
+    for row in [r for r in stated if r not in ev.edges] + [r for r in stated if r in ev.edges] + rest + tails + apart:
         lo, hi, because = row
         toward = ev.edges.get(row, lo)  # among equal places, the one nearest the evidence (else the earliest)
         if any(lo <= c.position <= hi for c in chosen):
@@ -954,12 +1091,8 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
             folder = name.rpartition("/")[0]
             name, how = f"{folder + '/' if folder else ''}unit_{text(functions[first].address)[2:]}.cpp", "placeholder"
         named.append((first, end, name, how))
-    # A file's code is one run: a unit only another build names after the file its neighbour's own code cites is
-    # another file, which that build had not told apart.
-    for k, (first, end, name, how) in enumerate(named):
-        if how == "another build" and any(0 <= j < len(named) and named[j][2] == name and
-                                          named[j][3] == "file string" for j in (k - 1, k + 1)):
-            named[k] = (first, end, *_unnamed(program, class_of, first, end, qualified))
+    named = _not_another_build_s_file(program, named, lambda first, end: _unnamed(program, class_of, first, end,
+                                                                                    qualified))
     named = _in_neighbours_folder(named, held)
     for first, end, name, how in named:
         if (first, end) not in held:
@@ -1018,6 +1151,21 @@ COMMON_DEPTH = 2         # folders two files' paths must share to place a unit b
                          # top folder cite paths from their own roots (`sources/voice_handle_api.cpp`)
 
 
+def _not_another_build_s_file(program: Program, named: list, rename) -> list:
+    """A file's code is one run: a unit only another build names after the file its neighbour's own code cites is
+    another file, which that build had not told apart. On the Switch (one linker run keeping each object's
+    sections in order), so is one apart from the unit whose own code cites that file, across other files' units.
+    `rename(first, end)` names it as a unit no file names."""
+    cited = {name for _, _, name, how in named if how == "file string"} if program.platform.name == "switch" \
+        else set()
+    out = list(named)
+    for k, (first, end, name, how) in enumerate(named):
+        if how == "another build" and (name in cited or any(
+                0 <= j < len(named) and named[j][2] == name and named[j][3] == "file string" for j in (k - 1, k + 1))):
+            out[k] = (first, end, *rename(first, end))
+    return out
+
+
 def _sort_key(name: str) -> str:
     """A file name as a Windows build orders a folder's files: case folded to upper, so `_` sorts after letters."""
     return name.upper()
@@ -1030,10 +1178,12 @@ def _in_neighbours_folder(named: list, held: dict) -> list:
     deepest folder both are in (a folder-by-folder walk lists nothing outside a folder between two of its files),
     when that is deeper than the top folder.
     The files' own order is the evidence, so only a link whose consecutive files of one folder are almost all in
-    name order counts; a hand-ordered link (a CodeWarrior project's) places nothing."""
+    name order counts; a hand-ordered link (a CodeWarrior project's) places nothing. The files the code itself
+    cites decide it, where there are any: another build's units can be named after their classes."""
     files = [k for k, (_, _, name, how) in enumerate(named)
              if how not in ("class", "placeholder") and "/" in name and not UNNAMED.match(name)]
-    pairs = [(named[a][2], named[b][2]) for a, b in zip(files, files[1:])
+    cited = [k for k in files if named[k][3] == "file string"] or files   # the code's own file names: another
+    pairs = [(named[a][2], named[b][2]) for a, b in zip(cited, cited[1:])   # build's can be its class names
              if named[a][2].rpartition("/")[0] == named[b][2].rpartition("/")[0]]
     ordered = sum(_sort_key(a) < _sort_key(b) for a, b in pairs)
     if len(pairs) < SORTED_PAIRS or ordered < SORTED_SHARE * len(pairs):

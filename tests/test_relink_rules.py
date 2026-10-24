@@ -466,6 +466,90 @@ class NeighbourFolderTests(unittest.TestCase):
         self.assertEqual(out[25][2], "unit_7100001000.cpp")
 
 
+class DeferredTailTests(unittest.TestCase):
+    """clang creates an inline or file-local function only data refers to when it emits that data, after every
+    definition of its unit (`_deferred_tails`, `_held_reach`, `_shared_data`)."""
+
+    def _code(self):
+        """0-1 a.cpp's definitions, 2 weak and 3 file-local (in no symbol table), only a table holds them; 4 the
+        weak base destructor of a member template, also only held; 5 b.cpp's first definition; 6 an inline of
+        class B held only by B's table, before 7, B's definition; 8-9 strong."""
+        code = _Code(10, weak=[2, 4, 6], unlisted=[3])
+        names = {2: "_ZN1A6inlineEv", 4: "_ZN1TIiED2Ev", 5: "_ZN1B4makeEv", 6: "_ZN1B4peekEv", 7: "_ZN1B3useEv"}
+        from dataclasses import replace
+        code.functions = [replace(f, name=names.get(i, f.name)) for i, f in enumerate(code.functions)]
+        table = DataObject(0x9000, 0x40, "lbl_9000", ".data")
+        address = lambda i: code.functions[i].address
+        code.pointers = [(0x9000, address(2)), (0x9008, address(3)), (0x9010, address(4)), (0x9018, address(6))]
+        code.object_at = lambda a: table if 0x9000 <= a < 0x9040 else None
+        code.users = lambda: {table: {1}}
+        code.refs = {1: [(0, 0x9000, "addr")]}
+        code.calls = {}
+        return code
+
+    def test_an_external_definition_after_a_unit_s_tail_starts_another_unit(self):
+        """2 and 3 are a.cpp's tail: a boundary between them and 5, and none before them; 4 (a base destructor a
+        derived destructor could have called and inlined) and 6 (before its own class's definition) cut
+        nothing."""
+        code = self._code()
+        ev = units.Evidence({}, [], [])
+        with unittest.mock.patch.object(units, "_function_classes", return_value={6: "B", 7: "B"}):
+            units._deferred_tails(code, ev)
+        self.assertEqual([(lo, hi) for lo, hi, _ in ev.tails], [(3, 5), (4, 5)])
+        self.assertEqual([(lo, hi) for lo, hi, _ in ev.joins], [(1, 2), (2, 3), (3, 4), (5, 6)])
+        from zkit.platform import GameCube
+        code.platform, ev = GameCube(), units.Evidence({}, [], [])
+        units._deferred_tails(code, ev)
+        self.assertEqual((ev.tails, ev.joins), ([], []))
+
+    def test_a_named_function_a_table_holds_is_not_known_strong_without_the_module_s_listing(self):
+        """Without a symbol table listing the module's functions, a name's binding is known only where it is weak:
+        named 5 is strong, held 6 is not (its weak mark may not have come with its name), placeholders never."""
+        code = self._code()
+        code.image.symbols = {}
+        weak, local, strong = units._bindings(code)
+        self.assertEqual(local, set())
+        self.assertEqual([i for i, s in enumerate(strong) if s], [5, 7])
+
+    def test_code_using_data_keeps_the_functions_only_it_holds(self):
+        """1 forms the table's address: the non-strong functions it holds after 1 count as its calls."""
+        code = self._code()
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            self.assertEqual(sorted(units._held_reach(code)), [(1, 2), (1, 3), (1, 4), (1, 6)])
+
+    def test_weak_data_is_no_one_unit_s(self):
+        code = _Code(4)
+        code.objects = [DataObject(0x9000, 8, "_ZTV1TIiE", ".data", "weak"), DataObject(0x9100, 8, "s", ".bss")]
+        self.assertEqual(units._shared_data(code), {0x9000})
+
+
+class AnotherBuildNameTests(unittest.TestCase):
+    def test_a_file_s_name_from_another_build_yields_to_its_own_citations_anywhere(self):
+        """a.cpp's own code is unit 3; another build also names units 0 and 2 after it (its coarser unit): on the
+        Switch both are another file, the neighbour 2 on any platform."""
+        named = [(0, 1, "a.cpp", "another build"), (1, 2, "b.cpp", "file string"), (2, 3, "a.cpp", "another build"),
+                 (3, 4, "a.cpp", "file string")]
+        rename = lambda first, end: (f"K{first}.cpp", "class")
+        code = _Code(4)
+        self.assertEqual([n for _, _, n, _ in units._not_another_build_s_file(code, named, rename)],
+                         ["K0.cpp", "b.cpp", "K2.cpp", "a.cpp"])
+        from zkit.platform import GameCube
+        code.platform = GameCube()
+        self.assertEqual([n for _, _, n, _ in units._not_another_build_s_file(code, named, rename)],
+                         ["a.cpp", "b.cpp", "K2.cpp", "a.cpp"])
+
+    def test_the_cited_files_decide_whether_the_link_is_sorted(self):
+        """Another build's units named after their classes (`Zeta.cpp` before `f_b.cpp`) say nothing of the link's
+        order: the files the code cites are in name order, so the class unit takes their folder."""
+        files = [f"app/game/f_{c}.cpp" for c in "abcdefghijklmnopqrstuvwxy"]
+        named = []
+        for i, name in enumerate(files):
+            named.append((2 * i, 2 * i + 1, name, "file string"))
+            named.append((2 * i + 1, 2 * i + 2, f"app/game/Zeta{i}.cpp", "another build"))
+        named.insert(5, (99, 100, "gf/GfAssetUtil.cpp", "class"))
+        self.assertEqual(units._in_neighbours_folder(named, {})[5][2], "app/game/GfAssetUtil.cpp")
+
+
 class RecursionTests(unittest.TestCase):
     def test_a_recursive_call_is_cut_resolved_as_clang_leaves_it(self):
         """clang 3.9 resolves a function's call to its own start in its object (no relocation, the offset encoded):
