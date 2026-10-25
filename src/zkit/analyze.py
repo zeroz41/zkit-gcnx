@@ -26,7 +26,7 @@ from .program import Program
 def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     from . import signatures
     proposals = signatures.propose(program, signatures.donors()) if signatures.listed() else []
-    initializers = _initializers(program)
+    initializers = units.initializers(program)
     # the donors' units; an initializer's only from another build's initializer (a constructor's shape is no file)
     placed = {p.address: p.unit for p in proposals if p.kind == "function" and p.unit
               and (p.address not in initializers or p.name.startswith("_GLOBAL__sub_I_"))}
@@ -96,23 +96,6 @@ def _slot_names(program: Program, named: list) -> list:
                         table_of.setdefault(slot, cls.table)
         out += [signatures.Proposal(address, name, "function", kind, weak=table_of.get(address) in weak)
                 for address, name in find(renamed, classes).items()]
-    return out
-
-
-def _initializers(program: Program) -> dict[int, bool]:
-    """{address: whether it tests a guard} for every function a Switch module's `.init_array` calls. clang names
-    a file's own static initializer (no guard) `_GLOBAL__sub_I_<file>` and a template static member's
-    (guarded) `__cxx_global_var_init.<n>`, both file-local: no other build exports either, and an initializer
-    takes no arguments, so a donor's name on one (a constructor's, by its shape) is never its own."""
-    if program.platform.name != "switch":
-        return {}
-    from .aarch64 import guarded
-    out = {}
-    for address in getattr(program.image, "init_array", ()):
-        index = program.function_index.get(address)
-        if index is not None:
-            size = program.functions[index].size
-            out[address] = guarded(program.platform.words(program.image, address, min(size, 64)))
     return out
 
 

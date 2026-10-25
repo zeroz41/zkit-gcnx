@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+SWITCH_BASE = 0x7100000000    # where a Switch module's offsets are written (the usual convention; display only)
+
 ANY_HEX = re.compile(r"^(?:0[xX])?([0-9A-Fa-f]{6,16})$")
 
 
@@ -152,7 +154,7 @@ class Switch(Platform):
     references = ("straight-line adrp/add, adrp/ldr/str and literal-load forms (a load through a GOT slot refers "
                   "to what the slot holds)")
 
-    def __init__(self, base: int = 0x7100000000):
+    def __init__(self, base: int = SWITCH_BASE):
         self.base = base
 
     def open(self, path: Path):
@@ -241,5 +243,5 @@ def platform_name(target: dict) -> str:
 def for_target(target: dict) -> Platform:
     if platform_name(target) == "gamecube":
         return GameCube()
-    base = target.get("base", 0x7100000000)
+    base = target.get("base", SWITCH_BASE)
     return Switch(int(base, 0) if isinstance(base, str) else int(base))

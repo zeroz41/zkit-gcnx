@@ -215,7 +215,7 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
         return []
     from .itanium import _groups
     from .score import placeholder
-    weak = set(getattr(program.image, "weak", ())) | {f.address for f in program.functions if f.scope == "weak"}
+    weak = _weak(program)
     formed = {address for rows in program.refs.values() for _, address, kind in rows if kind == "addr"}
     holders: dict[int, list[int]] = {}
     for o in program.objects:                          # a table's start: its name, or code forming its address
@@ -333,6 +333,14 @@ def _out_of_line_calls(program: Program, ev: Evidence) -> None:
                                      f"({function.size} bytes) without inlining it"))
 
 
+def _weak(program: Program) -> set[int]:
+    """The addresses of the module's weak functions: its own mark, or the binding a name came with."""
+    if "weak functions" not in program.cache:
+        program.cache["weak functions"] = set(getattr(program.image, "weak", ())) | {
+            f.address for f in program.functions if f.scope == "weak"}
+    return program.cache["weak functions"]
+
+
 def _bindings(program: Program) -> tuple[set[int], set[int], list[bool]]:
     """(weak addresses, file-local function indexes, strong[index]): weak is the module's mark (or the binding a
     name came with); file-local is no entry in a module whose symbol table lists its other functions; strong is
@@ -341,7 +349,7 @@ def _bindings(program: Program) -> tuple[set[int], set[int], list[bool]]:
     whose weak mark did not come with its name, one the linker folded with another) is not known strong."""
     from .score import placeholder
     functions = program.functions
-    weak = set(getattr(program.image, "weak", ())) | {f.address for f in functions if f.scope == "weak"}
+    weak = _weak(program)
     bound = getattr(program.image, "symbols", None) or {}
     listing = len(bound) * 2 >= len(functions)           # the module lists its external functions
     local = {i for i, f in enumerate(functions) if f.scope == "local" or listing and f.address not in bound}
@@ -425,7 +433,7 @@ def _first_users(program: Program) -> list[tuple[int, int, str]]:
     if program.platform.name != "switch":
         return []
     functions, index = program.functions, program.function_index
-    weak = set(getattr(program.image, "weak", ())) | {f.address for f in functions if f.scope == "weak"}
+    weak = _weak(program)
     if not weak:
         return []
     first: dict[int, int] = {}
@@ -484,6 +492,8 @@ def _initializer_ends(program: Program, ev: Evidence) -> None:
     unit ends right after it. One that tests a guard first initializes a template's static member, kept from
     whichever unit came first, and ends nothing."""
     for index in _initializers(program):
+        if index + 1 >= len(program.functions):
+            continue                                   # the module's last function: nothing after it to cut
         ev.separations.append((index + 1, index + 1,
                                f"{program.platform.text(program.functions[index].address)} is its unit's static "
                                "initializer"))
@@ -509,20 +519,29 @@ def _constructed(program: Program, owner: dict[int, str]) -> dict[int, set[str]]
     return out
 
 
-def _initializers(program: Program) -> list[int]:
-    """The function indexes of the units' own static initializers (`_initializer_ends`), each its unit's last."""
+def initializers(program: Program) -> dict[int, bool]:
+    """{address: whether it tests a guard} for every function a Switch module's `.init_array` calls. clang names
+    a file's own static initializer (no guard) `_GLOBAL__sub_I_<file>` and a template static member's
+    (guarded) `__cxx_global_var_init.<n>`, both file-local: no other build exports either, and an initializer
+    takes no arguments, so a donor's name on one (a constructor's, by its shape) is never its own."""
     if program.platform.name != "switch":
-        return []
-    from .aarch64 import guarded
-    out = []
-    for address in getattr(program.image, "init_array", ()):
-        index = program.function_index.get(address)
-        if index is None or index + 1 >= len(program.functions):
-            continue
-        function = program.functions[index]
-        if not guarded(program.platform.words(program.image, address, min(function.size, 64))):
-            out.append(index)
-    return sorted(out)
+        return {}
+    if "initializers" not in program.cache:
+        from .aarch64 import guarded
+        out = {}
+        for address in getattr(program.image, "init_array", ()):
+            index = program.function_index.get(address)
+            if index is not None:
+                size = program.functions[index].size
+                out[address] = guarded(program.platform.words(program.image, address, min(size, 64)))
+        program.cache["initializers"] = out
+    return program.cache["initializers"]
+
+
+def _initializers(program: Program) -> list[int]:
+    """The function indexes of the units' own static initializers (no guard: `initializers`), each its unit's
+    last (`_initializer_ends`)."""
+    return sorted(program.function_index[a] for a, guarded in initializers(program).items() if not guarded)
 
 
 PIECE = re.compile(r"_[0-9A-Fa-f]{8,16}(?=\.\w+$)")   # `file_<address>.cpp`: a later piece of one file
@@ -706,7 +725,7 @@ def _untied(program: Program, ev: Evidence, anchors: list[tuple[int, str]]) -> N
     symbol, a placeholder name) between two of them."""
     from .score import placeholder
     count, starts = len(program.functions), [f.address for f in program.functions]
-    weak = set(getattr(program.image, "weak", ())) | {f.address for f in program.functions if f.scope == "weak"}
+    weak = _weak(program)
     bound = getattr(program.image, "symbols", None) or {}
     inline = [f.address in weak for f in program.functions]
     unknown = [not inline[i] and f.address not in bound and placeholder(f.name)
@@ -1098,9 +1117,15 @@ def linker_code(program: Program) -> set[int]:
     function, `nx._plt`): no source compiles them, so they are no unit's."""
     if program.platform.name != "switch":
         return set()
-    tables = getattr(program.image, "tables", {})
-    spans = [tables[name] for name in LINKER_SECTIONS if name in tables and program.in_code(tables[name][0])]
+    spans = linker_spans(program.image)
     return {i for i, f in enumerate(program.functions) if any(a <= f.address < b for a, b in spans)}
+
+
+def linker_spans(image) -> list[tuple[int, int]]:
+    """(start, end) of each section a Switch module's linker made inside its code (`.plt`)."""
+    code = [(s.offset, s.offset + s.size) for s in getattr(image, "segments", ()) if s.kind == "code"]
+    return [(a, b) for name, (a, b) in getattr(image, "tables", {}).items()
+            if name in LINKER_SECTIONS and any(lo <= a < hi for lo, hi in code)]
 
 
 def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
@@ -1290,6 +1315,13 @@ def _unnamed(program: Program, class_of: dict[int, str], first: int, end: int,
 def _function_classes(program: Program, qualifiers: bool = False) -> dict[int, str]:
     """Function index -> the class it belongs to: the recovered class of a CodeWarrior table, or the class an
     Itanium name qualifies (`_itanium_classes`)."""
+    key = ("function classes", qualifiers)
+    if key not in program.cache:
+        program.cache[key] = _classes_of_functions(program, qualifiers)
+    return program.cache[key]
+
+
+def _classes_of_functions(program: Program, qualifiers: bool) -> dict[int, str]:
     if program.platform.name == "switch":
         return _itanium_classes(program, qualifiers)
     if program.platform.name != "gamecube":

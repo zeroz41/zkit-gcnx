@@ -356,9 +356,9 @@ def _named_initializers(program: Program, unit_of) -> Program:
     (`_GLOBAL__sub_I_<file>`): another build's initializer of the same file then carries that file over, where
     nothing else in its unit may survive (a file the linker dropped all but its initializer of)."""
     from dataclasses import replace
-    from .analyze import _initializers
+    from .units import initializers
     from .score import placeholder
-    own = {a for a, guarded in _initializers(program).items() if not guarded}
+    own = {a for a, guarded in initializers(program).items() if not guarded}
     functions = []
     for f in program.functions:
         unit = unit_of(f.address) if f.address in own and placeholder(f.name) else None
@@ -774,6 +774,7 @@ class Matcher:
         self._families: set[tuple] = set()
         self._text_sets: tuple | None = None
         self._vtables = None
+        self._itanium_tables: dict | None = None
         # each donor original's layout, and its named functions by place
         self.layouts = {donor.name: donor.layout for donor in donors if donor.layout}
         self.placed = {(s.donor, s.place): s for entries in self.by_key.values() for s in entries
@@ -917,8 +918,8 @@ class Matcher:
         zero without RTTI or a pointer into data with it, a function or an import in the first slot), by the
         table's start, with its slots up to the first word that is neither."""
         from .itanium import typeinfo_word
-        if self._vtables is None:
-            self._vtables = {}
+        if self._itanium_tables is None:
+            self._itanium_tables = {}
             image, formed = self.program.image, set()
             if self.tables:
                 for rows in self.program.refs.values():
@@ -936,8 +937,8 @@ class Matcher:
                         break
                     slots += slot
                 if slots:
-                    self._vtables[start] = slots
-        return self._vtables
+                    self._itanium_tables[start] = slots
+        return self._itanium_tables
 
     def fits(self, address: int, key: str) -> bool:
         """Whether a Switch function's code can carry a C++ name: every argument register some path reads before

@@ -263,11 +263,8 @@ def _linker_code(project: Project, target: str) -> list[tuple[int, int]]:
     if for_target(project.target(target)).name != "switch":
         return []
     from .inspect_dol import _dol
-    from .units import LINKER_SECTIONS
-    module = _dol(project, target)
-    code = [(s.offset, s.offset + s.size) for s in module.segments if s.kind == "code"]
-    return [(a, b) for name, (a, b) in getattr(module, "tables", {}).items()
-            if name in LINKER_SECTIONS and any(lo <= a < hi for lo, hi in code)]
+    from .units import linker_spans
+    return linker_spans(_dol(project, target))
 
 
 def gaps(project: Project, target: str | None = None, section: str | None = None, limit: int = 40) -> dict[str, Any]:

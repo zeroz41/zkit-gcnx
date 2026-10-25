@@ -86,6 +86,7 @@ class _Code:
         from zkit.program import Function
         self.platform = Switch()
         self.cflags = ["-O3", "-fPIC"]                 # a PIC module that inlines
+        self.cache = {}
         self.functions = [Function(0x1000 + 0x40 * i, 0x40, f"fn_{i}") for i in range(count)]
         listed = [f for i, f in enumerate(self.functions) if i not in unlisted]     # the module's symbol table
         self.image = SimpleNamespace(weak={self.functions[i].address for i in weak},
