@@ -442,7 +442,7 @@ def apply(program: Program, aligned: Aligned) -> Program:
     functions = [Function(f.address, f.size, *aligned.functions[f.address][:2])
                  if f.address in aligned.functions and aligned.functions[f.address][2] == f.size else f
                  for f in program.functions]
-    out = Program(program.platform, program.image, functions, objects, program.sda)
+    out = program.derived(functions, objects)
     out.labels = [label for label in program.labels if piece_at(label.address) is None]
     out.sections = list(program.sections)
     out._refs, out._calls, out._pointers = program._refs, program._calls, program._pointers   # same functions

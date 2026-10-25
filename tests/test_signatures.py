@@ -675,28 +675,6 @@ class SwitchSignatureTests(unittest.TestCase):
         self.assertEqual(seeded.get(at["_Z5alphai"], ("",))[0], "_Z5alphai")
         self.assertEqual(seeded.get(at["_Z4betai"], ("",))[0], "_Z4betai")
 
-    def test_columns_name_their_readers(self):
-        """Getters of a table's columns read static slots an initializer filled by looking each column up by
-        its name: the update changed every getter and their order, so their code and places mislead, but the
-        column each reads (the text its slot was looked up by, the slots in the donor's order) names it."""
-        columns = ("ColumnAlpha", "ColumnBeta", "ColumnGamma", "ColumnDelta")
-        getter = lambda c: (f"__attribute__((noinline)) void *get{c}(void *t, int id) {{ return s_{c} ? "
-                            f"fetch(t, s_{c}, id @EXTRA@) : 0; }}\n")
-        head = ("void *lookup(void *table, const char *column); void *fetch(void *table, void *column, int id);\n"
-                + "".join(f"static void *s_{c};\n" for c in columns)
-                + "void init(void *t) {" + "".join(f" s_{c} = lookup(t, \"{c}\");" for c in columns) + " }\n")
-        elf, symbols, _ = self.module("donor", (head + "".join(getter(c) for c in columns)).replace("@EXTRA@", ""),
-                                      hide=False)
-        donor = signatures.build("earlier", elf, symbols)
-        self.assertEqual(donor.columns, list(columns))
-        later = head + "".join(getter(c) for c in reversed(columns))
-        elf, symbols, at = self.module("target", later.replace("@EXTRA@", "* 2 + 1"), hide=True)
-        found = {p.address: (p.name, p.evidence)
-                 for p in signatures.propose(Program.from_symbols(Switch(), elf, symbols), [donor])}
-        for c in columns:
-            name = f"_Z{3 + len(c)}get{c}Pvi"
-            self.assertEqual(found.get(at[name]), (name, "column"))
-
     def test_lone_call_pairs_only_where_named_calls_agree(self):
         """A changed caller's one unnamed callee is its donors' one unclaimed callee, unless a function it calls
         that is named is one its donors never call: then an update inlined or outlined calls, and the one left on

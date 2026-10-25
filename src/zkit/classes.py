@@ -298,7 +298,7 @@ def audit_project(project, target: str | None = None, class_filter: str | None =
     target = default_target(project, target)
     config = project.target(target)
     if (config.get("platform") or "gamecube").lower() in ("switch", "nx"):
-        from . import itanium                         # Itanium tables, read without RTTI
+        from . import itanium                         # Itanium tables, with or without RTTI
         return {"target": target, "platform": "switch",
                 **itanium.audit(Program.from_project(project, target), class_filter, limit)}
     return {"target": target, **audit(Program.from_project(project, target), class_filter, limit)}

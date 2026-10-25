@@ -119,11 +119,8 @@ def _initializers(program: Program) -> dict[int, bool]:
 def _unnamed(program: Program, addresses) -> Program:
     """The program with the functions at `addresses` back to their placeholders."""
     from dataclasses import replace
-    out = Program(program.platform, program.image,
-                  [replace(f, name=f"fn_{program.platform.text(f.address)[2:]}") if f.address in addresses
-                   and not _placeholder(f.name) else f for f in program.functions], program.objects, program.sda)
-    out.labels, out.sections = program.labels, program.sections
-    return out
+    return program.derived([replace(f, name=f"fn_{program.platform.text(f.address)[2:]}") if f.address in addresses
+                            and not _placeholder(f.name) else f for f in program.functions])
 
 
 def _initializer_names(program: Program, proposal: dict[str, Any], initializers: dict[int, bool]) -> list:
@@ -146,14 +143,15 @@ def _initializer_names(program: Program, proposal: dict[str, Any], initializers:
 
 
 def _table_size(program: Program, address: int) -> int:
-    """The extent of a Switch class table no donor sizes, read from the module: its offset-to-top and typeinfo
-    words (zero: the module has no RTTI) and then each slot holding a function or an import."""
+    """The extent of a Switch class table no donor sizes, read from the module: its offset-to-top (zero) and
+    typeinfo words (`itanium.typeinfo_word`) and then each slot holding a function or an import."""
+    from .itanium import typeinfo_word
     from .signatures import itanium_slots
     image = program.image
-    if not hasattr(image, "pointers") or address in image.pointers or address + 8 in image.pointers:
+    if not hasattr(image, "pointers") or address in image.pointers:
         return 0
     try:
-        if image.u64(address) or image.u64(address + 8):
+        if image.u64(address) or typeinfo_word(image, address + 8) is None:
             return 0
     except (ValueError, IndexError):
         return 0
@@ -264,9 +262,7 @@ def _added_objects(program: Program, renamed: dict[int, tuple[str, str, int]], s
 
 def _with_objects(program: Program, added: list) -> Program:
     """The program with more data objects (its functions, labels and sections as they are)."""
-    out = Program(program.platform, program.image, program.functions, list(program.objects) + added, program.sda)
-    out.labels, out.sections = program.labels, program.sections
-    return out
+    return program.derived(objects=list(program.objects) + added)
 
 
 def _new_objects(program: Program, renamed: dict[int, tuple[str, str, int]], sizes: dict[int, int],

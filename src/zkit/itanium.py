@@ -1,9 +1,9 @@
-"""Switch classes from a module's Itanium class tables, read without RTTI (built with -fno-rtti, a module names
-no typeinfo): each `_ZTV` table's groups (a primary one, a secondary one per further base with a vtable), the
+"""Switch classes from a module's Itanium class tables, with or without RTTI (a table's typeinfo word is zero
+under -fno-rtti, else a pointer to its typeinfo object): each `_ZTV` table's groups (a primary one, a secondary one per further base with a vtable), the
 functions in their slots and what their names say, each class's bases, and a declaration per class that makes
 the compiler emit the same table.
 
-- **groups**: a table is groups of [offset-to-top, typeinfo (zero), slots...]; a group's offset-to-top is minus
+- **groups**: a table is groups of [offset-to-top, typeinfo, slots...], every group with the same typeinfo; a group's offset-to-top is minus
   the offset of the base subobject it is for.
 - **bases**: a primary base's table is a prefix of the class's own: every slot the class does not override holds
   the same function, and an override keeps the method's name (a pure slot fits anything, either way). Of the
@@ -38,6 +38,7 @@ class Group:
     address: int                       # the group's offset-to-top word
     offset: int                        # the base subobject's offset in the class
     slots: list[int | str]             # a function's address, or the import a slot holds (a pure virtual)
+    typeinfo: int = 0                  # the typeinfo object's address (0: built without RTTI)
 
 
 @dataclass
@@ -138,6 +139,15 @@ def _parts(qualified: str) -> list[str]:
     return [p for p in parts if p]
 
 
+def typeinfo_word(image, at: int) -> int | None:
+    """A class table group's typeinfo word: 0 without RTTI, else the address of the typeinfo object it points to
+    (a relocated pointer into data); None where the word is neither, so no class table is there."""
+    if at in image.pointers:
+        segment = image.section_at(image.pointers[at])
+        return image.pointers[at] if segment is not None and segment.kind == "data" else None
+    return None if image.u64(at) else 0
+
+
 def _groups(program: Program, address: int, size: int) -> list[Group]:
     """A table's groups. Its symbol's size can stop short (an address inside it started another object), so
     slots run on while they are functions, and groups while their offset-to-top is not zero: the next table's
@@ -160,8 +170,9 @@ def _groups(program: Program, address: int, size: int) -> list[Group]:
             break
         if 8 * at >= size and start in objects:
             break                                      # another object's start
-        if start in image.pointers or start + 8 in image.pointers or image.u64(start + 8):
-            break                                      # no RTTI: the typeinfo word is zero
+        typeinfo = typeinfo_word(image, start + 8)
+        if start in image.pointers or typeinfo is None or out and typeinfo != out[0].typeinfo:
+            break                                      # every group of one table names one typeinfo
         top = image.u64(start)
         top = top - (1 << 64) if top >> 63 else top
         if out and top == 0 or not out and top != 0 or 8 * at >= size and top == 0:
@@ -178,7 +189,7 @@ def _groups(program: Program, address: int, size: int) -> list[Group]:
             index += 1
         if not slots:
             break
-        out.append(Group(start, -top, slots))
+        out.append(Group(start, -top, slots, typeinfo))
         at = index
     return out
 
@@ -1345,7 +1356,8 @@ def compile_argv(project, target: str, source: Path, obj: Path, includes: list[P
 
 
 def _compiled_table(obj: Path, symbol: str) -> list[str] | None:
-    """A compiled table's words: a relocation's symbol, else `=<value>` (offset-to-top, a zero typeinfo)."""
+    """A compiled table's words: a relocation's symbol (a slot, the typeinfo object), else `=<value>`
+    (offset-to-top, a typeinfo word built without RTTI)."""
     import struct
     from .elf import Elf
     elf = Elf.load(obj)
@@ -1373,9 +1385,11 @@ def _compiled_table(obj: Path, symbol: str) -> list[str] | None:
 
 def _original_table(program: Program, cls: ItClass) -> list[str]:
     names = {f.address: f.name for f in program.functions}
+    objects = {o.address: o.name for o in program.objects}
     out = []
     for group in cls.groups:
-        out += [f"={-group.offset}", "=0"]
+        typeinfo = objects.get(group.typeinfo, f"lbl_{group.typeinfo:X}") if group.typeinfo else "=0"
+        out += [f"={-group.offset}", typeinfo]
         out += [s if isinstance(s, str) else names.get(s, f"fn_{s:X}") for s in group.slots]
     return out
 

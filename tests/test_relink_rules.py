@@ -85,6 +85,7 @@ class _Code:
         from zkit.platform import Switch
         from zkit.program import Function
         self.platform = Switch()
+        self.cflags = ["-O3", "-fPIC"]                 # a PIC module that inlines
         self.functions = [Function(0x1000 + 0x40 * i, 0x40, f"fn_{i}") for i in range(count)]
         listed = [f for i, f in enumerate(self.functions) if i not in unlisted]     # the module's symbol table
         self.image = SimpleNamespace(weak={self.functions[i].address for i in weak},
@@ -544,7 +545,7 @@ class DirectReachTests(unittest.TestCase):
     def test_a_static_every_user_forms_directly_is_one_unit_s_however_far_apart(self):
         """s (users 0 and 70, both forming its address with adrp) is a file's static: one span; g's user 70 loads
         it through a slot (no address formed), so g is a global; t's users are near each other (the tight joins'
-        business); weak w is every unit's. Not on the GameCube."""
+        business); weak w is every unit's. Only built -fPIC with default visibility; not on the GameCube."""
         from unittest import mock
         code = _Code(80)
         code.platform.words = lambda image, address, size: [address]
@@ -557,6 +558,10 @@ class DirectReachTests(unittest.TestCase):
         with mock.patch("zkit.aarch64.track_addresses", rows):
             spans = units._direct_reach(code, users, {0x9300})
         self.assertEqual([(lo, hi) for lo, hi, _ in spans], [(0, 70)])
+        for flags in (["-fPIC", "-fvisibility=hidden"], ["-fPIE"], None):     # every global formed directly, or unknown
+            code.cflags = flags
+            with mock.patch("zkit.aarch64.track_addresses", rows):
+                self.assertEqual(units._direct_reach(code, users, {0x9300}), [])
         from zkit.platform import GameCube
         code.platform = GameCube()
         self.assertEqual(units._direct_reach(code, users, set()), [])

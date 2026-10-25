@@ -495,7 +495,7 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
 
 def source_root(root: Path, paths: Layout, config: dict[str, Any], notes: list[str]) -> Path | None:
     """Where a clang target with `source_root` compiles from: `<build dir>/root`, in which that path (the folder
-    the original's `__FILE__` strings start with, `D:/Monolithsoft/BF2/prog`) is a link to src/, so a unit's
+    the original's `__FILE__` strings start with, e.g. `D:/Studio/Game/prog`) is a link to src/, so a unit's
     `__FILE__` reads as the original's. None without the setting, or where links cannot be made."""
     original = (config.get("source_root") or "").strip("/")
     if not original:

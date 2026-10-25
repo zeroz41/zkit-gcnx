@@ -209,14 +209,14 @@ class DiscoverTests(unittest.TestCase):
 class UnitNameTests(unittest.TestCase):
     def test_one_windows_tree_in_any_case_loses_its_checkout_and_drive(self):
         from zkit import units
-        game = [f"C:/Monolithsoft/BF2/prog/application/BF2/gf/menu/menu_{i}.cpp" for i in range(9)]
-        paths = game + ["C:/MonolithSoft/BF2/prog/libs/mcl/mm_lib/source/mm_math/mm_cube.cpp",
-                        "C:/Monolithsoft/BF2/prog/application/BF2//../../libs/anmlib/src\\anmlib/base/anm_array.h",
-                        "C:/MonolithSoft/BF2/prog/libs/mcl/mm_lib/project/win/../../source\\mm_math/mm_mat44.h"]
+        game = [f"C:/Studio/Game/prog/application/Game/ui/menu/menu_{i}.cpp" for i in range(9)]
+        paths = game + ["C:/STUDIO/Game/prog/libs/core/core_lib/source/math/cube.cpp",
+                        "C:/Studio/Game/prog/application/Game//../../libs/animlib/src\\animlib/base/array.h",
+                        "C:/STUDIO/Game/prog/libs/core/core_lib/project/win/../../source\\math/mat44.h"]
         roots = units._roots(paths)
         self.assertEqual([units._unit_name(p, roots) for p in paths[8:]],
-                         ["application/BF2/gf/menu/menu_8.cpp", "libs/mcl/mm_lib/source/mm_math/mm_cube.cpp",
-                          "libs/anmlib/src/anmlib/base/anm_array.h", "libs/mcl/mm_lib/source/mm_math/mm_mat44.h"])
+                         ["application/Game/ui/menu/menu_8.cpp", "libs/core/core_lib/source/math/cube.cpp",
+                          "libs/animlib/src/animlib/base/array.h", "libs/core/core_lib/source/math/mat44.h"])
         self.assertEqual(units._unit_name("D:/main.cpp", []), "main.cpp")     # a unit name never holds a drive
 
 

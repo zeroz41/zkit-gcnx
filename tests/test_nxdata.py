@@ -701,6 +701,7 @@ class OutOfLineCallTests(unittest.TestCase):
             symbols += [Symbol(f"lbl_{a:08X}", section, a, "object", size, "global")
                         for a, size, section in nxdata.objects(module, functions)]
             program = Program.from_symbol_list(Switch(), module, symbols)
+            program.cflags = FLAGS
             owner = {}
             for unit in units.propose(program)["units"]:
                 for index in range(unit["first"], unit["end"]):

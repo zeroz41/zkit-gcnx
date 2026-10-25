@@ -166,11 +166,11 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
 
 
 def _direct_reach(program: Program, users, skip: set[int]) -> list[tuple[int, int, str]]:
-    """Switch (a PIC module): code reaches a global of default visibility through its `.got` slot, its own unit's
-    too; a writable object every user forms the address of directly (adrp, no slot) is a file's static (or
+    """Switch, built -fPIC with default visibility (`got_globals`): code reaches a global through its `.got` slot,
+    its own unit's too; a writable object every user forms the address of directly (adrp, no slot) is a file's static (or
     hidden): all its users are the unit defining it, however far apart. Another build's placements do not cut them
     apart (`boundaries`) where the code in the span cites its file (`_cited_reach`); its own citations still do."""
-    if program.platform.name != "switch":
+    if program.platform.name != "switch" or not got_globals(program.cflags):
         return []
     from .aarch64 import track_addresses
     out = []
@@ -289,18 +289,37 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
 
 
 INLINE_INSTRUCTION, INLINE_CALL = 5, 25    # LLVM's inline cost of an instruction and of a call it makes
-INLINED = 150       # well under the -O2/-O3 threshold (225/250): a callee this cheap is always inlined
+INLINE_THRESHOLD = {"-O3": 250, "-O2": 225, "-Os": 75, "-Oz": 25}   # LLVM's inliner, per optimization level
+INLINED = 0.6       # of that threshold: a callee this cheap is always inlined (150 at -O3)
+
+
+def inline_threshold(cflags: list[str] | None) -> int | None:
+    """LLVM's inline threshold for the target's optimization level (its last -O flag), None where its flags are
+    unknown or do not inline (-O0, -O1 run only the always-inliner)."""
+    levels = [f for f in cflags or () if f.startswith("-O")]
+    return INLINE_THRESHOLD.get(levels[-1]) if levels else None
+
+
+def got_globals(cflags: list[str] | None) -> bool:
+    """Whether the target's code reaches a global of default visibility through its GOT slot, even its own unit's:
+    built -fPIC (or -fpic) with default visibility. Under -fPIE, hidden visibility or unknown flags, a global
+    formed directly says nothing about its file."""
+    flags = cflags or ()
+    pic = [f for f in flags if f in ("-fPIC", "-fpic", "-fPIE", "-fpie", "-fno-pic", "-fno-PIC")]
+    return bool(pic) and pic[-1] in ("-fPIC", "-fpic") and "-fvisibility=hidden" not in flags
 
 
 def _out_of_line_calls(program: Program, ev: Evidence) -> None:
-    """Switch (clang -O3): a direct call to a cheap function the same file defines is always inlined, so a call to
-    one that stayed a call is to another file's (a base class's constructor, a utility's accessor): a boundary
+    """Switch (clang at a level that inlines, `inline_threshold`): a direct call to a cheap function the same file
+    defines is always inlined, so a call to one that stayed a call is to another file's (a base class's constructor, a utility's accessor): a boundary
     lies between the two, placed after every other boundary and only where those left none. Cheap is LLVM's
     inline cost, not size: a short function making several calls stays a call within its file. Not for a
     function a class table holds, whose call may have been a virtual one the optimizer turned direct after
     inlining."""
-    if program.platform.name != "switch":
+    threshold = inline_threshold(program.cflags)
+    if program.platform.name != "switch" or threshold is None:
         return
+    cheap = INLINED * threshold
     held = {pointee for _, pointee in program.pointers}
     functions = program.functions
     for caller, callees in program.calls.items():
@@ -308,7 +327,7 @@ def _out_of_line_calls(program: Program, ev: Evidence) -> None:
             function = functions[callee]
             made = len(program.calls.get(callee, ()))
             cost = INLINE_INSTRUCTION * max(function.size // 4 - made, 0) + INLINE_CALL * made
-            if callee == caller or cost > INLINED or function.address in held or abs(callee - caller) > TIGHT:
+            if callee == caller or cost > cheap or function.address in held or abs(callee - caller) > TIGHT:
                 continue
             lo, hi = min(caller, callee) + 1, max(caller, callee)
             ev.apart.append((lo, hi, f"{functions[caller].name} calls {function.name} "

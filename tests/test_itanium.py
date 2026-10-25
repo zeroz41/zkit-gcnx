@@ -326,6 +326,30 @@ class TableExtentTests(unittest.TestCase):
         self.assertEqual(slots[0].slots, [0x100, 0x140, 0x180, 0x1C0, 0x100])   # a short size, a mere label
 
 
+    def test_a_table_built_with_rtti_names_one_typeinfo_in_every_group(self):
+        """Built with RTTI, a table's typeinfo word points at its typeinfo object (data) in every group; a group
+        naming another typeinfo is the next table's, and a word pointing into code is no typeinfo."""
+        from types import SimpleNamespace
+        from zkit.program import DataObject
+        data = SimpleNamespace(offset=0x1000, size=0x300, kind="data")
+        code = SimpleNamespace(offset=0x0, size=0x1000, kind="code")
+        functions = {0x100: 0, 0x140: 1, 0x180: 2}
+        top = {0x1018: (1 << 64) - 0x10}                                  # the secondary group's offset-to-top
+        pointers = {0x1008: 0x1200, 0x1010: 0x100, 0x1020: 0x1200, 0x1028: 0x140,
+                    0x1038: 0x1240, 0x1040: 0x180}                        # the next table: another typeinfo
+        image = SimpleNamespace(section_at=lambda a: code if a < 0x1000 else data if a < 0x1300 else None,
+                                pointers=pointers, imports={}, u64=lambda a: top.get(a, 0))
+        program = SimpleNamespace(image=image, function_index=functions, cache={}, users=lambda: {},
+                                  objects=[DataObject(0x1000, 0x30, "_ZTV1B", ".data")])
+        groups = itanium._groups(program, 0x1000, 0x30)
+        self.assertEqual([(g.offset, g.slots, g.typeinfo) for g in groups], [(0, [0x100], 0x1200),
+                                                                              (0x10, [0x140], 0x1200)])
+        self.assertEqual(itanium.typeinfo_word(image, 0x1008), 0x1200)
+        pointers[0x1008] = 0x100                                          # into code: no table there
+        self.assertIsNone(itanium.typeinfo_word(image, 0x1008))
+        self.assertEqual(itanium._groups(program, 0x1000, 0x30), [])
+
+
 class HeaderDebtTests(unittest.TestCase):
     def test_a_header_declares_virtuals_a_source_file_must_not(self):
         from zkit import quality

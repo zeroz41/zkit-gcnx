@@ -52,6 +52,8 @@ class Program:
         self.cache: dict = {}  # results analyses share (register flows, tables), keyed by the analysis
         self.labels: list[DataObject] = []  # names at addresses with no extent (`type:label`)
         self.sections: list[tuple[str, int, int]] = []  # (name, start, end) of every named section
+        self.cflags: list[str] | None = None  # the target's build flags (None: unknown), which rules about the
+        #                                       compiler's choices (inlining, PIC, RTTI) depend on
 
     def in_image(self, address: int) -> bool:
         """Inside a section of the image (loaded or zero-initialized)."""
@@ -129,7 +131,17 @@ class Program:
                 "SELECT address, size, name FROM functions WHERE target=? AND size>0", (target,)).fetchall()]
         if platform.name == "switch" and not any(s.type == "object" for s in symbols):
             symbols += _module_objects(project, target)
-        return cls.from_symbol_list(platform, image, symbols)
+        out = cls.from_symbol_list(platform, image, symbols)
+        out.cflags = _cflags(config)
+        return out
+
+    def derived(self, functions: Iterable[Function] | None = None,
+                objects: Iterable[DataObject] | None = None) -> "Program":
+        """This program with other functions or data objects: its image, labels, sections and flags as they are."""
+        out = Program(self.platform, self.image, self.functions if functions is None else functions,
+                      self.objects if objects is None else objects, self.sda)
+        out.labels, out.sections, out.cflags = self.labels, self.sections, self.cflags
+        return out
 
     @classmethod
     def _build(cls, platform: Platform, image, symbols_path: Path) -> "Program":
@@ -298,3 +310,10 @@ def _gamecube_sda(image, start: int) -> dict[int, int]:
         elif word == 0x4E800020:
             break
     return {r: registers[r] for r in (2, 13) if r in registers}
+
+
+def _cflags(config: dict) -> list[str] | None:
+    """A target's build flags as argv words, None where it has no build settings."""
+    from .build import settings, words
+    built = settings(config)
+    return None if built is None else words(built.get("cflags")) + words(built.get("extra_cflags"))

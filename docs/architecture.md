@@ -148,8 +148,7 @@ ahead of every other pairing in the gap), and a changed function's one unnamed c
 unclaimed callee. `analyze.py` writes the names and the
 data they bring with the donor's sizes, and gives each named function's donor unit to `units.py` as evidence like
 a cited file (never a weak function's: the linker keeps an inline from whichever unit comes first). Without a
-symbols file a Switch module is read from its own tables, so a fresh analysis never inherits names. On Xenoblade
-2, 3.0.1's stripped `main` takes names for 29,334 of its 35,906 functions from 1.0.0's exports.
+symbols file a Switch module is read from its own tables, so a fresh analysis never inherits names.
 
 `vtables.py` finds class tables as data whose words have CodeWarrior's table shape (RTTI and offset words, then
 one function pointer per slot) and that the code stores into an object, or that holds a destructor; a dispatch
@@ -166,8 +165,7 @@ new-expressions store at offset 0 of the object before (after, in a destructor) 
 could stand between them. Each base names the evidence that proved it. A function only one class's table holds
 is named by its slot: in its base's destructor slots it is the class's destructor (`D1`, then `D0`, where its code
 proves it is not a base's folded into it), elsewhere the method every named function in that slot below the
-class that declares it is, spelled for its own class. On Xenoblade 2 both name every function 1.0.0's exports
-name exactly (3,133 destructors, 5,502 overrides), and the overrides every hidden 3.0.1 name (3 seeds of half).
+class that declares it is, spelled for its own class.
 
 `score.py` measures a proposed split against a reference (another split or a CodeWarrior linker map): function
 starts and sizes, names, unit boundaries, vtables and data ownership, with the reference's fully matched units
