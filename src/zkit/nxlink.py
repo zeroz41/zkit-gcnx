@@ -479,6 +479,9 @@ def _place_named(linker: Linker, obj: _Object, placed: dict, result: UnitLink) -
         address = None
         for symbol in names:
             at = linker.by_name(symbol.name, None, obj.ranges)
+            if at is not None and symbol.bind == "local" and not section.flags & SHF_GROUP and \
+                    not any(s <= at < e for s, e in obj.ranges):
+                continue    # an internal name another file's object also has (file statics share names): not this one
             if at is not None:
                 address = at - symbol.value
                 break

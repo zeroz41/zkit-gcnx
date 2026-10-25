@@ -294,6 +294,27 @@ class SwitchToolTests(unittest.TestCase):
         where["_ZN1TIiE1sE"] = 0x840                                    # the unit's own copy: kept
         self.assertEqual(nxlink._discarded(linker, obj), {})
 
+    def test_a_file_static_named_like_another_files_is_not_placed_at_that_one(self):
+        """Internal names are per file: two files may each define `static T s_table`. When the symbols name only the
+        other file's object, this file's section is not placed there (it stays for its references to place)."""
+        from types import SimpleNamespace
+        from zkit import nxlink
+        from zkit.elf import Section, Symbol
+        data = Section(1, ".data._ZN2gfL6s_tabsE", 1, nxlink.SHF_ALLOC | 1, 0, 0, 16, 0, 0, 0, 8)
+        elf = SimpleNamespace(sections=[data], symbols=[Symbol(1, "_ZN2gfL6s_tabsE", 0, 16, "object", "local", 1)],
+                              data=lambda s: bytes(16))
+        where = {"_ZN2gfL6s_tabsE": 0x900}
+        linker = SimpleNamespace(by_name=lambda name, hint, ranges: where.get(name))
+        obj = SimpleNamespace(elf=elf, unit="u.cpp", whole=True, exact=set(), ranges=[(0x100, 0x200), (0x800, 0x880)])
+        placed, result = {}, nxlink.UnitLink("u.cpp", True)
+        nxlink._place_named(linker, obj, placed, result)
+        self.assertEqual((placed, result.problems), ({}, []))
+        self.assertEqual(result.unnamed, {1: "_ZN2gfL6s_tabsE"})
+        where["_ZN2gfL6s_tabsE"] = 0x840                                # the symbols name this file's own: placed
+        placed, result = {}, nxlink.UnitLink("u.cpp", True)
+        nxlink._place_named(linker, obj, placed, result)
+        self.assertEqual({k[1]: v.address for k, v in placed.items()}, {1: 0x840})
+
     def test_each_init_array_section_of_an_object_follows_the_last_in_the_units_range(self):
         """A file whose template statics have dynamic initializers has one .init_array section per COMDAT group (and
         one for its own initializer): a link concatenates them in object order into the unit's one range."""
