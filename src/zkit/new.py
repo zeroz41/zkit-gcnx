@@ -106,6 +106,7 @@ def new(source: Path, folder: Path, game_id: str | None = None, name: str | None
                               "symbols": f"{config}/symbols.txt", "splits": f"{config}/splits.txt",
                               "objdiff": "objdiff.json", "report": f"build/{game}/report.json",
                               "build": json.loads(json.dumps(build.DEFAULTS[platform]))}
+    target["build"]["cflags"] += build.STARTING_CFLAGS[platform]
     identity = onboard._git_identity(folder)
     manifest = {"schema_version": 1, "id": name or onboard._slug(f"{folder.name}-{game}"), "generated_by": "zkit new",
                 "repositories": {"decomp": {

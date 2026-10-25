@@ -43,7 +43,7 @@ class Group:
 
 @dataclass
 class ItClass:
-    name: str                          # qualified, as demangled (`gf::GfComBehaviorPc`)
+    name: str                          # qualified, as demangled (`ns::Widget`)
     table: int | None                  # its `_ZTV` start (None: a base known only from its derived classes)
     groups: list[Group]
     bases: list[tuple[int, str]] = field(default_factory=list)       # (offset, base) per group, primary first
@@ -718,7 +718,6 @@ def _intermediates(classes: dict[str, ItClass], named: dict[int, Method]) -> boo
 BUILTIN = {"void", "bool", "char", "signed char", "unsigned char", "wchar_t", "char16_t", "char32_t", "short",
            "unsigned short", "int", "unsigned int", "long", "unsigned long", "long long", "unsigned long long",
            "float", "double", "long double", "__int128", "unsigned __int128", "decltype(nullptr)", "std::nullptr_t"}
-QUALIFIED = re.compile(r"(?<![\w:])(?:[A-Za-z_]\w*::)*[A-Za-z_]\w*(?:<[^()]*?>)?")
 LITERAL = re.compile(r"^-?\d+(u|ul|l|ull|ll|ul)?$|^(true|false)$")
 LITERAL_TYPES = {"": "int", "u": "unsigned int", "l": "long", "ul": "unsigned long", "ll": "long long",
                  "ull": "unsigned long long"}
@@ -779,14 +778,14 @@ def _slot_signatures(classes: dict[str, ItClass], named: dict[int, Method]) -> d
     return out
 
 
-def _kinds(classes: dict[str, ItClass], named: dict[int, Method]) -> tuple[set[str], set[str]]:
-    """(classes, by-value-only all-caps types): a qualifier with a table, a constructor or a destructor is a
-    class; any other qualifier is a namespace (an enclosing namespace mangles as a class would)."""
+def _kinds(classes: dict[str, ItClass], named: dict[int, Method]) -> set[str]:
+    """The classes: a qualifier with a table, a constructor or a destructor is a class; any other qualifier is a
+    namespace (an enclosing namespace mangles as a class would)."""
     classy = set(classes)
     for m in named.values():
         if m.owner and not m.thunk and (m.name == _plain(m.owner) or m.name == "~" + _plain(m.owner)):
             classy.add(m.owner)
-    return classy, set()
+    return classy
 
 
 def _split_namespaces(qualified: str, classy: set[str]) -> tuple[list[str], list[str]]:
@@ -911,7 +910,7 @@ def declarations(program: Program, classes: dict[str, ItClass]) -> dict[str, Dec
     redeclared), one destructor for a pair of destructor slots, padding to the size its derived classes prove."""
     named = methods(program)
     signatures = _slot_signatures(classes, named)
-    classy, _ = _kinds(classes, named)
+    classy = _kinds(classes, named)
     layout, placeholders, sizes, problems = _layout(program, classes, named)
     out: dict[str, Declared] = {}
     every = {**classes, **placeholders}
@@ -1007,7 +1006,7 @@ def declarations(program: Program, classes: dict[str, ItClass]) -> dict[str, Dec
 
 def _rooted(name: str) -> str:
     """A class's name as a base clause spells it: from the global namespace, its template arguments too (inside
-    `minigame::tora`, `minigame::tora::minigame` would name the class's own member)."""
+    `game::shop`, `game::shop::game` would name the class's own member)."""
     rooted = re.sub(r"(?<![\w:])(?=[A-Za-z_]\w*::)", "::", name)
     return ("::" + rooted if not rooted.startswith("::") else rooted).replace("<::", "< ::")
 
@@ -1165,7 +1164,7 @@ def headers(program: Program, classes: dict[str, ItClass]) -> Headers:
     """One header per class declaration (bases and enclosing classes included, the types its signatures name
     declared ahead), and one per enclosing class that has no table (its nested types declared)."""
     named = methods(program)
-    classy, _ = _kinds(classes, named)
+    classy = _kinds(classes, named)
     declared = declarations(program, classes)
     params_of: dict[str, list[str]] = collections.defaultdict(list)
     for d in declared.values():
@@ -1242,7 +1241,7 @@ def headers(program: Program, classes: dict[str, ItClass]) -> Headers:
                 *(f"    {n}" for n in sorted(nested[enclosing])), "};"]
         includes = {_header_path("::".join(namespaces + path[:-1]), classy)} if len(path) > 1 else set()
         files[_header_path(enclosing, classy)] = _file(_header_path(enclosing, classy), namespaces, "\n".join(body),
-                                                       includes, [], {})
+                                                       includes, [])
     for d in declared.values():
         text = d.text
         if d.name in nested:                          # into its own class, the last in the text
@@ -1260,11 +1259,11 @@ def headers(program: Program, classes: dict[str, ItClass]) -> Headers:
                 includes.add(_header_path("::".join(namespaces + path[:-1]), classy))
             elif stem in forward:
                 ahead.append((namespaces, forward[stem]))
-        files[d.header] = _file(d.header, d.namespaces, text, includes - {d.header}, ahead, {})
+        files[d.header] = _file(d.header, d.namespaces, text, includes - {d.header}, ahead)
     return Headers(files, forward, complete, declared, problems)
 
 
-def _file(path: str, namespaces: list[str], text: str, includes: set[str], ahead: list, _unused: dict) -> str:
+def _file(path: str, namespaces: list[str], text: str, includes: set[str], ahead: list) -> str:
     guard = re.sub(r"\W", "_", path).upper()
     lines = [f"#ifndef {guard}", f"#define {guard}", ""]
     lines += [f'#include "{i}"' for i in sorted(includes)]
@@ -1345,13 +1344,18 @@ def write_headers(program: Program, folder: Path, unproven: dict[str, str] | Non
 # Proof
 
 def compile_argv(project, target: str, source: Path, obj: Path, includes: list[Path]) -> list[str]:
-    """The target's own compiler and flags (`targets.<t>.build`) compiling one file."""
+    """The target's own compiler and flags (its build settings over the platform's defaults) compiling one file."""
+    from . import build
     config = project.target(target)
-    build = config.get("build") or {}
+    settings = build.settings(config)
+    if settings is None:
+        raise ValueError(f"Target {target} has no `build` settings to compile with")
     root = project.root(config["repository"])
-    compiler = root / build["compiler"]
-    argv = [str(compiler), *build.get("cflags", [])]
-    argv += [f"-I{p}" for p in includes] + [f"-I{root / i}" for i in build.get("includes", [])]
+    compiler, wanted = build.compiler(root, settings)
+    if compiler is None:
+        raise ValueError(f"No compiler {wanted} for target {target}")
+    argv = [str(compiler), *build.words(settings.get("cflags")), *build.words(settings.get("extra_cflags"))]
+    argv += [f"-I{p}" for p in includes] + [f"-I{root / i}" for i in settings.get("includes", [])]
     return argv + ["-c", str(source), "-o", str(obj)]
 
 
@@ -1439,7 +1443,7 @@ def check(program: Program, compile, scratch: Path, class_filter: str | None = N
     tables = {o.address: o.name for o in program.objects if o.name.startswith("_ZTV")}
     work = scratch / "proof"
     work.mkdir(parents=True, exist_ok=True)
-    classy = _kinds(classes, methods(program))[0]
+    classy = _kinds(classes, methods(program))
     jobs = []
     for d in built.declared.values():
         for name in d.instances or [d.name]:

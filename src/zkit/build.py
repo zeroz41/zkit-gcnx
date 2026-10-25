@@ -47,14 +47,18 @@ DEFAULTS: dict[str, dict[str, Any]] = {
                    "-fp_contract on", "-multibyte"],
         "includes": ["include", "src"],
         "ldflags": ["-fp hardware", "-nodefaults"]},
-    # Switch modules carry unwind information for every function, and the prologue's CFI fixes where the frame
-    # pointer is set up, so a module's code is only reproduced with unwind tables on.
+    # The console's facts only: its CPU, position-independent modules, and unwind information for every function
+    # (the prologue's CFI fixes where the frame pointer is set up, so code is only reproduced with unwind tables
+    # on). A game's own choices (optimization level, exceptions, RTTI, language standard) are its project's.
     "switch": {
         "compiler": "clang++",
-        "cflags": ["--target=aarch64-none-elf", "-march=armv8-a+crc+crypto", "-mtune=cortex-a57", "-fPIC", "-O3",
-                   "-fno-exceptions", "-fno-rtti", "-fasynchronous-unwind-tables", "-std=gnu++17"],
+        "cflags": ["--target=aarch64-none-elf", "-march=armv8-a+crc+crypto", "-mtune=cortex-a57", "-fPIC",
+                   "-fasynchronous-unwind-tables"],
         "includes": ["include", "src"]},
 }
+# What `zkit new` writes for a game's own choices, to confirm or change with its first matched functions: a release
+# build, without exceptions or RTTI.
+STARTING_CFLAGS = {"gamecube": [], "switch": ["-O3", "-fno-exceptions", "-fno-rtti", "-std=gnu++17"]}
 UNIT_KEYS = {"compiler", "cflags", "extra_cflags", "includes", "compiler_version", "source_root"}
 
 
@@ -72,8 +76,8 @@ def settings(target: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if not isinstance(own, dict):
         raise ValueError("A target's `build` must be an object")
-    platform = (target.get("platform") or "gamecube").lower()
-    platform = "switch" if platform in ("switch", "nx") else "gamecube"
+    from .platform import platform_name
+    platform = platform_name(target)
     for pattern, override in own.get("units", {}).items():
         unknown = set(override) - UNIT_KEYS
         if unknown:

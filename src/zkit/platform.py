@@ -228,11 +228,18 @@ def demangle_itanium(names: list[str]) -> list[str | None]:
     return [line if line != name else None for name, line in zip(names, lines)]
 
 
-def for_target(target: dict) -> Platform:
+def platform_name(target: dict) -> str:
+    """A target's platform, "gamecube" or "switch", however its project spells it."""
     kind = (target.get("platform") or "gamecube").lower()
     if kind in ("gamecube", "wii", "gc"):
-        return GameCube()
+        return "gamecube"
     if kind in ("switch", "nx"):
-        base = target.get("base", 0x7100000000)
-        return Switch(int(base, 0) if isinstance(base, str) else int(base))
+        return "switch"
     raise ValueError(f"Unknown platform {kind!r}; use gamecube or switch")
+
+
+def for_target(target: dict) -> Platform:
+    if platform_name(target) == "gamecube":
+        return GameCube()
+    base = target.get("base", 0x7100000000)
+    return Switch(int(base, 0) if isinstance(base, str) else int(base))

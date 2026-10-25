@@ -541,6 +541,22 @@ class DeferredTailTests(unittest.TestCase):
         self.assertEqual(units._shared_data(code), {0x9000})
 
 
+class InitializerNameTests(unittest.TestCase):
+    def test_only_a_unit_its_source_file_names_names_its_initializer(self):
+        """clang names a file's static initializer after the file: a unit named by a file string gets
+        `_GLOBAL__sub_I_<file>`; one named by its class, a placeholder or one piece of a file gets none."""
+        from types import SimpleNamespace
+        from zkit import analyze
+        from zkit.program import Function
+        program = SimpleNamespace(functions=[Function(0x100 + 0x10 * i, 0x10, f"fn_{i}") for i in range(4)])
+        proposal = {"units": [{"unit": "src/a.cpp", "named_by": "file string", "first": 0, "end": 1},
+                              {"unit": "src/Widget.cpp", "named_by": "class", "first": 1, "end": 2},
+                              {"unit": "unit_00000120.cpp", "named_by": "placeholder", "first": 2, "end": 3},
+                              {"unit": "src/b_00000130.cpp", "named_by": "file string", "first": 3, "end": 4}]}
+        names = analyze._initializer_names(program, proposal, {0x100: False, 0x110: False, 0x120: False, 0x130: False})
+        self.assertEqual([(p.address, p.name) for p in names], [(0x100, "_GLOBAL__sub_I_a.cpp")])
+
+
 class DirectReachTests(unittest.TestCase):
     def test_a_static_every_user_forms_directly_is_one_unit_s_however_far_apart(self):
         """s (users 0 and 70, both forming its address with adrp) is a file's static: one span; g's user 70 loads

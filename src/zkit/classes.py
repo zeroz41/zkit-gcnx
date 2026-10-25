@@ -8,7 +8,7 @@ The evidence, all of it in the original's code:
   destructor that is in no slot (non-virtual) still has CodeWarrior's destructor shape: `this` tested against zero
   before the first table store, and the second argument (the delete flag) sign-extended or tested. It is never read
   as a constructor (its store order is the reverse, so it would invert a base), and without a slot it proves no
-  class of its own. Measured on Twilight Princess: 630 of 630 destructors and none of 332 constructors.
+  class of its own.
 - A base chain never loops: an edge that would close a cycle is dropped (contradictory evidence), so every walk
   up the bases ends.
 - A constructor calling another class's constructor with `this` is calling its base's; with `this + k`, a member's
@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from . import ppcflow
+from .platform import platform_name
 from .program import Program
 from . import cwnames, vtables
 from .vtables import VTable, find
@@ -297,7 +298,7 @@ def audit_project(project, target: str | None = None, class_filter: str | None =
     from .bridge import default_target
     target = default_target(project, target)
     config = project.target(target)
-    if (config.get("platform") or "gamecube").lower() in ("switch", "nx"):
+    if platform_name(config) == "switch":
         from . import itanium                         # Itanium tables, with or without RTTI
         return {"target": target, "platform": "switch",
                 **itanium.audit(Program.from_project(project, target), class_filter, limit)}
@@ -656,7 +657,7 @@ def prove(project, target: str | None = None, class_filter: str | None = None, l
     the table pointer, and the class's size."""
     import subprocess
     from .bridge import default_target
-    if (project.target(default_target(project, target)).get("platform") or "gamecube").lower() in ("switch", "nx"):
+    if platform_name(project.target(default_target(project, target))) == "switch":
         from . import itanium
         return itanium.prove(project, target, class_filter=class_filter, limit=limit)
     from .candidate import _restage, compile_command, plain_command
@@ -788,7 +789,7 @@ def write_headers(project, target: str | None, folder: Path, types_include: str 
     """One header per recovered class (its base's header included), for a decomp that has none yet."""
     from .bridge import default_target
     target = default_target(project, target)
-    if (project.target(target).get("platform") or "gamecube").lower() in ("switch", "nx"):
+    if platform_name(project.target(target)) == "switch":
         from . import itanium                         # proven first: an unproven header says so
         program = Program.from_project(project, target)
         proof = itanium.prove(project, target, program, limit=0)

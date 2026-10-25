@@ -93,7 +93,7 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
     _p("filler_virtual", "filler virtuals (VA, CAT(f, __LINE__), reserved_N, slotNN)",
        r"CAT\s*\(\s*\w+\s*,\s*__LINE__\s*\)|\bvirtual\s+\w[\w\s\*&]*\b(?:reserved|virtual|slot|dummy|pad)_?\d+\s*\(",
        "vtables"),
-    _p("slot_name", "vtable-slot names (vfunc_67, Class__vt82)", r"\bvfunc_?\d+(?!\d)|\b[A-Za-z_]\w*?__vt\d+(?!\d)",
+    _p("slot_name", "vtable-slot names (vfunc_67, vf12, Class__vt82)", r"\bvfunc_?\d+(?!\d)|\bvf\d+\b|\b[A-Za-z_]\w*?__vt\d+(?!\d)",
        "vtables"),
     _p("local_virtual", "virtual declarations in source files (TU-local stand-in classes)",
        r"(?m)^\s*virtual\b[^;{]*[;{]", "vtables", sources_only=True),

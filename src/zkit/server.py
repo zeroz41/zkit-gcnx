@@ -21,6 +21,7 @@ from mcp.types import ToolAnnotations
 
 from . import bridge, inspect_dol, render, session
 from .activity import activity, write_handoff
+from .platform import platform_name
 from .project import Project
 from .guidance import PORT_GUIDANCE
 
@@ -112,7 +113,7 @@ def create_server(project: Project) -> FastMCP:
     use_platform(project)
     has_native = bool(bridge.role_repos(project, "native"))
     has_targets = bool(project.config.get("targets"))
-    gamecube = has_targets and any((t.get("platform") or "gamecube") == "gamecube"
+    gamecube = has_targets and any(platform_name(t) == "gamecube"
                                    for t in project.config["targets"].values())
     has_recipes = any(r.get("recipes") for r in project.config["repositories"].values())
     port = " and its native port" if has_native else ""
@@ -123,7 +124,7 @@ def create_server(project: Project) -> FastMCP:
             rels = "REL functions are written module+0xOFFSET (e.g. mymodule+0x124). "
     except Exception:  # noqa: BLE001 - an index that is not built yet just means no REL hint
         pass
-    platform = "Switch" if any(t.get("platform") == "switch" for t in project.config.get("targets", {}).values()) \
+    platform = "Switch" if any(platform_name(t) == "switch" for t in project.config.get("targets", {}).values()) \
         else "GameCube"
     mcp = FastMCP("zkit", instructions=(
         f"Evidence for a {platform} matching decomp{port} ({project.config['id']}). Start with zkit_brief. "

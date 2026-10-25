@@ -668,7 +668,7 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
 
 
 def _simple_name(demangled: str) -> str:
-    """The unqualified name of a demangled function (`fw::A::update(int)` -> `update`, `~A` for a destructor)."""
+    """The unqualified name of a demangled function (`ns::A::update(int)` -> `update`, `~A` for a destructor)."""
     depth, cut = 0, len(demangled)
     for at, c in enumerate(demangled):
         if c == "<":

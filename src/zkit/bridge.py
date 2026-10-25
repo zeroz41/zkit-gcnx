@@ -25,6 +25,7 @@ from typing import Any
 from .gc import Symbol, read_symbols
 from .index import (MODULE_SHIFT, address_text, cache_path, connect, containing, fts_query, module_address, refresh,
                     report_age_hours, report_staleness, use_platform)
+from .platform import platform_name
 from .project import Project
 
 class _Address:
@@ -304,7 +305,7 @@ def _symbol_entry(project: Project, target: str) -> tuple | None:
     path = project.file(config["repository"], config["symbols"]) if config.get("symbols") else None
     path = path if path is not None and path.is_file() else None
     original = None
-    if (config.get("platform") or "").lower() in ("switch", "nx") and config.get("original"):
+    if platform_name(config) == "switch" and config.get("original"):
         original = project.file(config["repository"], config["original"])
         original = original if original.is_file() else None
     if path is None and original is None:
@@ -504,7 +505,7 @@ def _qualified_definitions(text: str) -> dict[str, list]:
 
 def scoped_definition(lines: list[str], names: list[str], params: int | None = None) -> tuple[int, int] | None:
     """(name line, closing line) of a definition whose enclosing namespaces and classes and spelled name make one of
-    the qualified names: `void Flag::build() {` inside `namespace gf {` defines gf::Flag::build, not
+    the qualified names: `void Flag::build() {` inside `namespace ns {` defines ns::Flag::build, not
     other::Flag::build. Of several (overloads), the first declaring `params` parameters."""
     from .cxx import arity
     wanted = [n for n in names if n and "::" in n]
@@ -973,7 +974,7 @@ def lookup(project: Project, query: str, target: str | None = None, fresh: bool 
         "mentions": mentions,
         "recipes": recipes,
         "decompile": not info["exact"] and row["address"] < 1 << MODULE_SHIFT and _decompile_available(),
-        "m2c": project.target(target).get("platform", "gamecube") == "gamecube",
+        "m2c": platform_name(project.target(target)) == "gamecube",
         "limits": "Callers are direct `bl` calls; data_refs are pointers in data (vtable slots, tables). Match/link "
                   "state is the current report (report_age_h); a cite means the address is mentioned, not that "
                   "behavior was verified.",
@@ -1931,8 +1932,8 @@ def reuse(project: Project, repo: str, terms: list[str] | None = None, min_files
 # References in source: where a function or global is defined, declared and used.
 
 def _spellings(name: str) -> set[str]:
-    """A qualified name and each shorter tail of it: gf::Flag::build, Flag::build (as defined inside
-    `namespace gf {`) and build."""
+    """A qualified name and each shorter tail of it: ns::Flag::build, Flag::build (as defined inside
+    `namespace ns {`) and build."""
     if "<" in name:
         return {name, name.rsplit("::", 1)[-1]}
     parts = name.split("::")

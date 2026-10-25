@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .platform import platform_name
 from .project import Project
 
 ATTEMPT_CAP = 4
@@ -279,7 +280,7 @@ def check_unit(project: Project, target: str, query: str, candidate: Path) -> di
         debt = quality.findings(text, quality.patterns(project, project.target(target)["repository"]))
         debt, out["placeholders"] = symbol_placeholders(connect(project), target, debt)
         out["debt"] = sorted({item["label"] for item in debt})
-        if project.target(target).get("platform", "").lower() in ("switch", "nx"):
+        if platform_name(project.target(target)) == "switch":
             from .delink import read_units
             from .nxlink import link_unit
             config = project.target(target)

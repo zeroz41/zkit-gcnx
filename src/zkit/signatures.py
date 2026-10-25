@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import Iterable
 
 from . import ppc
+from .platform import platform_name
 from .program import CODE_SECTIONS, Function, Program
 
 VERSION = 4
@@ -1731,7 +1732,7 @@ def seeds(program: Program, matcher: Matcher) -> dict[int, str]:
     """The target's own names as seeds for `Matcher.run`, each as its donors' key: a name the donors have (a
     file-local one by its name where only one file has it), else a function whose parameters changed: the
     donors' only function of the same qualified name, where no target name is that function's and the target has
-    only that one name of it (an update added a parameter and the decomp named the function so), or a complete
+    only that one name of it (another build added a parameter and the decomp named the function so), or a complete
     (C1, D1) or base (C2, D2) structor whose donors spell the alias the other way. Placeholders and names two
     addresses share are none (a C++ name around an address placeholder or a `TUnk_` class too)."""
     from .platform import demangle_itanium
@@ -1815,7 +1816,7 @@ def build_project(project, target: str, name: str, complete: bool = False) -> Do
         donor.sources.append(f"{project.config['id']}:{target}")
         return donor
     from .elf import Elf
-    if (config.get("platform") or "gamecube").lower() in ("switch", "nx"):
+    if platform_name(config) == "switch":
         raise ValueError("Signatures from compiled objects read PowerPC objects only; build a Switch donor from its "
                          "original (without --complete)")
     if not config.get("report"):

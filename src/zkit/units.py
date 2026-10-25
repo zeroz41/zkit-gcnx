@@ -72,7 +72,6 @@ class Evidence:
     direct: set[tuple[int, int, str]] = field(default_factory=set)    # separations the code itself states
     borrowed: set[tuple[int, int, str]] = field(default_factory=set)  # separations only another build gives
     reach: list[tuple[int, int, str]] = field(default_factory=list)   # a unit-local object's users (`_direct_reach`)
-    inlines: dict[int, str] = field(default_factory=dict)      # function index -> header it cites (inline)
     names: dict[int, str] = field(default_factory=dict)        # function index -> `Class::method` it cites
     placed: set[int] = field(default_factory=set)              # function indexes whose file is another build's unit
     classed: set[int] = field(default_factory=set)             # function indexes whose file is their class's
@@ -111,7 +110,7 @@ def _shared_data(program: Program) -> set[int]:
 
 def _initialized(program: Program) -> set[int]:
     """Switch: the data objects some unit's own static initializer stores into (`_initializers`): globals that unit
-    defines (a class's `m_rtti`), which other units' code (their initializers' parent tables, a type test)
+    defines (a class's static type descriptor), which other units' code (their initializers' parent tables, a type test)
     reaches through the GOT, so the functions near each other that use one are no one unit's for it."""
     from .aarch64 import global_stores
     out: set[int] = set()
@@ -201,16 +200,16 @@ def _cited_reach(ev: Evidence) -> list[tuple[int, int, str]]:
 def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
     """Itanium (Switch): the functions only one class table holds (its class's own virtuals, not a base's or an
     inline another table shares) are one unit's: the class's file defines its methods, and clang emits the table and
-    the inline virtuals only it holds in one unit. For a table no symbol names (a class an update added, whose
-    functions no name ties to a class either), as far as a tight run reaches, never across two files the code
+    the inline virtuals only it holds in one unit. For a table no symbol names (a class whose functions no name ties
+    to a class either), as far as a tight run reaches, never across two files the code
     itself cites (a method defined in another file). A named class's functions go by their class (`_class_files`).
     A table with a key function is emitted with it, and the code forming its address (the class's constructors and
     destructors, or the enclosing class's code they are inlined in) is there too: with the functions only that
     table holds, inlines included, it is one unit's, as far as a tight run reaches where no file the code cites or
-    another build places changes within it (a nested listener's one virtual after its owner's code). The unit
+    another build places changes within it (a nested class's one virtual after its owner's code). The unit
     emitting a table emits the inline virtuals only it holds, and the link keeps the first copy, so none of them
     is in a later unit than its key function, one of the class's own methods in the table: from the last of
-    those to the last of the inline ones is one unit's, whatever another build places between (an update moving
+    those to the last of the inline ones is one unit's, whatever another build places between (another build moving
     code between files), unless the code there cites two files."""
     if program.platform.name != "switch":
         return []
@@ -407,7 +406,7 @@ def _deferred_tails(program: Program, ev: Evidence) -> None:
     for i in tails:
         parts = _qualified(texts[i]) if texts.get(i) else None
         if parts and len(parts) > 1 and parts[-1].lstrip("~") == re.sub(r"<.*>$", "", parts[-2]) and \
-                not re.search(r"D0E", functions[i].name):  # a complete or base structor variant
+                not re.search(r"D0Ev$", functions[i].name):  # a complete or base structor variant
             continue
         after = next((k for k in range(i + 1, min(i + 1 + TAIL_REACH, len(functions))) if strong[k]), None)
         if after is None or (owner.get(i) and owner.get(i) == owner.get(after)):
@@ -552,8 +551,6 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
         sources = {p for p in paths if not HEADER.search(p)}
         if len(sources) == 1:
             ev.files[index] = _unit_name(next(iter(sources)), ev.roots)
-        elif not sources and len(paths) == 1:
-            ev.inlines[index] = _unit_name(next(iter(paths)), ev.roots)
     for index, candidates in named.items():
         if len(candidates) == 1:                       # several: an inlined callee's string, not this function's
             ev.names[index] = next(iter(candidates))
@@ -764,10 +761,10 @@ def _class_files(program: Program, ev: Evidence) -> None:
     """A class's own functions are compiled in its file: where the module marks its inlines and template
     instances weak, a strong function of a class whose cited functions cite one file is that file's, ahead of
     another build's unit, when the citation nearest it on either side is that file's too. A class can define a
-    method in another file (`GfComBehaviorPc::callbackBattle`, among the battle code): there the citations around
+    method in another file (`Actor::onHit`, among another system's code): there the citations around
     it are that other file's, and the class says nothing; nor does it across another class's functions whose own
     citations name another file (one file including another: their classes' functions alternate), nor further
-    than a file's evidence reaches (`FILL_FUNCTIONS`). A class nested in another (`Menu::Listener`) whose own
+    than a file's evidence reaches (`FILL_FUNCTIONS`). A class nested in another (`Menu::Listener`, any nested class) whose own
     functions cite nothing is its enclosing class's file's, on the same terms."""
     from .score import placeholder
     weak, bound = set(getattr(program.image, "weak", ())), getattr(program.image, "symbols", None) or {}
@@ -1214,7 +1211,7 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
 SORTED_PAIRS = 20        # file pairs a folder-sorted link must show before its order places other units
 SORTED_SHARE = 0.95      # the share of them in name order it needs
 COMMON_DEPTH = 2         # folders two files' paths must share to place a unit between them: libraries under one
-                         # top folder cite paths from their own roots (`sources/voice_handle_api.cpp`)
+                         # top folder cite paths from their own roots (`sources/api.cpp`)
 
 
 def _not_another_build_s_file(program: Program, named: list, rename) -> list:
@@ -1281,7 +1278,7 @@ def _common_folder(a: str, b: str) -> str:
 def _unnamed(program: Program, class_of: dict[int, str], first: int, end: int,
              qualified: dict[int, str] | None = None) -> tuple[str, str]:
     """A name for a unit no file names: the class most of its functions belong to, else the class (or namespace)
-    most of their names qualify them with when no class has a constructor here (`gf::GfAssetUtil`'s static
+    most of their names qualify them with when no class has a constructor here (`ns::Util`'s static
     functions), else its address."""
     classes = collections.Counter(class_of[i] for i in range(first, end) if i in class_of) or \
         collections.Counter((qualified or {})[i] for i in range(first, end) if i in (qualified or {}))
@@ -1317,9 +1314,9 @@ def _function_classes(program: Program, qualifiers: bool = False) -> dict[int, s
 def _itanium_classes(program: Program, qualifiers: bool = False) -> dict[int, str]:
     """Function index -> the class its Itanium name qualifies it with, where some function is that class's
     constructor or destructor (a namespace has neither) and the class is no template's instance (the linker keeps
-    one of those from whichever unit comes first). The class is spelled as a path: `fw::Camera` is `fw/Camera`.
+    one of those from whichever unit comes first). The class is spelled as a path: `ns::Camera` is `ns/Camera`.
     With `qualifiers`, also a qualifier that qualifies nothing else's (a class whose constructor every caller
-    inlined, `gf::GfMoveBrakeControler`; a namespace holds classes or namespaces)."""
+    inlined, `ns::Controller`; a namespace holds classes or namespaces)."""
     from .platform import demangle_itanium
     named = [(i, f.name) for i, f in enumerate(program.functions) if f.name.startswith("_Z")]
     owners: dict[int, str] = {}
@@ -1488,7 +1485,7 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
 
 
 def _data_qualifier(text: str) -> list[str]:
-    """The `::` parts of a demangled data symbol's name (`ssd::SoundCore::audioRendererConfigName_`), brackets
+    """The `::` parts of a demangled data symbol's name (`ns::Sound::s_configName`), brackets
     kept whole."""
     depth, parts, start = 0, [], 0
     for at, c in enumerate(text):
@@ -1507,7 +1504,7 @@ def _gap_owners(program: Program, out: list[tuple[int, int, str, str]], owner: d
     """A data object between two units' ranges of a section that no claim placed (only other units' code uses it,
     or several units' do) is one of the units linked between them, both included: the linker lays out each
     object's section whole, in link order. It is the one whose code its name's deepest qualifier qualifies
-    (`ssd::SoundCore::audioRendererConfigName_` is SoundCore's unit's), when only one candidate's does; the
+    (`ns::Sound::s_configName` is Sound's unit's), when only one candidate's does; the
     objects so placed keep link order, or none of the gap's is. Weak data (the first user's), tables, guards and
     a function's statics follow their own rules, and merged literals their blocks."""
     from .platform import demangle_itanium
@@ -1806,8 +1803,8 @@ def _whole_symbols(program: Program, rows: list[tuple[int, int, str, str]]) -> l
 
 
 def _word_bounds(program: Program, start: int, stop: int) -> tuple[int, int]:
-    """A unit's data range on word boundaries where the platform aligns each object's sections to one (none of
-    4,001 starts off a word in a CodeWarrior link map), so the objects up to the next word-aligned one are this
+    """A unit's data range on word boundaries where the platform aligns each object's sections to one (CodeWarrior
+    aligns every object's sections to a word), so the objects up to the next word-aligned one are this
     unit's, and so is a start back to one. Elsewhere the range stays as claimed (`Platform.unit_alignment`)."""
     if program.platform.unit_alignment < 4:
         return start, stop

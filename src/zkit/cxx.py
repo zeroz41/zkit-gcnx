@@ -46,7 +46,7 @@ class Definition:
 
     @property
     def qualified(self) -> str:
-        """The name it defines: `void Flag::build() {` inside `namespace gf {` defines gf::Flag::build."""
+        """The name it defines: `void Flag::build() {` inside `namespace ns {` defines ns::Flag::build."""
         return f"{self.scope}::{self.name}" if self.scope else self.name
 
 

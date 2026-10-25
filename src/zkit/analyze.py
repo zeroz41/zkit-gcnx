@@ -123,12 +123,19 @@ def _unnamed(program: Program, addresses) -> Program:
                             and not _placeholder(f.name) else f for f in program.functions])
 
 
+FILE_NAMED = ("file string", "class's file", "another build")    # the `named_by` of a unit its source file names
+
+
 def _initializer_names(program: Program, proposal: dict[str, Any], initializers: dict[int, bool]) -> list:
     """Each unit's own static initializer named as clang names it: `_GLOBAL__sub_I_` and the file's name, every
-    character but letters, digits, `_` and `.` made `_`. Only where the unit has exactly one."""
+    character but letters, digits, `_` and `.` made `_`. Only where the unit has exactly one, and only for a unit
+    named by its source file (a file string, its class's cited file, another build's file), whole: a name from a
+    class, a placeholder or a piece's address suffix is no file name clang saw."""
     from . import signatures
     found: dict[str, list[int]] = {}
     for unit in proposal["units"]:
+        if unit.get("named_by") not in FILE_NAMED or re.search(r"_[0-9A-Fa-f]{8,}\.[^./]+$", unit["unit"]):
+            continue
         for index in range(unit.get("first", 0), unit.get("end", 0)):
             address = program.functions[index].address
             if address in initializers and not initializers[address]:
