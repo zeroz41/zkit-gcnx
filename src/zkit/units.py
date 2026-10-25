@@ -596,7 +596,7 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
         if index in ev.placed and before == after != unit:
             del ev.files[index]
             ev.placed.discard(index)
-    _joined_placements(ev, _initializers(program))
+    _joined_placements(ev)
     _wide_statics(program, ev)
     # One file's own citations around another's: that one is compiled inside it (included), and the run between
     # is one unit, whatever else says otherwise.
@@ -690,16 +690,13 @@ def _wide_statics(program: Program, ev: Evidence) -> None:
             ev.joins.append((lo, hi, f"{o.name} ({o.section}) is {next(iter(files))}'s only"))
 
 
-def _joined_placements(ev: Evidence, ends: list[int]) -> None:
+def _joined_placements(ev: Evidence) -> None:
     """Nor is another build's unit evidence for a function the code joins to another file's (data only that run
     of code uses, a weak function and its earliest user): the run is one unit, of the one file its own citations
     name, else of the file that build gives most of it. Where its own citations name several files (one file
-    including another), the run says nothing about which; nor does one with a unit's static initializer (`ends`)
-    before its last function: data that run uses is shared by several units (a class's static member its
-    subclasses' initializers refer to)."""
+    including another), the run says nothing about which. (Data several units' static initializers store into
+    joins nothing: `_initialized`.)"""
     for lo, hi, _ in list(ev.joins):            # the code's joins: no file run has been joined yet
-        if bisect.bisect_left(ends, lo) < bisect.bisect_left(ends, hi):
-            continue
         inside = [i for i in range(lo, hi + 1) if i in ev.files]
         if len({ev.files[i] for i in inside}) < 2:
             continue

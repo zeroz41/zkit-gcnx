@@ -257,13 +257,13 @@ class UnitEvidenceTests(unittest.TestCase):
     def test_another_build_s_unit_yields_to_the_code_s_joins(self):
         """Another build put 2-3 in a.cpp and 5 in b.cpp, but data only 2-5 use joins them: 5 is a.cpp's too, as
         most of that build's run says. 12 cites c.cpp itself and so outweighs that build's d.cpp for 10 in its
-        join; 20-30 has an initializer ending a unit at 25 (shared data), and 40-42 own citations of two files
-        (one including the other): neither says anything."""
-        ev = units.Evidence({}, [(2, 5, "data"), (10, 12, "data"), (20, 30, "data"), (40, 42, "data")], [])
+        join; 40-42 own citations of two files (one including the other): it says nothing. 20 and 30 no join
+        covers keep that build's files."""
+        ev = units.Evidence({}, [(2, 5, "data"), (10, 12, "data"), (40, 42, "data")], [])
         ev.files = {2: "a.cpp", 3: "a.cpp", 5: "b.cpp", 10: "d.cpp", 12: "c.cpp", 20: "e.cpp", 30: "f.cpp",
                     40: "g.cpp", 41: "x.cpp", 42: "h.cpp"}
         ev.placed = {2, 3, 5, 10, 20, 30, 41}
-        units._joined_placements(ev, [25])
+        units._joined_placements(ev)
         self.assertEqual(ev.files, {2: "a.cpp", 3: "a.cpp", 12: "c.cpp", 20: "e.cpp", 30: "f.cpp", 40: "g.cpp",
                                     41: "x.cpp", 42: "h.cpp"})
         self.assertEqual(ev.placed, {2, 3, 20, 30, 41})

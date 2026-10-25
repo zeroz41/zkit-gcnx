@@ -300,25 +300,7 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
             continue
         results[unit.name] = UnitLink(unit.name, whole)
         objects.append(_Object(unit.name, Elf.load(source["object"]), ranges, whole, exact))
-    placed: dict[tuple[str, int], Placed] = {}
-    for obj in objects:
-        _place_named(linker, obj, placed, results[obj.unit])
-    queue = list(placed)
-    done: set[tuple[str, int]] = set()
-    while queue:
-        key = queue.pop(0)
-        if key in done:
-            continue
-        done.add(key)
-        obj = next(o for o in objects if o.unit == key[0])
-        for new in _relocate(linker, obj, placed[key], placed, results[obj.unit]):
-            queue.append(new)
-    for key, item in placed.items():
-        result = results[item.unit]
-        _compare(linker, item, result)
-    for obj in objects:
-        _cover(linker, obj, results[obj.unit], placed)
-    identical = bytes(linker.image) == linker.original
+    identical = _link_objects(linker, objects, results)
     segments = []
     for segment in linker.module.segments:
         if segment.name not in SEGMENTS:
@@ -350,10 +332,7 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
         "collected": sum(len(r.collected) for r in results.values()),
     }
     if not identical:
-        first = next(i for i, (a, b) in enumerate(zip(linker.image, linker.original)) if a != b)
-        result["first_difference"] = {"address": linker.platform.text(first),
-                                      "ours": linker.image[first:first + 8].hex(),
-                                      "original": linker.original[first:first + 8].hex()}
+        result["first_difference"] = _first_difference(linker)
     (out / "link.json").write_text(json.dumps(result, indent=1) + "\n", encoding="utf-8")
     if mark and config.get("report"):
         from .progress import apply_link
@@ -378,31 +357,44 @@ def link_unit(project: Project, target: str, unit_name: str, object_path: Path,
         raise ValueError(f"{unit_name} is no unit of {splits}")
     ranges = sorted(r for spans in unit.ranges.values() for r in spans)
     result = UnitLink(unit.name, True)
-    obj = _Object(unit.name, Elf.load(object_path), ranges, True, set())
-    placed: dict[tuple[str, int], Placed] = {}
-    _place_named(linker, obj, placed, result)
-    queue = list(placed)
-    done: set[tuple[str, int]] = set()
-    while queue:
-        key = queue.pop(0)
-        if key in done:
-            continue
-        done.add(key)
-        queue += _relocate(linker, obj, placed[key], placed, result)
-    for item in placed.values():
-        _compare(linker, item, result)
-    _cover(linker, obj, result, placed)
-    identical = bytes(linker.image) == linker.original
+    identical = _link_objects(linker, [_Object(unit.name, Elf.load(object_path), ranges, True, set())],
+                              {unit.name: result})
     out: dict[str, Any] = {"unit": unit.name, "linked": bool(identical and result.linked), "identical": identical,
                            "functions": result.functions, "code": result.code, "data": result.data,
                            "problems": result.problems[:40], "gaps": result.gaps[:40],
                            "folded": result.folded, "collected": result.collected}
     if not identical:
-        first = next(i for i, (a, b) in enumerate(zip(linker.image, linker.original)) if a != b)
-        out["first_difference"] = {"address": linker.platform.text(first),
-                                   "ours": linker.image[first:first + 8].hex(),
-                                   "original": linker.original[first:first + 8].hex()}
+        out["first_difference"] = _first_difference(linker)
     return out
+
+
+def _link_objects(linker: Linker, objects: list[_Object], results: dict[str, UnitLink]) -> bool:
+    """Place each object's sections a name or its unit's ranges put somewhere, then what their relocations reach,
+    compare every placed section with the original's bytes and note what each unit's ranges still lack; whether
+    the image is then the original's."""
+    placed: dict[tuple[str, int], Placed] = {}
+    for obj in objects:
+        _place_named(linker, obj, placed, results[obj.unit])
+    by_unit = {obj.unit: obj for obj in objects}
+    queue, done = list(placed), set()
+    while queue:
+        key = queue.pop(0)
+        if key in done:
+            continue
+        done.add(key)
+        obj = by_unit[key[0]]
+        queue += _relocate(linker, obj, placed[key], placed, results[obj.unit])
+    for item in placed.values():
+        _compare(linker, item, results[item.unit])
+    for obj in objects:
+        _cover(linker, obj, results[obj.unit], placed)
+    return bytes(linker.image) == linker.original
+
+
+def _first_difference(linker: Linker) -> dict[str, str]:
+    first = next(i for i, (a, b) in enumerate(zip(linker.image, linker.original)) if a != b)
+    return {"address": linker.platform.text(first), "ours": linker.image[first:first + 8].hex(),
+            "original": linker.original[first:first + 8].hex()}
 
 
 def _report_rows(project: Project, target: str) -> dict[str, dict]:
