@@ -713,6 +713,42 @@ class OutOfLineCallTests(unittest.TestCase):
             self.assertEqual(owner[helper], "game/manager.cpp")
             self.assertNotIn(owner[update], ("game/manager.cpp", "game/other.cpp"))
 
+    def test_a_cheap_call_separates_however_far_apart(self):
+        """manager.cpp's tick calls Timer::update out of line across 80 more of manager.cpp's functions, further
+        than one unit's data is shared (`TIGHT`): between other.cpp's citation and manager.cpp's first, the boundary
+        crossing no reference is before update, and only the call parts timer.cpp from manager.cpp."""
+        fillers = "".join(f"int fill{i}(int v) {{ return v * {i + 2} + {i}; }}\n" for i in range(80))
+        first = 'void first(int v) { if (v > 5) report("C:/proj/src/game/manager.cpp", 3); }\n'
+        sources = dict(OUT_OF_LINE, **{"manager.cpp": OUT_OF_LINE["manager.cpp"].replace(
+            "__attribute__", first + fillers + "__attribute__")})
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in sources.items():
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, "-ffunction-sections", str(root / name), "-o",
+                                str(root / name.replace(".cpp", ".o"))], check=True, capture_output=True)
+            link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                    *(str(root / n.replace(".cpp", ".o")) for n in sources)]
+            subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
+            subprocess.run([*link, "--strip-all", "-o", str(root / "main.elf")], check=True, capture_output=True)
+            at = {s.name: s.value for s in Elf.load(root / "full.elf").symbols}
+            module = nx.load(root / "main.elf")
+            functions = module.functions()
+            symbols = [Symbol(f"fn_{a:08X}", ".text", a, "function", s, "global") for a, s in functions]
+            symbols += [Symbol(f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section in nxdata.objects(module, functions)]
+            program = Program.from_symbol_list(Switch(), module, symbols)
+            program.cflags = FLAGS
+            owner = {}
+            for unit in units.propose(program)["units"]:
+                for index in range(unit["first"], unit["end"]):
+                    owner[program.functions[index].address] = unit["unit"]
+            update, tick, first = at["_ZN5Timer6updateEf"], at["_Z4tickP5Timerif"], at["_Z5firsti"]
+            self.assertLess(update, first)
+            self.assertGreater(program.function_index[tick] - program.function_index[update], units.TIGHT)
+            self.assertEqual(owner[first], "game/manager.cpp")
+            self.assertNotIn(owner[update], ("game/manager.cpp", "game/other.cpp"))
+
 
 # beta.cpp's Beta::s_size, which only user.cpp's code reads (linked first), lies between first.cpp's data and
 # beta.cpp's own

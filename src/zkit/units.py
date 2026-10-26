@@ -402,7 +402,8 @@ def _out_of_line_calls(program: Program, ev: Evidence) -> None:
     lies between the two, placed after every other boundary and only where those left none. Cheap is LLVM's
     inline cost, not size: a short function making several calls stays a call within its file. Not for a
     function a class table holds, whose call may have been a virtual one the optimizer turned direct after
-    inlining."""
+    inlining. However far apart the two are (within a unit's reach, `TAIL_REACH`): the call says nothing of the
+    distance, and where other boundaries already lie between them it adds none."""
     threshold = inline_threshold(program.cflags)
     if program.platform.name != "switch" or threshold is None:
         return
@@ -414,7 +415,7 @@ def _out_of_line_calls(program: Program, ev: Evidence) -> None:
             function = functions[callee]
             made = len(program.calls.get(callee, ()))
             cost = INLINE_INSTRUCTION * max(function.size // 4 - made, 0) + INLINE_CALL * made
-            if callee == caller or cost > cheap or function.address in held or abs(callee - caller) > TIGHT:
+            if callee == caller or cost > cheap or function.address in held or abs(callee - caller) > TAIL_REACH:
                 continue
             lo, hi = min(caller, callee) + 1, max(caller, callee)
             ev.apart.append((lo, hi, f"{functions[caller].name} calls {function.name} "
