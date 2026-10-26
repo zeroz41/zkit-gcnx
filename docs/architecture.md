@@ -68,7 +68,7 @@ from a partially linked ELF as makerel does.
 
 The gate it is held to: on a large GameCube decomp, every function of every fully matched unit equals the compiled
 object (bytes and relocations; relocations to the same constant under another name count as equal), and every data
-pointer of those units is found. For RELs, on Twilight Princess's 757 modules: every function of their fully matched
+pointer of those units is found. For RELs, on one game's 757 modules: every function of their fully matched
 units agrees with the compiled object, and every REL written back (from itself,
 and from its partially linked ELF) is byte-identical to the original.
 

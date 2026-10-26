@@ -15,8 +15,8 @@ support.ROOT  # isolated config, cache and state for this module
 
 
 def long_init_dol() -> bytes:
-    """test_bridge's program, with an __init_registers that clears registers before setting r2/r13 (as Twilight
-    Princess does) and a data word pointing into the middle of the first function."""
+    """test_bridge's program, with an __init_registers that clears registers before setting r2/r13 (as some
+    games do) and a data word pointing into the middle of the first function."""
     code = [0] * 48
     code[0], code[1], code[2] = bl(TEXT, TEXT + 0x10), bl(TEXT + 4, TEXT + 0x20), BLR
     code[4], code[5], code[6], code[7] = lis(3, 0x8000), addi(3, 3, 0x3104), (48 << 26) | (1 << 21) | (2 << 16), BLR
@@ -67,12 +67,12 @@ class LookupToolTests(unittest.TestCase):
         import subprocess
         from zkit.bridge import lookup, readiness_of, refs
         from zkit.index import connect, containing
-        self.add_function("build__Q22gf4FlagFRCQ22gf5Param", "gf::Flag::build(gf::Param const&)", TEXT + 0x24, 4)
+        self.add_function("build__Q22ns4FlagFRCQ22ns5Param", "ns::Flag::build(ns::Param const&)", TEXT + 0x24, 4)
         (self.decomp / "src/Enemy.cpp").write_text(
             "void TEnemy::update() {\n}\nnamespace other {\nvoid Flag::build(const Param& param) {\n}\n}\n"
-            "namespace gf {\nvoid Flag::build(int a, int b) {\n}\n\nvoid Flag::build(const Param& param) {\n"
-            "    make(param);\n}\n}  // namespace gf\n", encoding="utf-8")
-        (self.decomp / "src/Flag.h").write_text("namespace gf {\nclass Flag {\npublic:\n"
+            "namespace ns {\nvoid Flag::build(int a, int b) {\n}\n\nvoid Flag::build(const Param& param) {\n"
+            "    make(param);\n}\n}  // namespace ns\n", encoding="utf-8")
+        (self.decomp / "src/Flag.h").write_text("namespace ns {\nclass Flag {\npublic:\n"
                                                 "    static void build(const Param& param);\n};\n}\n", encoding="utf-8")
         (self.decomp / "src/Other.h").write_text("class Other {\n    void build();\n};\n", encoding="utf-8")
         (self.decomp / "docs/BUILD.md").write_text("Run the build first. Flag::build makes the flags.\n",
@@ -84,7 +84,7 @@ class LookupToolTests(unittest.TestCase):
         self.assertTrue(data["body"].startswith("void Flag::build(const Param& param) {"))
         row = containing(connect(self.project), "t", TEXT + 0x24)
         self.assertEqual(readiness_of(self.project, "t", row)["definition"], "src/Enemy.cpp:11")
-        found = {r["ref"]: r["kind"] for r in refs(self.project, "gf::Flag::build")["rows"]}
+        found = {r["ref"]: r["kind"] for r in refs(self.project, "ns::Flag::build")["rows"]}
         # the overload is the same name; other::Flag::build, Other::build and "the build" are not
         self.assertEqual(found, {"decomp:src/Enemy.cpp:8": "definition", "decomp:src/Enemy.cpp:11": "definition",
                                  "decomp:src/Flag.h:4": "declaration", "decomp:docs/BUILD.md:1": "use"})
@@ -93,9 +93,9 @@ class LookupToolTests(unittest.TestCase):
         from zkit import quality
         from zkit.candidate import symbol_placeholders
         from zkit.index import connect, refresh
-        self.add_function("_ZN2gf3Foo11fn_80003024Ev", "gf::Foo::fn_80003024()", TEXT + 0x24, 4)
+        self.add_function("_ZN2ns3Foo11fn_80003024Ev", "ns::Foo::fn_80003024()", TEXT + 0x24, 4)
         refresh(self.project)
-        text = ("void f() {\n    TPlayer__sub_80003010();\n    gf::Foo::fn_80003024();\n    fn_80003028();\n"
+        text = ("void f() {\n    TPlayer__sub_80003010();\n    ns::Foo::fn_80003024();\n    fn_80003028();\n"
                 "    fn_80003030();\n}\n")
         debt, carried = symbol_placeholders(connect(self.project), "t", quality.findings(text, quality.patterns()))
         # the symbols name 0x80003010 and 0x80003024 so; no function starts at 0x80003028 or 0x80003030

@@ -214,8 +214,8 @@ class MapTests(unittest.TestCase):
   Starting        Virtual
   address  Size   address
   -----------------------
-  00000000 0000f4 800056c0  1 .text \tkartLocale.o
-  00000000 0000f4 800056c0  4 localize__10KartLocaleFv \tkartLocale.o
+  00000000 0000f4 800056c0  1 .text \tgameLocale.o
+  00000000 0000f4 800056c0  4 localize__10GameLocaleFv \tgameLocale.o
   000000f4 000010 800057b4  1 .text \tJSystem.a J3DUDL.cpp
   000000f4 000008 800057b4  4 getUseMtxNum__11J3DShapeMtxCFv \tJSystem.a J3DUDL.cpp
   UNUSED   000024 ........ unusedFunction \tJSystem.a J3DUDL.cpp
@@ -223,8 +223,8 @@ class MapTests(unittest.TestCase):
   Starting        Virtual
   address  Size   address
   -----------------------
-  00000000 000034 804273a0  1 .data \tkartLocale.o
-  00000000 000018 804273a0  4 mscpaLanguageName__10KartLocale \tkartLocale.o
+  00000000 000034 804273a0  1 .data \tgameLocale.o
+  00000000 000018 804273a0  4 mscpaLanguageName__10GameLocale \tgameLocale.o
 """
 
     def test_units_functions_and_data(self):
@@ -232,11 +232,11 @@ class MapTests(unittest.TestCase):
             path = Path(folder) / "game.MAP"
             path.write_text(self.MAP, encoding="utf-8")
             split = mwmap.read(path)
-        self.assertEqual(split.units["kartLocale.o"], [(".text", 0x800056C0, 0x800057B4),
+        self.assertEqual(split.units["gameLocale.o"], [(".text", 0x800056C0, 0x800057B4),
                                                        (".data", 0x804273A0, 0x804273D4)])
         self.assertEqual(split.units["JSystem/J3DUDL.cpp"], [(".text", 0x800057B4, 0x800057C4)])
         self.assertEqual(split.functions[0x800057B4], (8, "getUseMtxNum__11J3DShapeMtxCFv"))
-        self.assertEqual(split.objects[0x804273A0], (0x18, "mscpaLanguageName__10KartLocale", ".data"))
+        self.assertEqual(split.objects[0x804273A0], (0x18, "mscpaLanguageName__10GameLocale", ".data"))
 
 
 if __name__ == "__main__":

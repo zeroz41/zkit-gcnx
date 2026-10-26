@@ -214,7 +214,7 @@ def data_pointers(read: Callable[[int, int], bytes], start: int, end: int, symbo
     inside data the symbols mark as strings (their bytes say so) and code addresses that are not word-aligned.
 
     On a GameCube executable a 32-bit value in 0x80000000-0x817FFFFF that lands in a section and is not a pointer
-    is rare enough that every such word is taken (measured: no false pointer in 1,429 proven PSO units). The
+    is rare enough that every such word is taken (measured: no false pointer in 1,429 proven units of a GameCube decomp). The
     evidence says what the word points at: "function", "jump table", "inside function" (a function start the
     symbols lack, or a wrong boundary), "object", "inside object", or "unnamed" (no symbol covers it)."""
     first = start + (-start % 4)

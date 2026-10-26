@@ -71,17 +71,17 @@ class AuditRegressions(unittest.TestCase):
     def test_definition_finder_reads_namespace_and_class_blocks(self):
         from zkit.bridge import find_definition, parameter_count
         lines = ["namespace other {", "void Flag::build(const Param& p) {", "}", "}",
-                 "namespace gf {", "void Flag::build(int a, int b) {", "}", "",
-                 "void Flag::build(const Param& p) {", "    make(p);", "}", "}  // namespace gf",
+                 "namespace ns {", "void Flag::build(int a, int b) {", "}", "",
+                 "void Flag::build(const Param& p) {", "    make(p);", "}", "}  // namespace ns",
                  "namespace a { namespace b {", "class C {", "    int get() const { return 1; }", "};", "} }"]
-        names = ["_ZN2gf4Flag5buildERKNS_5ParamE", "gf::Flag::build"]
-        self.assertEqual(find_definition(lines, names, params=parameter_count("gf::Flag::build(gf::Param const&)")),
+        names = ["_ZN2ns4Flag5buildERKNS_5ParamE", "ns::Flag::build"]
+        self.assertEqual(find_definition(lines, names, params=parameter_count("ns::Flag::build(ns::Param const&)")),
                          (8, 10))
         self.assertEqual(find_definition(lines, names), (5, 6))  # no parameter types: the first overload
         self.assertEqual(find_definition(lines, ["a::b::C::get"]), (14, 14))  # an inline member, nested namespaces
         self.assertIsNone(find_definition(lines[4:], ["other::Flag::build"]))
         self.assertIsNone(find_definition(lines, ["b::C::get"]))  # a tail of the real name is another name
-        self.assertEqual([parameter_count(s) for s in ("F::set(unsigned int, mm::Col4 const&)",
+        self.assertEqual([parameter_count(s) for s in ("F::set(unsigned int, math::Col4 const&)",
                                                         "f(void (*)(int, int), int)", "F::get() const", "F::get")],
                          [2, 2, 0, None])
 

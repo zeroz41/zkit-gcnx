@@ -159,7 +159,7 @@ class SwitchToolTests(unittest.TestCase):
         constructor's C1 on its C2; a pair the original names apart (a class with virtual bases) keeps its own."""
         from zkit import nxlink
         self.assertEqual(nxlink.structor_partner("_ZN2fw14CommonResourceD2Ev"), "_ZN2fw14CommonResourceD1Ev")
-        self.assertEqual(nxlink.structor_partner("_ZN2gf3FooC1Ei"), "_ZN2gf3FooC2Ei")
+        self.assertEqual(nxlink.structor_partner("_ZN2ns3FooC1Ei"), "_ZN2ns3FooC2Ei")
         self.assertEqual(nxlink.structor_partner("_ZN2mm3mtl12PtrSingletonIN2gf3FooEED2Ev"),
                          "_ZN2mm3mtl12PtrSingletonIN2gf3FooEED1Ev")
         self.assertIsNone(nxlink.structor_partner("_ZN3Foo3setEv"))
@@ -300,17 +300,17 @@ class SwitchToolTests(unittest.TestCase):
         from types import SimpleNamespace
         from zkit import nxlink
         from zkit.elf import Section, Symbol
-        data = Section(1, ".data._ZN2gfL6s_tabsE", 1, nxlink.SHF_ALLOC | 1, 0, 0, 16, 0, 0, 0, 8)
-        elf = SimpleNamespace(sections=[data], symbols=[Symbol(1, "_ZN2gfL6s_tabsE", 0, 16, "object", "local", 1)],
+        data = Section(1, ".data._ZN2nsL6s_tabsE", 1, nxlink.SHF_ALLOC | 1, 0, 0, 16, 0, 0, 0, 8)
+        elf = SimpleNamespace(sections=[data], symbols=[Symbol(1, "_ZN2nsL6s_tabsE", 0, 16, "object", "local", 1)],
                               data=lambda s: bytes(16))
-        where = {"_ZN2gfL6s_tabsE": 0x900}
+        where = {"_ZN2nsL6s_tabsE": 0x900}
         linker = SimpleNamespace(by_name=lambda name, hint, ranges: where.get(name))
         obj = SimpleNamespace(elf=elf, unit="u.cpp", whole=True, exact=set(), ranges=[(0x100, 0x200), (0x800, 0x880)])
         placed, result = {}, nxlink.UnitLink("u.cpp", True)
         nxlink._place_named(linker, obj, placed, result)
         self.assertEqual((placed, result.problems), ({}, []))
-        self.assertEqual(result.unnamed, {1: "_ZN2gfL6s_tabsE"})
-        where["_ZN2gfL6s_tabsE"] = 0x840                                # the symbols name this file's own: placed
+        self.assertEqual(result.unnamed, {1: "_ZN2nsL6s_tabsE"})
+        where["_ZN2nsL6s_tabsE"] = 0x840                                # the symbols name this file's own: placed
         placed, result = {}, nxlink.UnitLink("u.cpp", True)
         nxlink._place_named(linker, obj, placed, result)
         self.assertEqual({k[1]: v.address for k, v in placed.items()}, {1: 0x840})

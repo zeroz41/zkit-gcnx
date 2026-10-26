@@ -81,9 +81,9 @@ class ItaniumClassTests(unittest.TestCase):
         at = {f.name: f.address for f in program.functions}
         self.assertEqual(names, {at["_ZNK4Leaf3getEv"]: "_ZNK4Leaf3getEv", at["_ZN5Multi4moreEv"]: "_ZN5Multi4moreEv"})
         self.assertEqual(itanium.override_names(program, every=True).get(at["_ZNK4Leaf3getEv"]), "_ZNK4Leaf3getEv")
-        self.assertEqual(itanium._swapped("_ZN2gf4Base3setEi", ["2gf", "4Base"], ["3btl", "4Leaf"]),
-                         "_ZN3btl4Leaf3setEi")
-        self.assertIsNone(itanium._swapped("_ZN2gf4Base3useEPN3btl1XE", ["2gf", "4Base"], ["3btl", "4Leaf"]))
+        self.assertEqual(itanium._swapped("_ZN2ns4Base3setEi", ["2ns", "4Base"], ["3lib", "4Leaf"]),
+                         "_ZN3lib4Leaf3setEi")
+        self.assertIsNone(itanium._swapped("_ZN2ns4Base3useEPN3lib1XE", ["2ns", "4Base"], ["3lib", "4Leaf"]))
 
     def test_headers_compile_to_the_same_tables(self):
         def compile(source, obj, include):
@@ -353,7 +353,7 @@ class TableExtentTests(unittest.TestCase):
 class HeaderDebtTests(unittest.TestCase):
     def test_a_header_declares_virtuals_a_source_file_must_not(self):
         from zkit import quality
-        line = "    virtual void update(fw::UpdateInfo const&);"
+        line = "    virtual void update(sys::UpdateInfo const&);"
         keys = {f["key"] for f in quality.findings(line, quality.DEFAULT_PATTERNS)}
         self.assertIn("local_virtual", keys)                              # in a .cpp: a stand-in class
         keys = {f["key"] for f in quality.findings(line, quality.DEFAULT_PATTERNS, header=True)}
@@ -365,14 +365,14 @@ class ArgumentRegisterTests(unittest.TestCase):
         """A member may take `this`; a pointer to member function is two words; a class by value up to two
         general or four SIMD/FP registers; a variadic list says nothing."""
         cases = {
-            "event::Manager::play(char const*, gf::GF_OBJ_HANDLE*, unsigned int, unsigned int, unsigned int, "
+            "ev::Manager::play(char const*, ns::Handle*, unsigned int, unsigned int, unsigned int, "
             "unsigned int, bool)": (8, 0),
-            "btl::BattleCharacter::IsPlayer() const": (1, 0),
-            "void fw::PadRelay::bindAction<gf::Pad, void (gf::Pad::*)()>(char const*, gf::Pad*, void (gf::Pad::*)())":
+            "lib::Character::IsPlayer() const": (1, 0),
+            "void sys::PadRelay::bindAction<ns::Pad, void (ns::Pad::*)()>(char const*, ns::Pad*, void (ns::Pad::*)())":
                 (5, 0),
             "Color::operator unsigned int() const": (1, 0),
             "mixing(int*, int)": (2, 0),
-            "scale(mm::Vec3, float)": (2, 5),
+            "scale(math::Vec3, float)": (2, 5),
         }
         for demangled, expected in cases.items():
             self.assertEqual(itanium.argument_registers(demangled), expected, demangled)

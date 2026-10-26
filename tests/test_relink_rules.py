@@ -440,16 +440,16 @@ class NeighbourFolderTests(unittest.TestCase):
         files' own order is not sorted, places nothing."""
         files = [f"game/asset/f_{c}.cpp" for c in "abcdefghijklmnopqrstuvwxy"]
         named = [(i, i + 1, name, "file string") for i, name in enumerate(files)]
-        named.insert(5, (99, 100, "gf/GfAssetUtil.cpp", "class"))
+        named.insert(5, (99, 100, "ns/AssetUtil.cpp", "class"))
         named.insert(9, (199, 200, "unit_7100001000.cpp", "placeholder"))
-        named.append((299, 300, "gf/GfTail.cpp", "class"))                     # no file after it
+        named.append((299, 300, "ns/Tail.cpp", "class"))                     # no file after it
         out = units._in_neighbours_folder(named, {})
-        self.assertEqual(out[5][2], "game/asset/GfAssetUtil.cpp")
+        self.assertEqual(out[5][2], "game/asset/AssetUtil.cpp")
         self.assertEqual(out[9][2], "game/asset/unit_7100001000.cpp")
-        self.assertEqual(out[-1][2], "gf/GfTail.cpp")
+        self.assertEqual(out[-1][2], "ns/Tail.cpp")
         shuffled = [(i, i + 1, name, "file string") for i, name in enumerate(reversed(files))]
-        shuffled.insert(5, (99, 100, "gf/GfAssetUtil.cpp", "class"))
-        self.assertEqual(units._in_neighbours_folder(shuffled, {})[5][2], "gf/GfAssetUtil.cpp")
+        shuffled.insert(5, (99, 100, "ns/AssetUtil.cpp", "class"))
+        self.assertEqual(units._in_neighbours_folder(shuffled, {})[5][2], "ns/AssetUtil.cpp")
 
     def test_a_unit_between_two_folders_takes_the_folder_both_are_in(self):
         """Between the last file of one folder and the first of another, a sorted folder walk lists only files of
@@ -706,8 +706,8 @@ class AnotherBuildNameTests(unittest.TestCase):
         for i, name in enumerate(files):
             named.append((2 * i, 2 * i + 1, name, "file string"))
             named.append((2 * i + 1, 2 * i + 2, f"app/game/Zeta{i}.cpp", "another build"))
-        named.insert(5, (99, 100, "gf/GfAssetUtil.cpp", "class"))
-        self.assertEqual(units._in_neighbours_folder(named, {})[5][2], "app/game/GfAssetUtil.cpp")
+        named.insert(5, (99, 100, "ns/AssetUtil.cpp", "class"))
+        self.assertEqual(units._in_neighbours_folder(named, {})[5][2], "app/game/AssetUtil.cpp")
 
 
 class RecursionTests(unittest.TestCase):

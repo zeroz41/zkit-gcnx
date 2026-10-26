@@ -232,8 +232,8 @@ class SizeTests(unittest.TestCase):
 class SymbolsFileTests(unittest.TestCase):
     def test_update_keeps_attributes_it_does_not_model(self):
         image = Image()
-        program = Program(Fake(), image, [Function(0x80004000, 0x10, "localize__10KartLocaleFv")],
-                          [DataObject(0x80100000, 4, "msCountry__10KartLocale", ".sdata")])
+        program = Program(Fake(), image, [Function(0x80004000, 0x10, "localize__10GameLocaleFv")],
+                          [DataObject(0x80100000, 4, "msCountry__10GameLocale", ".sdata")])
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "symbols.txt"
             path.write_text("fn_80004000 = .text:0x80004000; // type:function size:0x10 scope:global align:16\n"
@@ -243,8 +243,8 @@ class SymbolsFileTests(unittest.TestCase):
             mapalign.update_symbols(path, program, {0x80100004})
             lines = path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(lines, [
-            "localize__10KartLocaleFv = .text:0x80004000; // type:function size:0x10 scope:global align:16",
-            "msCountry__10KartLocale = .sdata:0x80100000; // type:object size:0x4 scope:global hidden",
+            "localize__10GameLocaleFv = .text:0x80004000; // type:function size:0x10 scope:global align:16",
+            "msCountry__10GameLocale = .sdata:0x80100000; // type:object size:0x4 scope:global hidden",
             "_ctors = .ctors:0x80200000; // type:label scope:global"])
 
 
