@@ -83,6 +83,7 @@ class Evidence:
                                                                       # only where those left none
     tails: list[tuple[int, int, str]] = field(default_factory=list)   # separations placed after the stated ones,
                                                                       # before `apart`: only where those left none
+    globals: set[tuple[int, int, str]] = field(default_factory=set)   # joins only a global's near users make
 
     def joined(self, count: int, joins: list[tuple[int, int, str]] | None = None) -> list[bool]:
         """joined[p]: a boundary before function p would split one unit (by `joins`, default all of them)."""
@@ -133,9 +134,10 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     per_unit = program.platform.literals_per_unit
     text = program.platform.text
     shared = _shared_data(program)
-    joins = [(fs[0], fs[-1], f"{o.name} ({o.section}) is one unit's") for o, fs in local.items()
+    tight = [(o, fs) for o, fs in local.items()
              if fs[-1] > fs[0] and (o.section in WRITABLE_SECTIONS or per_unit) and o.address not in initialized
              and o.address not in shared]
+    joins = [(fs[0], fs[-1], f"{o.name} ({o.section}) is one unit's") for o, fs in tight]
     separations = []
     if per_unit:
         copies: dict[tuple[str, bytes], list[DataObject]] = collections.defaultdict(list)
@@ -153,6 +155,7 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
                                         f"two copies of one constant: {text(a.address)} and {text(b.address)}"))
     firsts = _first_users(program)
     ev = Evidence(local, joins + firsts, separations, firsts=firsts)
+    ev.globals = {row for row, (o, fs) in zip(joins, tight) if _through_got(program, o, fs)}
     ev.reach = _direct_reach(program, users, shared | initialized)
     _file_evidence(program, ev, placed)
     ev.reach = _cited_reach(ev)
@@ -163,6 +166,27 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     _initializer_ends(program, ev)
     _start_up_object(program, ev)
     return ev
+
+
+def _through_got(program: Program, o: DataObject, fs) -> bool:
+    """Switch, built -fPIC with default visibility (`got_globals`): whether some code in fs loads o's address from
+    a `.got` slot, as every unit's code reaches a global of default visibility (a class's static member, a file's
+    exported variable), its defining unit's too: the next file's code reaches it the same way as its own file's."""
+    if program.platform.name != "switch" or not got_globals(program.cflags):
+        return False
+    from .aarch64 import track_addresses
+    from .platform import _got
+    slots = _got(program.image)
+    load64 = program.image.pointers.get
+    for i in fs:
+        f = program.functions[i]
+        for a, kind in track_addresses(program.platform.words(program.image, f.address, f.size), f.address,
+                                       None).values():
+            if kind == "load" and any(lo <= a < hi for lo, hi in slots):
+                value = load64(a)
+                if value is not None and o.address <= value < o.address + max(o.size, 1):
+                    return True
+    return False
 
 
 def _direct_reach(program: Program, users, skip: set[int]) -> list[tuple[int, int, str]]:
@@ -459,8 +483,10 @@ def _deferred_tails(program: Program, ev: Evidence) -> None:
     definition or first reference. An external definition is created at the latest where it is defined, but an
     inline, a template instance or a file-local function only data refers to (a class's table, a static table of
     callbacks) is created when that data is emitted, after all of the unit's definitions: it is in its unit's
-    tail, in the unit of the definitions before it. So an external definition after it is another unit's: a
-    boundary lies between the two. Code that once
+    tail, in the unit of the definitions before it. So is one only such functions' code refers to (an inline, a
+    template instance, a file-local function): clang emits their bodies after the unit's definitions too. So an
+    external definition after it is another unit's: a boundary lies between the two, through a run of a global's
+    near users (`globals`) too. Code that once
     called it and inlined the call would have created it among the definitions, so not for a constructor's or a
     destructor's complete or base variant (a derived or enclosing class's destructor calls them), nor before a
     definition of the function's own class (its own methods call it). Weak is the module's mark (or the binding
@@ -476,13 +502,27 @@ def _deferred_tails(program: Program, ev: Evidence) -> None:
     weak, local, strong = _bindings(program)
     if not any(strong) or not (weak or local):
         return
-    referred = _code_referred(program)                   # functions some code calls or takes the address of
     tables: dict[int, set] = collections.defaultdict(set)   # function -> the data holding it, not an initializer
     for holder, pointee in program.pointers:              # list (`.init_array`: run at start-up, created where
         table = program.object_at(holder) if pointee in index else None    # its variable is, or at the very end)
         if table is not None and table.section not in INITIALIZER_SECTIONS:
             tables[index[pointee]].add(table)
-    tails = [i for i in sorted(set(tables) - referred) if functions[i].address in weak or i in local]
+    by: dict[int, set[int]] = collections.defaultdict(set)    # function -> the other functions' code referring to it
+    for caller, callees in program.calls.items():
+        for callee in callees:
+            by[callee].add(caller)
+    for user, rows in program.refs.items():
+        for _, address, _ in rows:
+            if address in index:
+                by[index[address]].add(user)
+    held = {index[pointee] for _, pointee in program.pointers if pointee in index}
+    # a body clang emits after the unit's definitions: a file-local function's, or a weak one's something refers to
+    # (an inline, a template instance; a weak one nothing refers to is a definition the unit emits anyway)
+    deferred = [i in local or functions[i].address in weak and (bool(by[i] - {i}) or i in held)
+                for i in range(len(functions))]
+    late = {i for i, users in by.items() if users - {i} and all(deferred[u] for u in users - {i})}
+    tails = [i for i in sorted(set(tables) | late) if (functions[i].address in weak or i in local)
+             and (i in late or not by[i] - {i})]
     if not tails:
         return
     text = program.platform.text
@@ -502,7 +542,8 @@ def _deferred_tails(program: Program, ev: Evidence) -> None:
         if after is None or (owner.get(i) and owner.get(i) == owner.get(after)):
             continue
         ev.tails.append((i + 1, after, f"{functions[i].name} ({text(functions[i].address)}) is created only by "
-                                       f"data, at its unit's end; {functions[after].name} is defined before it"))
+                                       f"{'deferred code' if i in late else 'data'}, at its unit's end; "
+                                       f"{functions[after].name} is defined before it"))
 
 
 def _first_users(program: Program) -> list[tuple[int, int, str]]:
@@ -1085,6 +1126,7 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     ev = ev or evidence(program)
     count = len(program.functions)
     joined = ev.joined(count)
+    held = ev.joined(count, [j for j in ev.joins if j not in ev.globals]) if ev.globals else joined
     cited = ev.joined(count, ev.cited)
     first = ev.joined(count, ev.firsts)
     reach = ev.joined(count, ev.reach)
@@ -1113,13 +1155,16 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     apart = sorted(set(ev.apart), key=lambda r: (r[1] - r[0], r[0]))
     apart_rows = set(apart)
     tails = sorted(set(ev.tails) - set(rows), key=lambda r: (r[1] - r[0], r[0]))
+    tail_rows = set(tails)
     owner = _function_classes(program, qualifiers=True) if apart else {}
     for row in [r for r in stated if r not in ev.edges] + [r for r in stated if r in ev.edges] + rest + tails + apart:
         lo, hi, because = row
         toward = ev.edges.get(row, lo)  # among equal places, the one nearest the evidence (else the earliest)
         if any(lo <= c.position <= hi for c in chosen):
             continue
-        candidates = [p for p in range(lo, hi + 1) if not joined[p] and not (row in ev.borrowed and reach[p])]
+        # the order clang creates a unit's functions in (a deferred tail) parts a global's near users (`globals`)
+        bound = held if row in tail_rows else joined
+        candidates = [p for p in range(lo, hi + 1) if not bound[p] and not (row in ev.borrowed and reach[p])]
         if not candidates and (lo, hi, because) in ev.direct:   # data one run uses across what the code itself
             candidates = [p for p in range(lo, hi + 1) if not cited[p] and not first[p]]   # separates is shared
             # (a template's table, an inline's static, a class's static member); a weak function is in its first

@@ -541,6 +541,49 @@ class DeferredTailTests(unittest.TestCase):
         code.objects = [DataObject(0x9000, 8, "_ZTV1TIiE", ".data", "weak"), DataObject(0x9100, 8, "s", ".bss")]
         self.assertEqual(units._shared_data(code), {0x9000})
 
+    def test_a_function_only_deferred_code_refers_to_is_a_tail(self):
+        """0 (a.cpp) calls weak 1, created there; 1's body is emitted with the unit's other inlines, after every
+        definition, and only it refers to weak 3, created then: 4, an external definition after 3, is b.cpp's.
+        Weak 5 strong 4 calls too is created among the definitions: no tail. Weak 6, which nothing refers to, is a
+        definition the unit emits anyway (a weak attribute), with its body: 7, which only 6 calls, is no tail."""
+        code = _Code(10, weak=[1, 3, 5, 6, 7])
+        code.pointers, code.object_at, code.users = [], lambda a: None, lambda: {}
+        code.calls = {0: [1], 1: [3, 5], 4: [5], 6: [7]}
+        ev = units.Evidence({}, [], [])
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            units._deferred_tails(code, ev)
+        self.assertEqual([(lo, hi) for lo, hi, _ in ev.tails], [(4, 4)])
+
+    def test_a_tail_parts_a_global_s_near_users_only(self):
+        """A tail's boundary (before 4) goes through the run of a global's near users (2-6, `globals`: the next
+        file reaches it through the GOT as its own file does), not through a run any other data holds."""
+        code = _Code(8)
+        code.pointers, code.object_at, code.users = [], lambda a: None, lambda: {}
+        row = (2, 6, "g (.bss) is one unit's")
+        ev = units.Evidence({}, [row], [])
+        ev.globals, ev.tails = {row}, [(4, 4, "3 is created only by deferred code")]
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            self.assertEqual([b.position for b in units.boundaries(code, ev)], [4])
+            ev.globals = set()
+            self.assertEqual(units.boundaries(code, ev), [])
+
+    def test_a_global_is_what_code_loads_from_a_got_slot(self):
+        """g's user 1 loads its address from the .got slot at 0x8008; s's users form it directly: g is a global,
+        s is not; neither where the build's globals are not reached through the GOT."""
+        from types import SimpleNamespace
+        code = _Code(4)
+        code.image = SimpleNamespace(tables={".got": (0x8000, 0x8100)}, pointers={0x8008: 0x9100})
+        code.platform.words = lambda image, address, size: [address]
+        s, g = DataObject(0x9000, 8, "lbl_9000", ".bss"), DataObject(0x9100, 8, "lbl_9100", ".bss")
+        rows = {0: [(0x9000, "addr")], 1: [(0x8008, "load"), (0x9000, "addr")], 2: [(0x9000, "addr")]}
+        track = lambda words, start, load64: {start + 4 * k: r for k, r in
+                                              enumerate(rows.get((start - 0x1000) // 0x40, []))}
+        with unittest.mock.patch("zkit.aarch64.track_addresses", track):
+            self.assertEqual((units._through_got(code, g, [0, 1]), units._through_got(code, s, [0, 2])),
+                             (True, False))
+            code.cflags = ["-O3", "-fPIC", "-fvisibility=hidden"]
+            self.assertFalse(units._through_got(code, g, [0, 1]))
+
 
 class InitializerNameTests(unittest.TestCase):
     def test_only_a_unit_its_source_file_names_names_its_initializer(self):
