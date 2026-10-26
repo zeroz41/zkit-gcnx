@@ -157,6 +157,7 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     _file_evidence(program, ev, placed)
     ev.reach = _cited_reach(ev)
     ev.joins += _table_joins(program, ev)
+    ev.joins += _held_statics(program, ev)
     _out_of_line_calls(program, ev)
     _deferred_tails(program, ev)
     _initializer_ends(program, ev)
@@ -171,21 +172,24 @@ def _direct_reach(program: Program, users, skip: set[int]) -> list[tuple[int, in
     apart (`boundaries`) where the code in the span cites its file (`_cited_reach`); its own citations still do."""
     if program.platform.name != "switch" or not got_globals(program.cflags):
         return []
-    from .aarch64 import track_addresses
     out = []
     for o, fs in users.items():
         if o.section not in WRITABLE_SECTIONS or o.address in skip or len(fs) < 2 or max(fs) - min(fs) <= TIGHT:
             continue
-        direct = True
-        for i in fs:
-            f = program.functions[i]
-            rows = track_addresses(program.platform.words(program.image, f.address, f.size), f.address, None)
-            if not any(o.address <= a < o.address + max(o.size, 1) for a, _ in rows.values()):
-                direct = False                         # its address comes from a slot: a global
-                break
-        if direct:
+        if _formed_directly(program, o, fs):
             out.append((min(fs), max(fs), f"{o.name} ({o.section}) is formed directly, never through the GOT"))
     return out
+
+
+def _formed_directly(program: Program, o: DataObject, fs) -> bool:
+    """Whether every function in fs forms o's address itself (adrp), none loads it from a `.got` slot (a global)."""
+    from .aarch64 import track_addresses
+    for i in fs:
+        f = program.functions[i]
+        rows = track_addresses(program.platform.words(program.image, f.address, f.size), f.address, None)
+        if not any(o.address <= a < o.address + max(o.size, 1) for a, _ in rows.values()):
+            return False
+    return True
 
 
 def _cited_reach(ev: Evidence) -> list[tuple[int, int, str]]:
@@ -285,6 +289,90 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
             continue
         out.append((own[0], own[-1], f"the functions only the table at {text(address)} holds"))
     return out
+
+
+def _held_statics(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
+    """Switch: a file-local function or object (internal linkage: a function no entry in the module's symbol table
+    names, `_bindings`, a name mangled `_ZL`, or, built -fPIC with default visibility (`got_globals`), a writable
+    object every code user forms directly, `_formed_directly`; a literal is formed directly and merged across
+    units) can be referred to only from its own unit, by its
+    code or by its data's initializers. So data holding one is defined in its unit, and so is the code forming a
+    file-local object's address. File-local functions no code refers to (a static table of callbacks), the data
+    holding them, the file-local objects that data holds and the code forming those objects' addresses are one
+    unit's: from the first of those functions to the last is one unit's, however far (within `TAIL_REACH`), where
+    the code in the span cites at most one file itself. Not through a class's table (`_ZTV`, weak, or one
+    `itanium._groups` reads): its virtuals are held by derived classes' tables too, which other files emit."""
+    if program.platform.name != "switch" or not getattr(program, "pointers", None):
+        return []
+    from .itanium import _groups
+    direct = got_globals(program.cflags)
+    weak, local, _ = _bindings(program)
+    shared = _shared_data(program)
+    index, functions = program.function_index, program.functions
+    referred = _code_referred(program)
+    users = program.users()
+    parent: dict = {}
+
+    def find(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def tables(o) -> bool:                                  # data whose pointers say nothing of one unit
+        return o is None or o.address in shared or o.address in weak or o.name.startswith("_ZTV") or \
+            o.section in INITIALIZER_SECTIONS or bool(_groups(program, o.address, o.size)) or \
+            bool(_groups(program, o.address - 16, o.size + 16))
+
+    def file_local(o) -> bool:                              # a literal is formed directly and merged across units
+        return o.name.startswith("_ZL") or o.scope == "local" or \
+            direct and o.section in WRITABLE_SECTIONS and bool(users.get(o)) and _formed_directly(program, o, users[o])
+    excluded: dict = {}
+    for holder, pointee in program.pointers:
+        found = program.object_at(holder)
+        if found not in excluded:
+            excluded[found] = tables(found)
+        if excluded[found]:
+            continue
+        if pointee in index:
+            i = index[pointee]
+            if (i in local or functions[i].name.startswith("_ZL")) and functions[i].address not in weak and \
+                    i not in referred:
+                parent[find(found)] = find(i)
+        elif (target := program.object_at(pointee)) is not None and target != found:
+            if target not in excluded:
+                excluded[target] = tables(target)
+            if not excluded[target] and file_local(target):
+                parent[find(found)] = find(target)
+    statics = {x for x in parent if isinstance(x, int)}
+    for o in [x for x in parent if not isinstance(x, int)]:  # code forming a file-local object's address
+        if users.get(o) and file_local(o):
+            for i in users[o]:
+                parent[find(i)] = find(o)
+    groups: dict = collections.defaultdict(set)
+    for x in parent:
+        if isinstance(x, int):
+            groups[find(x)].add(x)
+    own = {i: f for i, f in ev.files.items() if i not in ev.placed and i not in ev.classed}
+    out = []
+    for members in groups.values():
+        lo, hi = min(members), max(members)
+        if hi > lo and hi - lo <= TAIL_REACH and members & statics and \
+                len({own[i] for i in range(lo, hi + 1) if i in own}) <= 1:
+            out.append((lo, hi, f"{len(members & statics)} file-local functions only data refers to, the data "
+                                f"and the code forming its address ({functions[hi].name}) are one unit's"))
+    return out
+
+
+def _code_referred(program: Program) -> set[int]:
+    """The functions some other function's code calls or forms the address of."""
+    if "code referred" not in program.cache:
+        index = program.function_index
+        out = {c for caller, callees in program.calls.items() for c in callees if c != caller}
+        out |= {index[a] for user, rows in program.refs.items() for _, a, _ in rows
+                if a in index and index[a] != user}
+        program.cache["code referred"] = out
+    return program.cache["code referred"]
 
 
 INLINE_INSTRUCTION, INLINE_CALL = 5, 25    # LLVM's inline cost of an instruction and of a call it makes
@@ -387,14 +475,7 @@ def _deferred_tails(program: Program, ev: Evidence) -> None:
     weak, local, strong = _bindings(program)
     if not any(strong) or not (weak or local):
         return
-    referred = set()                                     # functions some code calls or takes the address of
-    for caller, callees in program.calls.items():
-        referred.update(c for c in callees if c != caller)
-    for user, rows in program.refs.items():
-        for _, address, _ in rows:
-            target = index.get(address)
-            if target is not None and target != user:
-                referred.add(target)
+    referred = _code_referred(program)                   # functions some code calls or takes the address of
     tables: dict[int, set] = collections.defaultdict(set)   # function -> the data holding it, not an initializer
     for holder, pointee in program.pointers:              # list (`.init_array`: run at start-up, created where
         table = program.object_at(holder) if pointee in index else None    # its variable is, or at the very end)

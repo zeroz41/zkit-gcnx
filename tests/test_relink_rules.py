@@ -594,6 +594,52 @@ class DirectReachTests(unittest.TestCase):
         self.assertEqual(units._cited_reach(ev), [(0, 10, "s")])
 
 
+class HeldStaticsTests(unittest.TestCase):
+    def _code(self):
+        """2-5 file-local callbacks only table T holds; record R (a global, its user 7 loads it from a slot) holds
+        T and the file-local 6; table U, formed directly by 8, holds 9; T also points at a literal function 0
+        forms; 10 is held by T but also called; 11 is held by a class table."""
+        from dataclasses import replace
+        code = _Code(12)
+        code.platform.words = lambda image, address, size: [address]
+        statics = {2, 3, 4, 5, 6, 9, 10, 11}
+        code.functions = [replace(f, name=f"_ZL{i}f" if i in statics else f.name) for i, f in enumerate(code.functions)]
+        address = lambda i: code.functions[i].address
+        t, r = DataObject(0x9000, 0x40, "_ZL7s_table", ".data"), DataObject(0x9100, 0x10, "rec", ".data")
+        u, s = DataObject(0x9200, 0x8, "lbl_9200", ".data"), DataObject(0x9300, 0x8, "lbl_9300", ".rodata")
+        v = DataObject(0x9400, 0x18, "_ZTV1V", ".data")
+        objects = [t, r, u, s, v]
+        code.objects = objects
+        code.object_at = lambda a: next((o for o in objects if o.address <= a < o.address + o.size), None)
+        code.pointers = [(0x9000, address(2)), (0x9008, address(3)), (0x9010, address(4)), (0x9018, address(5)),
+                         (0x9020, 0x9300), (0x9028, address(10)), (0x9100, 0x9000), (0x9108, address(6)),
+                         (0x9200, address(9)), (0x9410, address(11))]
+        code.refs = {0: [(0, 0x9300, "addr")], 7: [(0, 0x9100, "addr")], 8: [(0, 0x9200, "addr")]}
+        code.calls = {1: [10]}
+        code.users = lambda: {s: {0}, r: {7}, u: {8}}
+        formed = {0: [0x9300], 8: [0x9200]}                   # 7 loads rec from its slot
+        rows = lambda words, start, load64: {start + 4 * k: (a, "addr") for k, a in
+                                             enumerate(formed.get((start - 0x1000) // 0x40, []))}
+        return code, rows
+
+    def test_file_local_functions_only_data_holds_are_in_the_unit_of_that_data(self):
+        """2-6 are one unit's (T's callbacks, R holds T and 6); 8 forms U, a writable object, directly: 8-9; not
+        the literal's user 0, not called 10, not the class table's 11, not 7 (rec is a global)."""
+        from unittest import mock
+        code, rows = self._code()
+        ev = units.Evidence({}, [], [])
+        with mock.patch("zkit.aarch64.track_addresses", rows), mock.patch("zkit.itanium._groups", return_value=[]):
+            self.assertEqual(sorted((lo, hi) for lo, hi, _ in units._held_statics(code, ev)), [(2, 6), (8, 9)])
+            ev.files = {3: "a.cpp", 6: "b.cpp"}                # the code itself cites two files: no join there
+            self.assertEqual(sorted((lo, hi) for lo, hi, _ in units._held_statics(code, ev)), [(8, 9)])
+            ev.files = {}
+            code.cflags = ["-O3", "-fPIE"]                     # every global formed directly: U is no proof
+            self.assertEqual([(lo, hi) for lo, hi, _ in units._held_statics(code, ev)], [(2, 6)])
+            from zkit.platform import GameCube
+            code.platform = GameCube()
+            self.assertEqual(units._held_statics(code, ev), [])
+
+
 class AnotherBuildNameTests(unittest.TestCase):
     def test_a_file_s_name_from_another_build_yields_to_its_own_citations_anywhere(self):
         """a.cpp's own code is unit 3; another build also names units 0 and 2 after it (its coarser unit): on the
