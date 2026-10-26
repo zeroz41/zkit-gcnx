@@ -521,6 +521,54 @@ class DeferredTailTests(unittest.TestCase):
             units._deferred_tails(code, ev)
         self.assertEqual([(lo, hi) for lo, hi, _ in ev.joins], [(2, 3), (3, 4)])
 
+    def test_a_tail_joins_code_using_an_object_whose_table_holds_it(self):
+        """No code forms the table's address, but 1 uses an object whose first word points to it (a constant
+        initialized instance of the class): the unit defining the object emits its table, so 2 and 3 join 1."""
+        code = self._code()
+        table = code.object_at(0x9000)
+        instance = DataObject(0x9400, 0x10, "lbl_9400", ".data")
+        code.pointers = code.pointers + [(0x9400, 0x9000)]
+        code.object_at = lambda a: instance if 0x9400 <= a < 0x9410 else table if 0x9000 <= a < 0x9040 else None
+        code.users = lambda: {instance: {1}}
+        ev = units.Evidence({}, [], [])
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            units._deferred_tails(code, ev)
+        self.assertEqual([(lo, hi) for lo, hi, _ in ev.joins], [(1, 2), (2, 3), (3, 4), (5, 6)])
+
+    def test_data_holding_functions_only_it_refers_to_is_their_unit_s(self):
+        """Every unit emitting the table emits the inline (2) and the file-local function (3) only it holds, so
+        the kept copies come from one unit: the table is a.cpp's, whoever builds the class; a table whose only
+        held functions are in two units, or are also called, has no such owner."""
+        code = self._code()
+        code.in_code = lambda a: False
+        owner = {i: "a.cpp" if i < 7 else "b.cpp" for i in range(10)}
+        weak = units._weak(code)
+        held = [(0x9000, 0x9040, "a.cpp", ".data")]
+        self.assertEqual(units._held_tables(code, owner, weak), held)
+        owner[4] = owner[6] = "c.cpp"                  # 4 and 6: weak, held, but now in other units
+        self.assertEqual(units._held_tables(code, owner, weak), [])
+        code.pointers = code.pointers[:2]
+        self.assertEqual(units._held_tables(code, owner, weak), held)
+        code.calls = {8: {2}}
+        code.pointers = code.pointers[:1]
+        self.assertEqual(units._held_tables(code, owner, weak), [])
+
+    def test_a_merged_literal_several_units_tables_name_is_the_first_unit_s(self):
+        """Only data points to the string: a.cpp's table and b.cpp's (b first in memory, a first in link order).
+        The linker keeps the first unit's copy; one table's string, or one some code uses, is not this rule's."""
+        from types import SimpleNamespace
+        string = DataObject(0x7000, 0x10, "lbl_7000", ".rodata")
+        alone = DataObject(0x7010, 0x8, "lbl_7010", ".rodata")
+        objects = {0x7000: string, 0x7010: alone}
+        program = SimpleNamespace(users=lambda: {}, in_code=lambda a: False, object_at=objects.get,
+                                  pointers=[(0x9000, 0x7000), (0x9100, 0x7000), (0x9108, 0x7010)])
+        claims = [(0x9000, 0x9008, "b.cpp", ".data"), (0x9100, 0x9110, "a.cpp", ".data")]
+        order = {"a.cpp": 0, "b.cpp": 1}
+        self.assertEqual(units._shared_literals(program, claims, order, set(order)),
+                         [(0x7000, 0x7010, "a.cpp", ".rodata")])
+        program.users = lambda: {string: {3}}
+        self.assertEqual(units._shared_literals(program, claims, order, set(order)), [])
+
     def test_a_named_function_a_table_holds_is_not_known_strong_without_the_module_s_listing(self):
         """Without a symbol table listing the module's functions, a name's binding is known only where it is weak:
         named 5 is strong, held 6 is not (its weak mark may not have come with its name), placeholders never."""

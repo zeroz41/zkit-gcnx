@@ -491,7 +491,8 @@ def _deferred_tails(program: Program, ev: Evidence) -> None:
     destructor's complete or base variant (a derived or enclosing class's destructor calls them), nor before a
     definition of the function's own class (its own methods call it). Weak is the module's mark (or the binding
     a name came with); file-local is no entry in a module whose symbol table lists its other functions. Such a
-    function joins the code before it only when that code forms the address of data holding it: a unit can lose
+    function joins the code before it only when that code forms the address of data holding it, or of an object
+    pointing to that data (a constant-initialized instance: its unit emits its class table): a unit can lose
     all its definitions to the linker's garbage collection and keep only its tail (an inline virtual of a class
     whose table later units emit too, the first copy kept) and its static initializer. A start-up list
     (`.init_array`) holds initializers, created where their variable is or after everything: no tails."""
@@ -527,8 +528,16 @@ def _deferred_tails(program: Program, ev: Evidence) -> None:
         return
     text = program.platform.text
     users = program.users()
+    within: dict[DataObject, set[DataObject]] = collections.defaultdict(set)   # data -> data pointing into it (an
+    for holder, pointee in program.pointers:          # object whose class table it is: its unit emits the table)
+        outer, inner = program.object_at(holder), program.object_at(pointee)
+        if outer is not None and inner is not None and outer is not inner:
+            within[inner].add(outer)
+
+    def emitters(table: DataObject) -> set[int]:
+        return users.get(table, set()).union(*(users.get(o, set()) for o in within.get(table, ())))
     for i in tails:                     # in the unit of the code before it, when that code emits data holding it
-        if i and any(i - TAIL_REACH <= user < i for table in tables[i] for user in users.get(table, ())):
+        if i and any(i - TAIL_REACH <= user < i for table in tables[i] for user in emitters(table)):
             ev.joins.append((i - 1, i, f"{functions[i].name} ({text(functions[i].address)}) is created only by "
                                        f"data, after {functions[i - 1].name}"))
     texts = dict(zip(tails, demangle_itanium([functions[i].name for i in tails])))
@@ -1537,7 +1546,9 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     data (an inline's static, a template's member or table) is in every unit using it, and the linker keeps the
     copy of the first in link order: it is that unit's. Data several units use is the unit's whose own static
     initializer stores into it, when only one does: the unit defining a global runs its constructor (a class's
-    runtime type, a file's static vectors), however many others read it."""
+    runtime type, a file's static vectors), however many others read it. Otherwise (Switch) data holding
+    functions only it refers to is the unit's holding them (`_held_tables`), and a merged literal only several
+    units' data points to is the first unit's in link order (`_shared_literals`)."""
     from .link import LINKER_OBJECTS
     order: dict[str, int] = {}                         # unit -> its place in link order (its first code)
     ordered = set()                                    # .init code says nothing of where its unit is linked
@@ -1555,6 +1566,9 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     keyed = _key_function_tables(program, owner, weak) if program.platform.name == "switch" else []
     keyed_at = {row[0] for row in keyed}               # where the order of the others allows (below): a table
                                                        # out of its key function's order says the units are wrong
+    held = {row[0]: row for row in _held_tables(program, owner, _weak(program)) if row[0] not in keyed_at} \
+        if program.platform.name == "switch" else {}  # data holding functions only it refers to: where no
+    decided: set[int] = set()                          # one unit's code or initializer claims it (below)
     for o, fs in program.users().items():              # however far apart its users are: they are one unit's
         homes = {owner.get(i) for i in fs} - {None}
         if o.name in LINKER_OBJECTS or o.section in TABLES + ARRAYS + LINKER_SECTIONS:   # the linker's, or a
@@ -1564,13 +1578,21 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
         if program.in_code(o.address):                                  # data in code is in its unit's code range
             continue
         definers = constructed.get(o.address, set())
+        decided.add(o.address)
         if len(homes) == 1:
             claims.append((o.address, o.address + max(o.size, 1), next(iter(homes)), o.section))
         elif len(definers) == 1 and definers <= homes and o.scope != "weak" and o.address not in weak:
             claims.append((o.address, o.address + max(o.size, 1), next(iter(definers)), o.section))
+        elif o.address in held:
+            decided.discard(o.address)
         elif homes and (o.scope == "weak" or o.address in weak or merged and o.section in MERGED_SECTIONS) \
                 and homes <= ordered:
             soft.append((o.address, o.address + max(o.size, 1), min(homes, key=order.__getitem__), o.section))
+    for at, row in held.items():
+        found = program.object_at(at)
+        if at not in decided and found.name not in LINKER_OBJECTS and \
+                found.section not in TABLES + ARRAYS + LINKER_SECTIONS:
+            keyed.append(row)
     if program.platform.name == "gamecube":
         from .classes import recover
         from .vtables import find
@@ -1583,6 +1605,7 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     claims += _through_data(program, ev, claims)
     if merged:
         claims += _dropped_files(program, ev, order)
+        soft += _shared_literals(program, claims, order, ordered)
     out: list[tuple[int, int, str, str]] = []
     if program.platform.name == "gamecube":
         claims += _initializer_tables(program, owner)
@@ -1860,6 +1883,32 @@ def _through_data(program: Program, ev: Evidence, claims: list[tuple[int, int, s
     return out
 
 
+def _shared_literals(program: Program, claims: list[tuple[int, int, str, str]], order: dict[str, int],
+                     ordered: set[str]) -> list[tuple[int, int, str, str]]:
+    """A merged literal no code uses that the data of several units points to (one string two units' tables
+    name): the linker keeps the copy of the first unit in link order, so it is that unit's, where the order of
+    the others allows (`_fitting`)."""
+    used = {o.address for o in program.users()}
+    claimed = sorted((start, stop, unit) for start, stop, unit, _ in claims)
+    starts = [c[0] for c in claimed]
+
+    def claim_at(address: int) -> str | None:
+        index = bisect.bisect_right(starts, address) - 1
+        return claimed[index][2] if index >= 0 and address < claimed[index][1] else None
+    holders: dict[DataObject, set[str | None]] = collections.defaultdict(set)
+    for holder, pointee in program.pointers:
+        target = program.object_at(pointee)
+        if target is not None and target.section in MERGED_SECTIONS and target.address not in used \
+                and not program.in_code(target.address):
+            holders[target].add(claim_at(holder))
+    out = []
+    for target, units in holders.items():
+        if len(units) > 1 and None not in units and units <= ordered and claim_at(target.address) is None:
+            out.append((target.address, target.address + max(target.size, 1), min(units, key=order.__getitem__),
+                        target.section))
+    return out
+
+
 def _key_function_tables(program: Program, owner: dict[int, str], weak: set[int]) -> list[tuple[int, int, str, str]]:
     """Itanium class tables with a key function (the class's first virtual defined out of line): clang emits such
     a table in that function's unit alone, whatever other code refers to it (a template instance in another file
@@ -1886,6 +1935,31 @@ def _key_function_tables(program: Program, owner: dict[int, str], weak: set[int]
         if len(homes) == 1:
             out.append((table.address, table.address + max(table.size, 1), homes.pop(), table.section))
     return out
+
+
+def _held_tables(program: Program, owner: dict[int, str], weak: set[int]) -> list[tuple[int, int, str, str]]:
+    """Data holding inline or file-local functions that nothing else refers to (a class's table, its inline
+    virtuals): every unit emitting the data emits those functions with it and only then, so the linker's kept
+    copies (the first in link order of each) come from one unit, and the data is that unit's when all such
+    functions it holds are in one unit."""
+    functions, index = program.functions, program.function_index
+    referred: set[int] = set()
+    for caller, callees in program.calls.items():
+        referred.update(c for c in callees if c != caller)
+    for user, rows in program.refs.items():
+        referred.update(index[a] for _, a, _ in rows if a in index and index[a] != user)
+    local = _bindings(program)[1]
+    holders: dict[int, set[DataObject]] = collections.defaultdict(set)
+    for holder, pointee in program.pointers:
+        found = program.object_at(holder) if pointee in index else None
+        if found is not None and found.section not in INITIALIZER_SECTIONS:
+            holders[index[pointee]].add(found)
+    homes: dict[DataObject, set[str | None]] = collections.defaultdict(set)
+    for i, found in holders.items():
+        if len(found) == 1 and i not in referred and (functions[i].address in weak or i in local):
+            homes[next(iter(found))].add(owner.get(i))
+    return [(o.address, o.address + max(o.size, 1), units.pop(), o.section) for o, units in homes.items()
+            if len(units) == 1 and None not in units and not program.in_code(o.address)]
 
 
 def _initializer_tables(program: Program, owner: dict[int, str]) -> list[tuple[int, int, str, str]]:
