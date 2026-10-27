@@ -1934,6 +1934,40 @@ def _key_function_tables(program: Program, owner: dict[int, str], weak: set[int]
         homes.discard(None)
         if len(homes) == 1:
             out.append((table.address, table.address + max(table.size, 1), homes.pop(), table.section))
+    return out + _own_function_tables(program, owner, weak, {row[0] for row in out})
+
+
+def _own_function_tables(program: Program, owner: dict[int, str], weak: set[int], done: set[int]
+                         ) -> list[tuple[int, int, str, str]]:
+    """A strong class table no name ties to a class: its class's own virtuals are the functions only it holds
+    and no code refers to. The table is emitted with its key function, one of them, and the inline ones with
+    it, so it is their unit's when they are all in one, whatever code builds the class (an inline constructor
+    in another file)."""
+    from .itanium import _groups
+    from .score import placeholder
+    index = program.function_index
+    formed = {address for rows in program.refs.values() for _, address, kind in rows if kind == "addr"}
+    referred: set[int] = set()
+    for caller, callees in program.calls.items():
+        referred.update(c for c in callees if c != caller)
+    for user, rows in program.refs.items():
+        referred.update(index[a] for _, a, _ in rows if a in index and index[a] != user)
+    holders: dict[int, set[int]] = collections.defaultdict(set)
+    for holder, pointee in program.pointers:
+        found = program.object_at(holder) if pointee in index else None
+        if found is not None and found.section not in INITIALIZER_SECTIONS:
+            holders[index[pointee]].add(found.address)
+    out = []
+    for o in program.objects:
+        if o.section != ".data" or o.address in done or not placeholder(o.name) or o.scope == "weak" or \
+                o.address in weak or o.size < 24 or o.address + 16 not in formed:
+            continue
+        slots = {s for g in _groups(program, o.address, o.size) for s in g.slots if isinstance(s, int)}
+        own = [index[s] for s in slots if s in index and holders[index[s]] == {o.address}
+               and index[s] not in referred]
+        homes = {owner.get(i) for i in own}
+        if len(homes) == 1 and None not in homes:
+            out.append((o.address, o.address + o.size, homes.pop(), o.section))
     return out
 
 

@@ -294,6 +294,18 @@ class KeyFunctionTableTests(unittest.TestCase):
                       if row["start_key"] <= table < row["end_key"]]
             self.assertEqual(owners, ["game/a.cpp"])
 
+    def test_an_unnamed_table_is_its_own_functions_unit(self):
+        """No name ties `Node`'s table to a class; the functions only it holds (its virtuals) are in the first
+        file, and clang emits the table with its key function there, though only the second file builds it."""
+        with tempfile.TemporaryDirectory() as temp:
+            at, module = _module(KEYED, Path(temp))
+            weak = {at[n].value: (f"fn_{at[n].value:08X}", "weak") for n in at if n.startswith("_Z4makeI4NodeEPT_Pv")}
+            proposal = units.propose(_program(module, weak))
+            table = at["_ZTV4Node"].value
+            owners = [unit["unit"] for unit in proposal["units"] for row in unit["data"]
+                      if row["start_key"] <= table < row["end_key"]]
+            self.assertEqual(owners, ["game/a.cpp"])
+
 
 def _module(sources: dict[str, str], root: Path):
     """A stripped module linked from `sources` (a.cpp first), its full ELF's symbols, and the module."""
