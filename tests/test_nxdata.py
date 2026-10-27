@@ -818,6 +818,54 @@ class GapOwnerTests(unittest.TestCase):
             self.assertEqual(holder, ["game/beta.cpp"])
 
 
+# a function's static whose code reaches it only through its guard's address plus an offset (clang -O3 keeps the
+# guard's address in one register and stores the static's members through it)
+REACHED = {
+    "a.cpp": """void report(const char *file, int line);
+struct Name { Name() { text[0] = 0; len = 0; } char text[128]; int len; };
+const char *name(int i) {
+    if (i < 0) report("C:/proj/src/game/a.cpp", 4);
+    static Name s_missing;
+    return s_missing.text + i;
+}
+""",
+    "b.cpp": """void report(const char *file, int line);
+int g_second;
+int other(int v) { if (v == 7) report("C:/proj/src/game/b.cpp", 3); return g_second += v * 11 + 2; }
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class ReachedDataTests(unittest.TestCase):
+    def test_data_reached_through_a_neighbours_address_is_that_codes_unit(self):
+        """No code forms the static's own address: name() reaches it through its guard's plus an offset. One base
+        serves two objects only within one object file, so the static is the first file's."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in REACHED.items():
+                (root / name).write_text(text, encoding="utf-8")
+                flags = [f if f != "-O2" else "-O3" for f in FLAGS]
+                subprocess.run([CLANG, *flags, str(root / name), "-o", str(root / name.replace(".cpp", ".o"))],
+                               check=True, capture_output=True)
+            link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                    *(str(root / n.replace(".cpp", ".o")) for n in REACHED)]
+            subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
+            elf = Elf.load(root / "full.elf")
+            module = nx.load(root / "full.elf")
+            symbols = [Symbol(f"fn_{a:08X}", ".text", a, "function", s, "global") for a, s in module.functions()]
+            symbols += [Symbol(f"lbl_{s.value:08X}", "." + module.segment_at(s.value).name, s.value, "object",
+                               s.size, "global") for s in elf.symbols if s.kind == "object" and s.size]
+            program = Program.from_symbol_list(Switch(), module, symbols)
+            static = next(s.value for s in elf.symbols if s.name == "_ZZ4nameiE9s_missing")
+            self.assertFalse(any(program.object_at(a) == program.object_at(static)
+                                 for rows in program.refs.values() for _, a, _ in rows))
+            proposed = units.propose(program)["units"]
+            holder = [u["unit"] for u in proposed for row in u["data"]
+                      if row["start_key"] <= static < row["end_key"]]
+            self.assertEqual(holder, ["game/a.cpp"])
+
+
 # a file calling functions another module defines: lld makes a PLT stub for each, in .plt
 PLT_SOURCES = {
     "a.cpp": """void report(const char *file, int line);

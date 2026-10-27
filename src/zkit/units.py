@@ -1569,7 +1569,10 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     held = {row[0]: row for row in _held_tables(program, owner, _weak(program)) if row[0] not in keyed_at} \
         if program.platform.name == "switch" else {}  # data holding functions only it refers to: where no
     decided: set[int] = set()                          # one unit's code or initializer claims it (below)
-    for o, fs in program.users().items():              # however far apart its users are: they are one unit's
+    users = program.users()
+    if program.platform.name == "switch":
+        claims += _reached_data(program, owner, users)
+    for o, fs in users.items():                        # however far apart its users are: they are one unit's
         homes = {owner.get(i) for i in fs} - {None}
         if o.name in LINKER_OBJECTS or o.section in TABLES + ARRAYS + LINKER_SECTIONS:   # the linker's, or a
             continue                                                                    # table entry (below)
@@ -1969,6 +1972,41 @@ def _own_function_tables(program: Program, owner: dict[int, str], weak: set[int]
         if len(homes) == 1 and None not in homes:
             out.append((o.address, o.address + o.size, homes.pop(), o.section))
     return out
+
+
+REACH = 0x8000      # bytes: the furthest a load or store's immediate offset reaches past its base register
+
+
+def _reached_data(program: Program, owner: dict[int, str], users: dict[DataObject, set[int]]
+                  ) -> list[tuple[int, int, str, str]]:
+    """Switch: data no code forms an address of and no data points to, that code reaches through a neighbour's
+    address plus an offset (`held_accesses`), is the unit's of the code reaching it, when that is one unit: one
+    base serves two objects only inside one section of one object file (clang's merged globals, a function's
+    static beside its guard), which the linker never parts."""
+    from .aarch64 import held_accesses
+    pointed = {pointee for _, pointee in program.pointers}
+    skip = TABLES + ARRAYS + LINKER_SECTIONS + MERGED_SECTIONS
+    used = sorted((o.address, o.section, i) for o, fs in users.items() for i in fs)
+    loose = [o for o in program.objects if o not in users and o.address not in pointed and o.section not in skip
+             and not program.in_code(o.address)]
+    reachers: set[int] = set()
+    for o in loose:
+        at = bisect.bisect_left(used, (o.address - REACH,))
+        while at < len(used) and used[at][0] < o.address:
+            if used[at][1] == o.section:
+                reachers.add(used[at][2])
+            at += 1
+    load64 = program.image.pointers.get
+    homes: dict[DataObject, set[str | None]] = collections.defaultdict(set)
+    wanted = set(loose)
+    for i in reachers:
+        f = program.functions[i]
+        for address in held_accesses(program.platform.words(program.image, f.address, f.size), f.address, load64):
+            found = program.object_at(address)
+            if found in wanted:
+                homes[found].add(owner.get(i))
+    return [(o.address, o.address + max(o.size, 1), units.pop(), o.section) for o, units in homes.items()
+            if len(units) == 1 and None not in units]
 
 
 def _held_tables(program: Program, owner: dict[int, str], weak: set[int]) -> list[tuple[int, int, str, str]]:

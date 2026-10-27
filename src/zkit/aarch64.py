@@ -286,7 +286,20 @@ def global_stores(words: list[int], start: int, load64=None) -> set[int]:
     """Addresses straight-line code stores into: a store of any width whose base register holds an address formed
     by adrp (+ add) or read from a pointer `load64` knows (a GOT slot), plus its offset. What a unit's static
     initializer stores into is what it constructs."""
-    held: dict[int, int] = {}                                    # register -> the address it holds
+    return _through_held(words, start, load64, False)
+
+
+def held_accesses(words: list[int], start: int, load64=None) -> set[int]:
+    """Addresses straight-line code reaches through a register holding a whole address it formed (adrp + add, or
+    a pointer `load64` knows): every load, store and add (immediate) on it, plus its offset. An adrp page plus its
+    low bits names an address itself; one address plus an offset reaches data the code never names: a neighbour
+    in the same block (clang's merged globals, a function's static beside its guard)."""
+    return _through_held(words, start, load64, True)
+
+
+def _through_held(words: list[int], start: int, load64, every: bool) -> set[int]:
+    """`global_stores`, or with `every` `held_accesses`."""
+    held: dict[int, tuple[int, bool]] = {}                       # register -> (the address it holds, a bare page)
     out: set[int] = set()
     joins = _Joins(words)
     for index, word in enumerate(words):
@@ -295,27 +308,31 @@ def global_stores(words: list[int], start: int, load64=None) -> set[int]:
         pc = start + 4 * index
         rd, rn = word & 31, word >> 5 & 31
         if word & 0x9F000000 == 0x90000000:                       # adrp
-            held[rd] = (pc & ~0xFFF) + (_sign(((word >> 5 & 0x7FFFF) << 2) | (word >> 29 & 3), 21) << 12)
+            held[rd] = ((pc & ~0xFFF) + (_sign(((word >> 5 & 0x7FFFF) << 2) | (word >> 29 & 3), 21) << 12), True)
             continue
+        base, page = held.get(rn, (0, False))
+        counted = rn in held and not (every and page)            # with `every`, only offsets from a whole address
         if word & 0xFF800000 == 0x91000000 and rn in held:        # add (immediate), 64 bit
-            held[rd] = held[rn] + ((word >> 10 & 0xFFF) << (12 if word >> 22 & 1 else 0))
+            held[rd] = (base + ((word >> 10 & 0xFFF) << (12 if word >> 22 & 1 else 0)), False)
+            if every and counted:
+                out.add(held[rd][0])
             continue
         if word & 0xFFC00000 == 0xF9400000 and rn in held and load64:   # ldr x through a pointer slot
-            loaded = load64(held[rn] + (word >> 10 & 0xFFF) * 8)
+            loaded = load64(base + (word >> 10 & 0xFFF) * 8)
             if loaded is not None:
-                held[rd] = loaded
+                held[rd] = (loaded, False)
                 continue
         # a store: opc 00 (general registers), or 00/10 (SIMD/FP: 10 is a 128-bit one); else a load or prfm
-        store = not word >> 22 & 3 if not word >> 26 & 1 else not word >> 22 & 1
-        if word & 0x3B000000 == 0x39000000 and store and rn in held:     # str (unsigned immediate), any width
+        store = every or (not word >> 22 & 3 if not word >> 26 & 1 else not word >> 22 & 1)
+        if word & 0x3B000000 == 0x39000000 and store and counted:        # str (unsigned immediate), any width
             scale = 4 if word >> 26 & 1 and word >> 23 & 1 else word >> 30
-            out.add(held[rn] + ((word >> 10 & 0xFFF) << scale))
-        elif word & 0x3B200000 == 0x38000000 and store and rn in held:   # stur, str pre-/post-index
-            out.add(held[rn] + (_sign(word >> 12 & 0x1FF, 9) if word >> 10 & 3 != 1 else 0))
-        elif word & 0x3A400000 == 0x28000000 and rn in held:      # stp (offset, pre-, post-index)
-            scale = 4 << (word >> 30) if word >> 26 & 1 else 4 << (word >> 31)
+            out.add(base + ((word >> 10 & 0xFFF) << scale))
+        elif word & 0x3B200000 == 0x38000000 and store and counted:      # stur, str pre-/post-index
+            out.add(base + (_sign(word >> 12 & 0x1FF, 9) if word >> 10 & 3 != 1 else 0))
+        elif word & (0x3A000000 if every else 0x3A400000) == 0x28000000 and counted:   # stp (ldp), offset,
+            scale = 4 << (word >> 30) if word >> 26 & 1 else 4 << (word >> 31)          # pre-, post-index
             at = 0 if word >> 23 & 3 == 1 else _sign(word >> 15 & 0x7F, 7) * scale
-            out.update((held[rn] + at, held[rn] + at + scale))
+            out.update((base + at, base + at + scale))
         if word & 0x7C000000 == 0x14000000 and word >> 31 or word & 0xFFFFFC1F == 0xD63F0000:   # bl, blr
             for register in (*range(19), 30):
                 held.pop(register, None)
