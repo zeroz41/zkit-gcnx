@@ -59,7 +59,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
 # What `zkit new` writes for a game's own choices, to confirm or change with its first matched functions: a release
 # build, without exceptions or RTTI.
 STARTING_CFLAGS = {"gamecube": [], "switch": ["-O3", "-fno-exceptions", "-fno-rtti", "-std=gnu++17"]}
-UNIT_KEYS = {"compiler", "cflags", "extra_cflags", "includes", "compiler_version", "source_root"}
+UNIT_KEYS = {"compiler", "cflags", "extra_cflags", "includes", "compiler_version", "source_root", "clang_plugins"}
+PLUGINS = Path(__file__).parent / "clang_plugins"   # zkit's clang pass plugins (build.clang_plugins)
 
 
 def words(value: str | list[str] | None) -> list[str]:
@@ -166,6 +167,38 @@ def compiler(root: Path, config: dict[str, Any]) -> tuple[Path | None, str]:
         path = compilers_folder(root, config) / config["compiler"] / "mwcceppc.exe"
         return (path if path.is_file() else None), str(path)
     return _tool(root, config["compiler"]), config["compiler"]
+
+
+def clang_plugin(root: Path, clang: Path, name: str) -> Path:
+    """build.clang_plugins: zkit's clang plugin `name` (clang_plugins/<name>.cpp) as a shared object built with the
+    host C++ compiler ($CXX, else c++) against this clang's own LLVM headers (`<clang>/../../include`, as its
+    release archive has them), once per source and LLVM version, into build/tools/clang-plugins."""
+    source = PLUGINS / f"{name.replace('-', '_')}.cpp"
+    if not source.is_file():
+        known = sorted(path.stem.replace("_", "-") for path in PLUGINS.glob("*.cpp"))
+        raise ValueError(f"build.clang_plugins: no plugin {name!r} (zkit has: {', '.join(known)})")
+    include = clang.parent.parent / "include"
+    version = include / "llvm" / "Config" / "llvm-config.h"
+    if not version.is_file():
+        raise ValueError(f"build.clang_plugins: {include} has no LLVM headers (a plugin is built against the "
+                         "clang's own release archive)")
+    digest = hashlib.sha256(source.read_bytes() + version.read_bytes()).hexdigest()[:12]
+    out = root / "build" / "tools" / "clang-plugins" / f"{source.stem}-{digest}.so"
+    if out.is_file():
+        return out
+    cxx = os.environ.get("CXX") or shutil.which("c++") or shutil.which("g++") or shutil.which("clang++")
+    if not cxx:
+        raise ValueError("build.clang_plugins: no host C++ compiler to build the plugin with (set CXX)")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    partial = out.with_suffix(".partial")
+    run = subprocess.run([*shlex.split(cxx), "-shared", "-fPIC", "-O2", "-std=c++11", "-fno-rtti", "-w",
+                          f"-I{include}", "-D__STDC_CONSTANT_MACROS", "-D__STDC_LIMIT_MACROS", str(source),
+                          "-o", str(partial)], capture_output=True, text=True)
+    if run.returncode != 0:
+        partial.unlink(missing_ok=True)
+        raise ValueError(f"build.clang_plugins: building {name} failed:\n{run.stderr[-2000:]}")
+    partial.replace(out)
+    return out
 
 
 def linker(root: Path, config: dict[str, Any]) -> Path | None:
@@ -479,6 +512,10 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
                 "implicit": [_relative(p, root) for p in (run, exe) if p]}
     cc = [str(exe) if exe else config["compiler"]]
     implicit = [_relative(exe, root)] if exe else []
+    plugins = [clang_plugin(root, exe, name) for name in words(config.get("clang_plugins"))] if exe else []
+    implicit += [_relative(path, root) for path in plugins]
+    config = {**config, "extra_cflags": config["extra_cflags"] + [word for path in plugins for word in
+                                                                  ("-Xclang", "-load", "-Xclang", path.as_posix())]}
     mirror = source_root(root, paths, config, notes)
     if mirror is not None:
         # from the folder whose `source_root` is src/: the source as the original's build named it, every other
