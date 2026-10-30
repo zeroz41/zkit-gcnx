@@ -30,7 +30,7 @@ evidence for it, the files to merge, every name you inferred. Everything else go
 - Never build the tree, edit files outside $W unless the task says so, commit or push.
 
 ## Tools (zkit CLI via Bash, from the repo; several addresses or names per call)
-`zkit lookup` (state, unit, file:line, callers, callees, slots), `zkit unit <unit>`, `zkit asm`, `zkit decompile`
+`zkit lookup` (state, unit, file:line, callers, callees, slots), `zkit unit <unit>`, `zkit asm --brief`, `zkit decompile`
 (Switch, Ghidra) or `zkit m2c` (GameCube), `zkit data`, `zkit xrefs`, `zkit refs` (where the source defines and
 uses a name), `zkit classes`, `zkit names`. No greps of symbol or split files.
 - `zkit try <addr> <file>`: one function against the original (counts an attempt).
@@ -42,8 +42,12 @@ uses a name), `zkit classes`, `zkit names`. No greps of symbol or split files.
   (variants side by side). Never compile with hand-copied flags or disassemble your own objects.
 
 ## Cost: every turn re-reads everything before it
-- Put independent commands in one call. Read slices (`grep -n`, then `sed -n a,bp` or Read with offset/limit),
-  never a whole large header, source or report; send long output to a file and read the part you need.
+- Every Bash call starts in the same folder (the session's working directory, normally the repository root): don't
+  `cd` back to it or repeat variable preambles in each call; use paths relative to it (src/..., include/...).
+- Independent reads go in ONE message: several tool calls at once (they run in parallel), or one Bash call with
+  several commands, and several addresses per zkit call. A turn saved is a whole re-read saved.
+- Read slices (`grep -n`, then `sed -n a,bp` or Read with offset/limit), never a whole large header, source or
+  report; send long output to a file and read the part you need.
 - Change files with Edit after reading the slice; don't paste scripts that rewrite a file.
 - Don't poll with `sleep`; run commands in the foreground.
 - Keep your state in $W/NOTES.md as you go (per function: identical / N words and why / not written; blockers;
