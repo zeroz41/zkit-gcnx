@@ -160,6 +160,9 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     _file_evidence(program, ev, placed)
     ev.reach = _cited_reach(ev)
     ev.joins += _table_joins(program, ev)
+    out_of_order = _tables_out_of_order(program)       # as sure as one file's citations around another's
+    ev.joins += out_of_order
+    ev.cited += out_of_order
     ev.joins += _held_statics(program, ev)
     _out_of_line_calls(program, ev)
     _deferred_tails(program, ev)
@@ -312,6 +315,46 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
         if len({own_files[i] for i in range(own[0], own[-1] + 1) if i in own_files}) > 1:
             continue
         out.append((own[0], own[-1], f"the functions only the table at {text(address)} holds"))
+    return out
+
+
+def _tables_out_of_order(program: Program) -> list[tuple[int, int, str]]:
+    """Itanium (Switch): a strong class table is emitted with its key function, one of the class's own strong
+    methods in it, and the link lays out each section's data in the order of the units' code. So of two strong
+    tables in one section, the one at the lower address is in the same or an earlier unit: where every own method
+    of the lower table comes after every own method of the higher one, the two units are one (one file compiled
+    inside another), and the code from the higher table's last method to the lower table's first is one unit's."""
+    if program.platform.name != "switch":
+        return []
+    from .itanium import methods, recover
+    named = methods(program)
+    weak = set(getattr(program.image, "weak", ()))
+    text = program.platform.text
+    by_section: dict[tuple[str, int], list[tuple[int, int, int]]] = collections.defaultdict(list)
+    for cls in recover(program).values():
+        table = program.object_at(cls.table) if cls.table is not None else None
+        if table is None or table.address != cls.table or table.scope == "weak" or table.address in weak:
+            continue
+        own = set()
+        for group in cls.groups:
+            for slot in group.slots:
+                index = program.function_index.get(slot) if isinstance(slot, int) else None
+                method = named.get(slot)
+                if index is None or method is None or method.thunk or method.owner != cls.name or \
+                        program.functions[index].scope == "weak" or slot in weak:
+                    continue
+                own.add(index)
+        if own:
+            by_section[(table.section, _instance(program, table.address))].append((table.address, min(own), max(own)))
+    out = []
+    for tables in by_section.values():
+        latest = None                                   # the earlier table whose own methods start latest
+        for address, first, last in sorted(tables):
+            if latest is not None and latest[1] > last:
+                out.append((last, latest[1], f"the table at {text(latest[0])} lies before the one at "
+                                             f"{text(address)}, whose methods come first: one unit"))
+            if latest is None or first > latest[1]:
+                latest = (address, first)
     return out
 
 

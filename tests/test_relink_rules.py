@@ -197,6 +197,28 @@ class UnitEvidenceTests(unittest.TestCase):
         ev.placed = {9}
         self.assertEqual(units._included(ev), {"b.cpp": "a.cpp"})
 
+    def test_class_tables_out_of_their_methods_order_are_one_unit(self):
+        """K's table lies before L's, but K's own methods (12, 13) come after L's (3): one unit from 3 to 12. M's
+        after them is in order; N's is weak (no key function), O's in another loaded range of its section, and
+        P's own method is weak: none of them says anything."""
+        from types import SimpleNamespace
+        from unittest import mock
+        code = _Code(20, weak=[1])
+        code.sections = [(".data", 0x9000, 0x9400), (".data", 0xA000, 0xA100)]
+        tables = {0x9000: "K", 0x9100: "L", 0x9200: "M", 0x9300: "N", 0xA000: "O", 0x9380: "P"}
+        own = {"K": [12, 13], "L": [3], "M": [15], "N": [2], "O": [0], "P": [1]}
+        objects = {a: DataObject(a, 0x40, f"_ZTV1{c}", ".data", "weak" if c == "N" else "global")
+                   for a, c in tables.items()}
+        code.object_at = objects.get
+        slot = {code.functions[i].address: c for c, rows in own.items() for i in rows}
+        classes = {c: SimpleNamespace(name=c, table=a, groups=[SimpleNamespace(
+            slots=[code.functions[i].address for i in own[c]])]) for a, c in tables.items()}
+        named = {a: SimpleNamespace(thunk=False, owner=c) for a, c in slot.items()}
+        with mock.patch("zkit.itanium.recover", return_value=classes), \
+                mock.patch("zkit.itanium.methods", return_value=named):
+            rows = units._tables_out_of_order(code)
+        self.assertEqual([(lo, hi) for lo, hi, _ in rows], [(3, 12)])
+
     def test_a_class_without_a_constructor_is_its_cited_file_s(self):
         """K::reflect (1) cites k.cpp, L::reflect (3) l.cpp; K::update (2) cites nothing and another build put it
         in l.cpp: K's file is k.cpp. M's 6 is beyond L's 7 (l.cpp's class) from M's own citation at 9: M says
