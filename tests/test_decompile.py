@@ -27,7 +27,7 @@ class DecompileTests(unittest.TestCase):
             self.assertEqual(sda, {2: 0x80003100, 13: 0x80003100})  # decoded from __init_registers
             self.assertIn(TEXT + 0x10, dict(boundaries))
             return [{"address": a, "text": "/* WARNING: Removing unreachable block (ram,0x80003014) */\n"
-                                           f"void fn_{a:08X}(void) {{ fn_80003000(); iRam80003104 = 1; "
+                                           f"void fn_{a:08X}(void) {{ fn_80003000(); func_0x80003000(); iRam80003104 = 1; "
                                            f"fRam80003106 = 2; DAT_80003100 = 3; f(0x80003104, 0x80000000); }}"} for a in addresses], {}
 
         info = {"install": "/ghidra", "version": "12.1.2 PUBLIC", "language": str(language), "python": "python"}
@@ -38,10 +38,13 @@ class DecompileTests(unittest.TestCase):
         calls, patched = self.fake()
         with patched:
             first = decompile(self.project, "t", [TEXT + 0x10, TEXT])
-            self.assertEqual(calls, [[TEXT + 0x10, TEXT]])
+            self.assertEqual(calls, [[TEXT + 0x10, TEXT, TEXT + 0x20, TEXT + 0x40]])  # the rest of their unit too
+            self.assertTrue(decompile(self.project, "t", [TEXT + 0x20])["results"][0]["cached"])
+            self.assertEqual(len(calls), 1, "a prefetched function reads from the cache")
             text = first["results"][0]["text"]
             self.assertTrue(text.startswith("void TPlayer__sub_80003010(void)"))  # pruned-path notes dropped
             self.assertIn("update__6TEnemyFv();", text)
+            self.assertNotIn("func_0x", text)  # a call target Ghidra had no function at is named too
             self.assertIn("enemyTable = 1", text)
             self.assertIn("enemyTable.unk2 = 2", text)  # interior of a sized object
             self.assertIn("lbl_80003100 = 3", text)
@@ -77,11 +80,12 @@ class DecompileTests(unittest.TestCase):
     def test_low_memory_refuses_and_cache_still_reads(self):
         from zkit import decompile as module
         calls, patched = self.fake()
-        with patched:
+        with patched, mock.patch.object(module, "PREFETCH", 0):
             module.decompile(self.project, "t", [TEXT])
         language = Path(self.temp.name) / "lang" / "gekko.ldefs"
         info = {"install": "/ghidra", "version": "12.1.2 PUBLIC", "language": str(language), "python": "python"}
-        with mock.patch.multiple(module, status=lambda platform="gamecube": info, _memory_mb=lambda: (65536, 7000), _agent_mb=lambda: 0):
+        with mock.patch.multiple(module, status=lambda platform="gamecube": info, _memory_mb=lambda: (65536, 7000),
+                                 _agent_mb=lambda: 0, PREFETCH=0):
             self.assertTrue(module.decompile(self.project, "t", [TEXT])["results"][0]["cached"])
             with self.assertRaisesRegex(ValueError, "Not starting Ghidra: 7000 MB of 65536 MB available"):
                 module.decompile(self.project, "t", [TEXT + 0x10])

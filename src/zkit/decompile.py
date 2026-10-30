@@ -16,7 +16,9 @@ threads are min(8, CPUs) trimmed to what fits, and as many workers run at once a
 in the cache directory); the rest wait for a slot and then reuse rows another worker just wrote. Measured on a
 27.5k-function DOL: ~1.0 GB peak per worker (JVM 860 MB, four decompiler processes 140 MB on the largest
 functions); with a 512 MB heap the whole DOL decompiles in 163 s at 850 MB peak, so an 8 GB machine can run it.
-A call decompiles only the functions it names; nothing ever decompiles the whole DOL unless asked (`--all`). ZKIT_GHIDRA_HEAP (e.g. 3g) and ZKIT_GHIDRA_MIN_FREE_MB override the heap and the reserve.
+A call decompiles the functions it names and, when it has to start Ghidra anyway, the rest of their units not cached
+yet (nearest first, up to PREFETCH): starting the worker costs ~10 s, each further function a fraction of that, and
+agents read a unit's functions one call after another. Nothing decompiles the whole DOL unless asked (`--all`). ZKIT_GHIDRA_HEAP (e.g. 3g) and ZKIT_GHIDRA_MIN_FREE_MB override the heap and the reserve.
 Cached reads never start Ghidra.
 """
 
@@ -366,6 +368,9 @@ def _run_worker(info: dict, dol: Path, sda: dict[int, int], boundaries: list[tup
 
 
 FN_NAME = re.compile(r"\bfn_([0-9A-F]{8,16})\b")
+# Ghidra's name for a call target it has no function at (a symbol the decomp files as data, a boundary that could not
+# be created): named like any other callee when a function or symbol starts there.
+CALL_TARGET = re.compile(r"\bfunc_0x([0-9a-fA-F]{8,16})\b")
 DATA_NAME = re.compile(r"\b(?:PTR_\w*?_|DAT_|[a-z]{1,6}Ram)([0-9a-fA-F]{8,16})\b")
 # Ghidra's names for the address of text it did not type or typed as a string, and placeholder labels (which only
 # spell the address): read as the literal they point to.
@@ -392,6 +397,15 @@ def _namer(project: Project, target: str, db):
             row = function_at(db, target, address)
             seen["fn", address] = row["name"] if row and row["address"] == address else None
         return seen["fn", address] or match[0]
+
+    def call_target(match: re.Match) -> str:
+        address = key(match[1])
+        if ("call", address) not in seen:
+            row = function_at(db, target, address)
+            symbol = None if row is not None and row["address"] == address else _symbol_lookup(project, target, address)
+            seen["call", address] = row["name"] if symbol is None and row is not None else (
+                symbol["name"] if symbol and not symbol["offset"] else None)
+        return seen["call", address] or match[0]
 
     module = None
     if current.name == "switch":
@@ -446,8 +460,26 @@ def _namer(project: Project, target: str, db):
         return seen["ptr", address] or match[0]
 
 
-    return lambda text: pointers.sub(pointer, DATA_NAME.sub(data, STRING_NAME.sub(string, FN_NAME.sub(
-        function, UNREACHABLE.sub("", text)))))
+    return lambda text: pointers.sub(pointer, DATA_NAME.sub(data, STRING_NAME.sub(string, CALL_TARGET.sub(
+        call_target, FN_NAME.sub(function, UNREACHABLE.sub("", text))))))
+
+
+PREFETCH = 256
+
+
+def _unit_neighbours(db, target: str, wanted: list[int], sizes: dict[int, int], limit: int) -> list[int]:
+    """Functions of the same units as `wanted`, nearest to them first: what the next calls will most likely ask."""
+    out: dict[int, int] = {}
+    for address in wanted:
+        row = db.execute("SELECT unit FROM functions WHERE target=? AND address=?", (target, address)).fetchone()
+        if not row or not row[0]:
+            continue
+        for (other,) in db.execute("SELECT address FROM functions WHERE target=? AND unit=?", (target, row[0])):
+            if other in sizes and other not in out:
+                out[other] = abs(other - address)
+            elif other in out:
+                out[other] = min(out[other], abs(other - address))
+    return sorted(out, key=lambda a: out[a])[:limit]
 
 
 def decompile(project: Project, target: str, addresses: list[int] | None, threads: int | None = None) -> dict:
@@ -486,6 +518,10 @@ def decompile(project: Project, target: str, addresses: list[int] | None, thread
 
     cached = read_cache(wanted)
     missing = [a for a in wanted if a not in cached and a in sizes]
+    if missing and not every:   # Ghidra starts anyway: fill the rest of these units in the same run
+        near = [a for a in _unit_neighbours(db, target, missing, sizes, PREFETCH + len(wanted)) if a not in wanted]
+        known = read_cache(near)
+        missing += [a for a in near if a not in known][:PREFETCH]
     timing, started = None, time.monotonic()
     if missing:
         with _WorkerLock(project, budget(threads)["workers"]):
