@@ -141,14 +141,42 @@ def sda_bases(project: Project, target: str, dol) -> dict[int, int]:
 
 
 def disasm(project: Project, target: str, address: int, size: int | None = None,
-           max_lines: int = 400, words: bool = False) -> dict:
+           max_lines: int = 400, words: bool = False, brief: bool = False) -> dict:
     """Original instructions. With size, start exactly at address (an interior address is honoured);
     without, the whole containing function, marking address when it is interior. The instruction words are left
-    out unless asked for: the mnemonic says the same, and every line of this output is read again on each turn."""
+    out unless asked for: the mnemonic says the same, and every line of this output is read again on each turn.
+    `brief`: each line at its offset from the start, branches inside the range at offsets and every other target or
+    constant by its name alone, the address only where nothing names it (`brief_text`)."""
     data = _disasm(project, target, address, size, max_lines)
     if not words and data.get("text"):
         data["text"] = re.sub(r"^(\S+)  [0-9a-f]{8}  (?=[a-z])", r"\1  ", data["text"], flags=re.M)  # never words alone
+    if brief and data.get("text") and data.get("size"):
+        data["text"] = brief_text(data["text"], int(str(data["address"]), 16), data["size"])
     return data
+
+
+_LINE = re.compile(r"^([0-9A-Fa-f]{8,16})  (.*)$")
+_HEX = re.compile(r"\b0x([0-9a-fA-F]+)\b")
+
+
+def brief_text(text: str, start: int, size: int) -> str:
+    """Disassembly lines with no address repeated: `+offset  instruction`, a branch inside [start, start+size) as
+    `+0x..`, `0x.. <name>` and `0x..  ; name` as the name, `; =0x.. name` as `; name`."""
+    out = []
+    for line in text.splitlines():
+        m = _LINE.match(line)
+        if not m:
+            out.append(line)
+            continue
+        here, rest = int(m[1], 16), m[2]
+        rest = re.sub(r"(?:0x)?[0-9a-fA-F]+ <(\+0x[0-9a-fA-F]+)>", r"\1", rest)       # aarch64 local: 0x.. <+0x..>
+        rest = re.sub(r"\b0x[0-9a-fA-F]+ <([^>+][^>]*)>", r"\1", rest)                 # aarch64 call: 0x.. <name>
+        rest = re.sub(r"\b0x[0-9a-fA-F]+(\s+;\s+)(\S+)$", lambda c: c[2], rest)          # ppc call: 0x..  ; name
+        rest = re.sub(r";\s*=0x[0-9a-fA-F]+ (?=\S)", "; ", rest)                         # constant: ; =0x.. name
+        rest = _HEX.sub(lambda h: f"+0x{int(h[1], 16) - start:x}" if start <= int(h[1], 16) < start + size
+                        else h[0], rest)                                                # ppc local: 0x.. in range
+        out.append(f"+{here - start:x}  {rest}")
+    return "\n".join(out)
 
 
 def _disasm(project: Project, target: str, address: int, size: int | None = None, max_lines: int = 400) -> dict:

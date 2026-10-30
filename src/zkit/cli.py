@@ -143,6 +143,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--size", type=lambda v: int(v, 0))
     c.add_argument("--lines", type=int, default=400, help="at most this many instructions per function")
     c.add_argument("--words", action="store_true", help="also print each instruction's word")
+    c.add_argument("--brief", action="store_true", help="offsets instead of addresses, targets by name only "
+                   "(the address stays where nothing names it): the same reading in about a third less text")
     c = add("decompile", help="Ghidra C for original functions, a second reading next to m2c (cached)")
     c.add_argument("query", nargs="*", help="address(es) or name(s)")
     c.add_argument("--all", action="store_true", help="fill the cache for every DOL function (~40 s for 27k)")
@@ -697,7 +699,7 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
                 raise ValueError(f"No function matches {query}")
             exact = bridge.HEX.match(query.strip())
             results.append(inspect_dol.disasm(project, target, int(exact[1], 16) if exact else found[0], args.size,
-                                              max_lines=max(1, args.lines), words=args.words))
+                                              max_lines=max(1, args.lines), words=args.words, brief=args.brief))
         data = results[0] if len(results) == 1 else {"batch": results}
         return data, render.disasm(data)
     if command == "decompile":

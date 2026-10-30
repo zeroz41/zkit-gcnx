@@ -153,6 +153,21 @@ class CandidateCommandTests(unittest.TestCase):
                            includes=[Path("/work/include")])
         self.assertEqual(argv[:4], ["clang++", "-I/work/include", "-Isrc", "-Iinclude"])
 
+    def test_brief_disassembly_keeps_every_name(self):
+        from zkit.inspect_dol import brief_text
+        aarch64 = ("10000000  str x19, [sp, #-0x20]!\n10000004  bl 0x10000400 <_ZN2ns1A4stepEv>\n"
+                   "10000008  cbz x0, 0x10000010 <+0x10>\n1000000C  ldr x9, [x9, #0x8a0]  ; =0x10002000 _ZN2ns5tableE\n"
+                   "10000010  adrp x9, 0x10002000\n10000014  bl 0x10000500")
+        self.assertEqual(brief_text(aarch64, 0x10000000, 0x18).splitlines(),
+                         ["+0  str x19, [sp, #-0x20]!", "+4  bl _ZN2ns1A4stepEv", "+8  cbz x0, +0x10",
+                          "+c  ldr x9, [x9, #0x8a0]  ; _ZN2ns5tableE", "+10  adrp x9, 0x10002000",
+                          "+14  bl 0x10000500"])      # a target nothing names keeps its address
+        ppc = ("8007ED00  bge- 0x8007ed08\n8007ED04  bl 0x8007f4b8  ; fn_8007F4B8\n"
+               "8007ED08  lfs f0,-27240(r2)  ; =0x805D9298 lbl_805D9298 = 0.0\n8007ED0C  blr")
+        self.assertEqual(brief_text(ppc, 0x8007ED00, 0x10).splitlines(),
+                         ["+0  bge- +0x8", "+4  bl fn_8007F4B8", "+8  lfs f0,-27240(r2)  ; lbl_805D9298 = 0.0",
+                          "+c  blr"])
+
     def test_compact_disassembly(self):
         from zkit.candidate import compact_disassembly
         aarch64 = ["       0:      \tcmp\tw1, #0x4",
