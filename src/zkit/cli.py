@@ -167,7 +167,18 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--keep", type=Path, help="also copy the compiled object here")
     c.add_argument("--unit", action="store_true", help="the candidate is the whole unit (query: the unit or an "
                    "address in it): every function compared and, on Switch, the object linked into the original; "
-                   "records no attempts")
+                   "lists what became identical or was lost against the tree's build; records no attempts")
+    c.add_argument("--include", type=Path, action="append", default=[], metavar="DIR",
+                   help="header copies searched before the tree's (repeatable); DIR mirrors the include paths, "
+                        "e.g. DIR/classes/x.h stands in for include/classes/x.h")
+    c = add("probe", help="Compile any file with a unit's exact command and print the code it makes (+offset, "
+                          "relocations folded in): compiler experiments without hand-copied flags; compares nothing, "
+                          "records no attempts")
+    c.add_argument("query", help="the unit whose command compiles it: its name, or an address in it")
+    c.add_argument("source", type=Path, help="the file to compile")
+    c.add_argument("names", nargs="*", help="functions to show (a name or part of one); default all")
+    c.add_argument("--include", type=Path, action="append", default=[], metavar="DIR",
+                   help="header copies searched before the tree's (repeatable)")
     c = add("sweep", help="Near-misses (Switch and GameCube): rewrite one function's source site by site (operand order, compound "
                           "assignment, ++ form, if/else, counter type, loop direction, statement order), compile "
                           "each with its unit's command and climb to the closest; writes the best text, records "
@@ -718,11 +729,15 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
     if command == "try":
         if args.unit:
             from .candidate import check_unit
-            data = check_unit(project, target, args.query, args.candidate)
+            data = check_unit(project, target, args.query, args.candidate, _folders(args.include))
             return data, render.candidate_unit(data)
         from .candidate import check
-        data = check(project, target, args.query, args.candidate, args.force, args.keep)
+        data = check(project, target, args.query, args.candidate, args.force, args.keep, _folders(args.include))
         return data, render.candidate(data)
+    if command == "probe":
+        from .candidate import probe
+        data = probe(project, target, args.query, args.source, args.names, _folders(args.include))
+        return data, render.probe(data)
     if command == "sweep":
         from .sweep import sweep
         data = sweep(project, target, args.query, args.candidate, args.out, args.jobs, args.rounds, args.seconds)
@@ -1032,7 +1047,7 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         return None, ""
     if command == "hook" and args.event == "subagent-start":
         payload = {"hookSpecificOutput": {"hookEventName": "SubagentStart",
-                                          "additionalContext": session.subagent_context(project)}}
+                                          "additionalContext": session.subagent_context(project, _hook_agent())}}
         return payload, json.dumps(payload)
     if command == "hook":
         repo, worktree = project.locate(Path.cwd())
@@ -1052,6 +1067,25 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         text = install(project, args.client, args.write)
         return {"text": text}, text
     raise ValueError(f"Unhandled command {command}")
+
+
+def _hook_agent() -> str:
+    """The agent type in a hook's input (JSON on stdin), or "" when there is none."""
+    import select
+    try:
+        if sys.stdin is None or sys.stdin.isatty() or not select.select([sys.stdin], [], [], 2)[0]:
+            return ""
+        return str(json.loads(sys.stdin.read() or "{}").get("agent_type") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def _folders(paths: list[Path]) -> list[Path]:
+    folders = [p.expanduser().resolve() for p in paths]
+    for folder in folders:
+        if not folder.is_dir():
+            raise ValueError(f"--include {folder}: no such folder")
+    return folders
 
 
 def main(argv: list[str] | None = None) -> int:

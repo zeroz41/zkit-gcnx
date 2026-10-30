@@ -115,10 +115,12 @@ def plain_command(argv: list[str], workdir: Path, source_arg: str) -> list[str]:
 
 
 def _restage(argv: list[str], source_arg: str, staged: Path, out_dir: Path, source_dir: Path,
-             workdir: Path, rooted: tuple[int, int] | None = None) -> tuple[list[str], Path]:
-    """The unit's command, compiling `staged` into `out_dir` with the unit's own folder searched first. A rooted
-    command (`_rooted`) compiles from `out_dir` instead, where `staged` has the source's path, so the candidate's
-    `__FILE__` is the unit's; its other paths are absolute."""
+             workdir: Path, rooted: tuple[int, int] | None = None,
+             includes: list[Path] | None = None) -> tuple[list[str], Path]:
+    """The unit's command, compiling `staged` into `out_dir` with `includes` (header copies that stand in for the
+    tree's) and then the unit's own folder searched first. A rooted command (`_rooted`) compiles from `out_dir`
+    instead, where `staged` has the source's path, so the candidate's `__FILE__` is the unit's; its other paths are
+    absolute."""
     mwcc = any("mwcc" in Path(a).name.lower() for a in argv[:3])
     out: list[str] = []
     skip = False
@@ -155,15 +157,18 @@ def _restage(argv: list[str], source_arg: str, staged: Path, out_dir: Path, sour
         out.append(arg)
     if not replaced:
         raise ValueError("Could not find the unit's source in its compile command")
-    # The unit's folder first, so its quoted includes resolve as they do in the tree.
-    folder = place(source_dir)
-    search = ["-i", folder] if mwcc else [f"-I{folder}"]
+    # Header copies, then the unit's folder, so its quoted includes resolve as they do in the tree.
+    search = []
+    for folder in [place(path) for path in includes or []] + [place(source_dir)]:
+        search += ["-i", folder] if mwcc else [f"-I{folder}"]
     first_flag = next((i for i, a in enumerate(out) if a.startswith("-")), len(out))
     return out[:first_flag] + search + out[first_flag:], expected
 
 
-def _compile(project: Project, target: str, unit: dict, text: str, work: Path) -> tuple[Path | None, str, str]:
-    """Compile `text` in `work` with the unit's exact command: (the object or None, the command, its messages)."""
+def _compile(project: Project, target: str, unit: dict, text: str, work: Path,
+             includes: list[Path] | None = None) -> tuple[Path | None, str, str]:
+    """Compile `text` in `work` with the unit's exact command, `includes` searched before the tree's headers:
+    (the object or None, the command, its messages)."""
     argv, workdir, source_arg = compile_command(project, target, unit)
     root = project.root(project.target(target)["repository"])
     source_path = root / ((unit.get("metadata") or {}).get("source_path") or _planned_source(project, target, unit))
@@ -172,7 +177,7 @@ def _compile(project: Project, target: str, unit: dict, text: str, work: Path) -
     staged = work / argv[rooted[1]] if rooted else work / source_path.name
     staged.parent.mkdir(parents=True, exist_ok=True)
     staged.write_text(text, encoding="utf-8")
-    command, expected = _restage(argv, source_arg, staged, work, source_path.parent, workdir, rooted)
+    command, expected = _restage(argv, source_arg, staged, work, source_path.parent, workdir, rooted, includes)
     cwd = workdir
     if rooted:   # from the folder itself: clang's -working-directory would make `__FILE__` absolute
         at = command.index("-working-directory")
@@ -195,13 +200,14 @@ def _scratch(project: Project, target: str) -> Path | None:
     return workdir if workdir.is_dir() else None
 
 
-def compare(project: Project, target: str, unit: dict, name: str, text: str, keep: Path | None = None) -> dict:
+def compare(project: Project, target: str, unit: dict, name: str, text: str, keep: Path | None = None,
+            includes: list[Path] | None = None) -> dict:
     """Compile `text` outside the tree with the unit's exact command and compare function `name` with the unit's
     target object: {command, compiled, errors} or {command, compiled, exact, differences, reloc_only, rows...}."""
     from . import objects
     root = project.root(project.target(target)["repository"])
     with tempfile.TemporaryDirectory(prefix="zkit-try-", dir=_scratch(project, target)) as work:
-        built, command, message = _compile(project, target, unit, text, Path(work))
+        built, command, message = _compile(project, target, unit, text, Path(work), includes)
         out: dict[str, Any] = {"command": command}
         if built is None:
             out.update(compiled=False, errors=message[-3000:])
@@ -235,29 +241,31 @@ def symbol_placeholders(db, target: str, debt: list[dict]) -> tuple[list[dict], 
     return kept, sorted(carried)
 
 
-def check_unit(project: Project, target: str, query: str, candidate: Path) -> dict[str, Any]:
+def _state(row: dict) -> str:
+    if row.get("missing"):
+        return "missing"
+    if row.get("exact"):
+        return "identical"
+    return "relocations only" if row.get("reloc_only") else f"{row.get('differences')} word(s)"
+
+
+def check_unit(project: Project, target: str, query: str, candidate: Path,
+               includes: list[Path] | None = None) -> dict[str, Any]:
     """A whole unit's candidate, outside the tree: compiled with the unit's command, every function of the unit
     compared with the original's, and (Switch) the object linked into the original, which proves the unit's data,
-    strings and tables too. Records no attempts: it judges a unit, not one function's try."""
-    from . import bridge, objects, quality
+    strings and tables too. Each function's state is set beside its state in the tree's last build of the unit, so
+    what the candidate gained and lost is listed. Records no attempts: it judges a unit, not one function's try."""
+    from . import objects, quality
     from .elf import Elf
-    from .index import connect, containing, refresh
+    from .index import connect
     from .nxlink import structor_partner
-    units = objects.objdiff_units(project, target)
-    unit = units.get(query) or units.get(query.rsplit(".", 1)[0])
-    if unit is None:
-        refresh(project)
-        found = bridge.resolve(project, query, target, limit=2)
-        row = containing(connect(project), target, found[0]) if len(found) == 1 else None
-        unit = units.get(row["unit"]) if row is not None and row["unit"] else None
-    if unit is None:
-        raise ValueError(f"{query} names no objdiff unit (give the unit's name or an address in it)")
+    unit = _unit_for(project, target, query)
     root = project.root(project.target(target)["repository"])
     text = candidate.read_text(encoding="utf-8", errors="replace")
     out: dict[str, Any] = {"unit": unit["name"], "candidate": str(candidate)}
     labels = objects.label_reader(project, target)
     with tempfile.TemporaryDirectory(prefix="zkit-try-unit-", dir=_scratch(project, target)) as work:
-        built, command, message = _compile(project, target, unit, text, Path(work))
+        built, command, message = _compile(project, target, unit, text, Path(work), includes)
         out["command"] = command
         if built is None:
             out.update(compiled=False, errors=message[-3000:])
@@ -294,7 +302,37 @@ def check_unit(project: Project, target: str, query: str, candidate: Path) -> di
                     row["exact"] = row["proven_by_link"] = True
             out["exact"] = sum(r["exact"] for r in rows)
         out["done"] = out["exact"] == len(rows) and not out["debt"] and out.get("link", {}).get("linked", True)
+    out["tree"] = _tree_delta(root, unit, rows, labels)
     return out
+
+
+def _tree_delta(root: Path, unit: dict, rows: list[dict], labels) -> dict[str, Any] | None:
+    """The candidate's functions against the tree's last build of the unit (its objdiff base object): which became
+    identical and which no longer are. None when the tree has not built the unit."""
+    from . import objects
+    from .elf import Elf
+    from .nxlink import structor_partner
+    base = root / unit["base_path"] if unit.get("base_path") else None
+    if base is None or not base.is_file():
+        return None
+    names = {s.name for s in Elf.load(base).symbols if s.kind == "func"}
+    gained, lost = [], []
+    for row in rows:
+        name = row["function"]
+        partner = name if name in names else structor_partner(name)
+        if partner in names:
+            diff = objects.function_diff(root / unit["target_path"], base, name, base_name=partner, labels=labels)
+            before = {"exact": bool(diff.get("exact")), "differences": diff.get("differences"),
+                      "reloc_only": diff.get("reloc_only")}
+        else:
+            before = {"exact": False, "missing": True}
+        now = row["exact"] and not row.get("proven_by_link")  # the link proves the tree's build nothing
+        if now and not before["exact"]:
+            gained.append({"function": name, "tree": _state(before)})
+        elif before["exact"] and not now:
+            lost.append({"function": name, "now": _state({**row, "exact": now})})
+    return {"base": str(base), "built": datetime.fromtimestamp(base.stat().st_mtime, timezone.utc)
+            .isoformat(timespec="seconds"), "gained": gained, "lost": lost}
 
 
 def _ledger(project: Project) -> Path:
@@ -317,8 +355,17 @@ def attempts(project: Project, address: str) -> list[dict]:
     return rows
 
 
+def _fingerprint(text: str, includes: list[Path] | None) -> str:
+    """The attempt's identity: the candidate and every header copy it is compiled against."""
+    digest = hashlib.sha256(text.encode())
+    for folder in includes or []:
+        for path in sorted(p for p in folder.rglob("*") if p.is_file()):
+            digest.update(path.relative_to(folder).as_posix().encode() + b"\0" + path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
 def check(project: Project, target: str, query: str, candidate: Path, force: bool = False,
-          keep: Path | None = None) -> dict[str, Any]:
+          keep: Path | None = None, includes: list[Path] | None = None) -> dict[str, Any]:
     """Compile a candidate for one original function and compare it with the original object."""
     from . import bridge, objects, quality
     from .activity import agent_identity
@@ -333,7 +380,7 @@ def check(project: Project, target: str, query: str, candidate: Path, force: boo
         raise ValueError(f"{query} is not inside a known function")
     address = address_text(row["address"])
     text = candidate.read_text(encoding="utf-8", errors="replace")
-    fingerprint = hashlib.sha256(text.encode()).hexdigest()[:16]
+    fingerprint = _fingerprint(text, includes)
     history = [r for r in attempts(project, address) if r.get("compiled", True)]
     tried = {r["fingerprint"] for r in history}
     if len(tried) >= ATTEMPT_CAP and fingerprint not in tried and not force:
@@ -349,7 +396,7 @@ def check(project: Project, target: str, query: str, candidate: Path, force: boo
     out: dict[str, Any] = {"address": address, "function": row["name"], "unit": row["unit"],
                            "candidate": str(candidate), "attempt": len(tried | {fingerprint}),
                            "attempts_so_far": len(tried), "cap": ATTEMPT_CAP}
-    out.update(compare(project, target, unit, row["name"], text, keep))
+    out.update(compare(project, target, unit, row["name"], text, keep, includes))
     exact, differences = out.get("exact", False), out.get("differences")
     repo = project.target(target)["repository"]
     catalog = quality.patterns(project, repo)
@@ -375,4 +422,76 @@ def check(project: Project, target: str, query: str, candidate: Path, force: boo
                                  "differences": differences, "compiled": bool(out.get("compiled")),
                                  "forced": bool(force and len(tried) >= ATTEMPT_CAP)})
                      + "\n")
+    return out
+
+
+def _unit_for(project: Project, target: str, query: str) -> dict:
+    """The objdiff unit a query names: the unit's name, or an address or function inside it."""
+    from . import bridge, objects
+    from .index import connect, containing, refresh
+    units = objects.objdiff_units(project, target)
+    unit = units.get(query) or units.get(query.rsplit(".", 1)[0])
+    if unit is None:
+        refresh(project)
+        found = bridge.resolve(project, query, target, limit=2)
+        row = containing(connect(project), target, found[0]) if len(found) == 1 else None
+        unit = units.get(row["unit"]) if row is not None and row["unit"] else None
+    if unit is None:
+        raise ValueError(f"{query} names no objdiff unit (give the unit's name or an address in it)")
+    return unit
+
+
+_RELOC_LINE = re.compile(r"^\s*[0-9a-f]+:\s+(R_[A-Z0-9_]+)\s+(\S+)")
+_INSN_LINE = re.compile(r"^\s*([0-9a-f]+):\s+(?:(?:[0-9a-f]{2} ){3}[0-9a-f]{2}\s+|[0-9a-f]{8}\s+)?(.*)$")
+
+
+def compact_disassembly(lines: list[str], name: str = "", start: int = 0) -> list[str]:
+    """objdump lines as `+offset  instruction` (from `start`, the function's place in its section): a branch inside
+    the function as `+0x..`, an operand a relocation fills as the relocation's target, any other relocation noted
+    after the instruction."""
+    here = re.compile(r"(?:0x)?[0-9a-f]+ <" + re.escape(name) + r"(?:\+(0x[0-9a-f]+))?>") if name else None
+    rows: list[list] = []   # [offset, text, [relocation targets]]
+    for line in lines:
+        reloc = _RELOC_LINE.match(line)
+        if reloc and rows:
+            rows[-1][2].append(reloc.group(2))
+            continue
+        insn = _INSN_LINE.match(line)
+        if insn and insn.group(2).strip():
+            rows.append([int(insn.group(1), 16) - start, re.sub(r"\s+", " ", insn.group(2).strip()), []])
+    out = []
+    for offset, text, targets in rows:
+        m = here.search(text) if targets and here is not None else None
+        if m and int(m.group(1) or "0", 16) in (0, offset):   # an unrelocated operand: the function or itself
+            text = text[:m.start()] + targets.pop(0) + text[m.end():]
+        if here is not None:
+            text = here.sub(lambda m: "+" + (m.group(1) or "0x0"), text)
+        out.append(f"+{offset:x}  {text}" + (f"  ; {', '.join(targets)}" if targets else ""))
+    return out
+
+
+def probe(project: Project, target: str, query: str, source: Path, names: list[str] | None = None,
+          includes: list[Path] | None = None) -> dict[str, Any]:
+    """Compile any file with a unit's exact command and read back the code it makes: compiler experiments
+    (variants of one construct side by side) without hand-copied flags. Compares nothing with the original and
+    records no attempts. `names`: functions to show (exact or a substring of the name); default every function."""
+    from . import objects
+    from .elf import Elf
+    unit = _unit_for(project, target, query)
+    text = source.read_text(encoding="utf-8", errors="replace")
+    out: dict[str, Any] = {"unit": unit["name"], "source": str(source)}
+    with tempfile.TemporaryDirectory(prefix="zkit-probe-", dir=_scratch(project, target)) as work:
+        built, command, message = _compile(project, target, unit, text, Path(work), includes)
+        out["command"] = command
+        if built is None:
+            out.update(compiled=False, errors=message[-3000:])
+            return out
+        elf = Elf.load(built)
+        functions = sorted(elf.functions().values(), key=lambda s: (s.section, s.value))
+        if names:
+            functions = [f for f in functions if any(n == f.name or n in f.name for n in names)]
+        out.update(compiled=True, warnings=message[-1500:] if message else "", functions=[
+            {"function": f.name, "size": f.size,
+             "asm": compact_disassembly(objects.disassembly(project, target, built, f.name, elf.machine), f.name, f.value)}
+            for f in functions])
     return out

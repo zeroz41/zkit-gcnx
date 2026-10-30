@@ -62,6 +62,21 @@ class ObjectTests(unittest.TestCase):
         build(self.root, "cached", SOURCE.replace("add(", "sum("), TARGETS["aarch64"])
         self.assertEqual(set(Elf.load(path).functions()), {"sum", "scale"})
 
+    def test_tree_delta_lists_gains_and_losses(self):
+        from zkit.candidate import _tree_delta
+        for machine, triple in TARGETS.items():
+            folder = self.root / machine
+            folder.mkdir()
+            build(folder, "orig", SOURCE, triple)
+            build(folder, "tree", SOURCE.replace("x * k", "x + k"), triple)   # the tree's build: scale differs
+            unit = {"target_path": "orig.o", "base_path": "tree.o"}
+            rows = [{"function": "add", "exact": False, "differences": 2, "reloc_only": False},
+                    {"function": "scale", "exact": True}]
+            delta = _tree_delta(folder, unit, rows, None)
+            self.assertEqual([r["function"] for r in delta["gained"]], ["scale"], machine)
+            self.assertEqual(delta["lost"], [{"function": "add", "now": "2 word(s)"}], machine)
+            self.assertIsNone(_tree_delta(folder, {"target_path": "orig.o", "base_path": "none.o"}, rows, None))
+
     def test_function_diff_code_and_relocation_only(self):
         for machine, triple in TARGETS.items():
             original = build(self.root, f"{machine}-o", SOURCE, triple)
@@ -124,6 +139,38 @@ class CandidateCommandTests(unittest.TestCase):
         self.assertEqual(argv[:2], ["clang++", "-Isrc"])
         self.assertEqual(argv[argv.index("-o") + 1], "build/t/a.o")
         self.assertNotIn("-MF", argv)
+
+    def test_header_copies_are_searched_first(self):
+        from zkit.candidate import _restage
+        root = Path("/repo")
+        mwcc = ["wibo", "mwcceppc.exe", "-i", "include", "-c", "src/a.cpp", "-o", "build/G/src"]
+        argv, _ = _restage(mwcc, "src/a.cpp", root / "build/t/a.cpp", root / "build/t", root / "src", root,
+                           includes=[Path("/work/include"), root / "build/w/include"])
+        self.assertEqual(argv[:8], ["wibo", "mwcceppc.exe", "-i", "/work/include", "-i", "build/w/include", "-i",
+                                    "src"])
+        clang = ["clang++", "-Iinclude", "-c", "src/a.cpp", "-o", "obj/a.o"]
+        argv, _ = _restage(clang, "src/a.cpp", root / "build/t/a.cpp", root / "build/t", root / "src", root,
+                           includes=[Path("/work/include")])
+        self.assertEqual(argv[:4], ["clang++", "-I/work/include", "-Isrc", "-Iinclude"])
+
+    def test_compact_disassembly(self):
+        from zkit.candidate import compact_disassembly
+        aarch64 = ["       0:      \tcmp\tw1, #0x4",
+                   "       4:      \tb.lt\t0x10 <_Z1fPii+0x10>",
+                   "       8:      \tbl\t0x8 <_Z1fPii+0x8>",
+                   "\t\t0000000000000008:  R_AARCH64_CALL26\t_Z1hi",
+                   "       c:      \tadrp\tx8, 0x0 <_Z1fPii>",
+                   "\t\t000000000000000c:  R_AARCH64_ADR_PREL_PG_HI21\tg",
+                   "      10:      \tldr\tx8, [x8]",
+                   "\t\t0000000000000010:  R_AARCH64_LDST64_ABS_LO12_NC\tg"]
+        self.assertEqual(compact_disassembly(aarch64, "_Z1fPii"),
+                         ["+0  cmp w1, #0x4", "+4  b.lt +0x10", "+8  bl _Z1hi", "+c  adrp x8, g",
+                          "+10  ldr x8, [x8]  ; g"])
+        ppc = ["  40:\tc0 02 00 00 \tlfs     f0,0(r2)", "\t\t\t42: R_PPC_EMB_SDA21\t@11",
+               "  44:\t4b ff ff fd \tbl      40 <fd__Ff>", "\t\t\t44: R_PPC_REL24\th__Fi",
+               "  48:\t4e 80 00 20 \tblr"]
+        self.assertEqual(compact_disassembly(ppc, "fd__Ff", 0x40),
+                         ["+0  lfs f0,0(r2)  ; @11", "+4  bl h__Fi", "+8  blr"])
 
 
 if __name__ == "__main__":

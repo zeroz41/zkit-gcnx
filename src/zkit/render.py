@@ -1406,6 +1406,19 @@ def grouped_problems(problems: list[str]) -> list[str]:
             for (symbol, message), offsets in groups.items()]
 
 
+def probe(data: dict) -> str:
+    head = f"{data['source']} compiled as {data['unit']}"
+    if not data.get("compiled"):
+        return f"{head}: does not compile\n{data.get('errors', '')}"
+    lines = [f"{head}: {len(data['functions'])} function(s)"]
+    if data.get("warnings"):
+        lines.append(data["warnings"])
+    for row in data["functions"]:
+        lines.append(f"{row['function']} (0x{row['size']:X} bytes)")
+        lines += [f"  {line}" for line in row["asm"]]
+    return "\n".join(lines)
+
+
 def candidate_unit(data: dict) -> str:
     """`zkit try --unit`: per function, then the link."""
     head = f"{data['unit']} ({data['candidate']})"
@@ -1413,6 +1426,12 @@ def candidate_unit(data: dict) -> str:
         return f"{head}: does not compile\n{data.get('errors', '')}"
     rows = data.get("functions", [])
     lines = [f"{head}: {data['exact']}/{len(rows)} functions identical"]
+    tree = data.get("tree")
+    if tree is not None:
+        lines.append(f"  vs the tree's build ({tree['built']}): {len(tree['gained'])} newly identical, "
+                     f"{len(tree['lost'])} LOST")
+        lines += [f"  newly identical: {row['function']} (tree: {row['tree']})" for row in tree["gained"]]
+        lines += [f"  LOST: {row['function']} (now: {row['now']})" for row in tree["lost"]]
     for row in rows:
         if not row["exact"]:
             why = "not in the candidate" if row.get("missing") else (
