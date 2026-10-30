@@ -6,6 +6,7 @@ Switch AArch64 from clang) without a dependency.
 
 from __future__ import annotations
 
+import collections
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,10 @@ class Relocation:
     addend: int
 
 
+_LOADED: "collections.OrderedDict[tuple, Elf]" = collections.OrderedDict()
+_LOADED_KEEP = 8
+
+
 class Elf:
     def __init__(self, raw: bytes, path: str = "<bytes>"):
         if raw[:4] != b"\x7fELF":
@@ -79,10 +84,28 @@ class Elf:
         self.sections = [Section(i, self._string(names[4], h[0]) if names else "", *h[1:])
                          for i, h in enumerate(headers)]
         self._symbols: list[Symbol] | None = None
+        self._relocations: dict[int, list[Relocation]] = {}
+        self._functions: dict[str, Symbol] | None = None
 
     @classmethod
     def load(cls, path: Path) -> "Elf":
-        return cls(path.read_bytes(), str(path))
+        """The parsed file, reused while it is unchanged on disk: comparing a unit's functions one by one reads the
+        same two objects once instead of once per function."""
+        try:
+            stat = Path(path).stat()
+            key = (str(Path(path).resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ino)
+        except OSError:
+            key = None
+        cached = _LOADED.get(key) if key else None
+        if cached is not None:
+            _LOADED.move_to_end(key)
+            return cached
+        elf = cls(Path(path).read_bytes(), str(path))
+        if key:
+            _LOADED[key] = elf
+            while len(_LOADED) > _LOADED_KEEP:
+                _LOADED.popitem(last=False)
+        return elf
 
     def _string(self, table_offset: int, index: int) -> str:
         end = self.raw.find(b"\0", table_offset + index)
@@ -119,7 +142,13 @@ class Elf:
         return out
 
     def relocations(self, target: Section) -> list[Relocation]:
-        """Relocations that apply to one section, from its .rel/.rela section."""
+        """Relocations that apply to one section, from its .rel/.rela section, sorted by offset (read once; do not
+        modify the list)."""
+        if target.index not in self._relocations:
+            self._relocations[target.index] = self._read_relocations(target)
+        return self._relocations[target.index]
+
+    def _read_relocations(self, target: Section) -> list[Relocation]:
         out = []
         for section in self.sections:
             if section.type not in (SHT_REL, SHT_RELA) or section.info != target.index:
@@ -140,9 +169,11 @@ class Elf:
         return sorted(out, key=lambda r: r.offset)
 
     def functions(self) -> dict[str, Symbol]:
-        """Defined function symbols by name (the first definition wins)."""
-        out: dict[str, Symbol] = {}
-        for symbol in self.symbols:
-            if symbol.kind == "func" and 0 < symbol.section < 0xFF00 and symbol.name not in out:
-                out[symbol.name] = symbol
-        return out
+        """Defined function symbols by name (the first definition wins; read once, do not modify)."""
+        if self._functions is None:
+            out: dict[str, Symbol] = {}
+            for symbol in self.symbols:
+                if symbol.kind == "func" and 0 < symbol.section < 0xFF00 and symbol.name not in out:
+                    out[symbol.name] = symbol
+            self._functions = out
+        return self._functions

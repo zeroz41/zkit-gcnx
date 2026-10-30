@@ -52,6 +52,16 @@ class ObjectTests(unittest.TestCase):
             self.assertTrue(objects.identical(a, c))
             self.assertEqual(objects.identical(a, c, {"add": "sum"}), [], machine)
 
+    def test_loaded_objects_are_reused_until_they_change(self):
+        path = build(self.root, "cached", SOURCE, TARGETS["aarch64"])
+        first = Elf.load(path)
+        self.assertIs(Elf.load(path), first)
+        self.assertIs(first.functions(), first.functions())
+        section = first.sections[first.functions()["add"].section]
+        self.assertIs(first.relocations(section), first.relocations(section))
+        build(self.root, "cached", SOURCE.replace("add(", "sum("), TARGETS["aarch64"])
+        self.assertEqual(set(Elf.load(path).functions()), {"sum", "scale"})
+
     def test_function_diff_code_and_relocation_only(self):
         for machine, triple in TARGETS.items():
             original = build(self.root, f"{machine}-o", SOURCE, triple)

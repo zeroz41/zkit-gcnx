@@ -9,6 +9,7 @@ objdiff remains the authority for match percentages; these are fast exact checks
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 import shutil
@@ -63,7 +64,9 @@ def _relocs(elf: Elf, section: Section, start: int, end: int, rename: dict[str, 
     """Relocations inside [start, end), keyed by the instruction word they patch (PowerPC relocates half-words
     inside an instruction), as (types, targets, addends) tuples."""
     grouped: dict[int, list[tuple]] = {}
-    for reloc in elf.relocations(section):
+    relocations = elf.relocations(section)  # sorted by offset
+    first = bisect.bisect_left(relocations, start, key=lambda r: r.offset)
+    for reloc in relocations[first:bisect.bisect_left(relocations, end, key=lambda r: r.offset)]:
         if start <= reloc.offset < end:
             name = _symbol_name(elf, reloc.symbol)
             word = (reloc.offset - start) // width * width
