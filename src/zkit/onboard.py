@@ -286,3 +286,21 @@ def connect_agents(dry_run: bool = False, refresh: bool = False, source: str | N
             said.append(f"{client}: restart it to load zkit" + (" (accept the startup-hook prompt once)"
                                                                     if client == "codex" else ""))
     return said
+
+
+def compact_sessions(project, dry_run: bool = False) -> list[str]:
+    """Claude Code: compact long sessions early in each of the project's repositories (`install.compact_window`)."""
+    import shutil
+    from .install import AUTO_COMPACT_WINDOW, compact_window
+    if shutil.which("claude") is None:
+        return []
+    changed: list[str] = []
+    for name in project.config["repositories"]:
+        root = project.root(name)
+        if not root.is_dir():
+            continue
+        if dry_run:
+            changed.append(f"would set autoCompactWindow {AUTO_COMPACT_WINDOW} for {root} unless chosen already")
+        else:
+            compact_window(root, changed)
+    return [f"claude: {line}" for line in changed]

@@ -480,11 +480,13 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
     elif made is not None:
         args = argparse.Namespace(**{**vars(args), "manifest": made})
     elif args.command == "setup":
-        from .onboard import connect_agents
-        _, said = run(argparse.Namespace(**{**vars(args), "command": "init", "from_setup": True}))
+        from .onboard import compact_sessions, connect_agents
+        made_init, said = run(argparse.Namespace(**{**vars(args), "command": "init", "from_setup": True}))
         steps = []
         if not args.no_agents:
             steps = connect_agents(args.dry_run, args.refresh_agents, args.plugin_source)
+            if not args.dry_run and made_init.get("manifest"):
+                steps += compact_sessions(Project.load(made_init["manifest"]))
             said += "\n" + "\n".join(steps)
         return {"ok": not any(s.startswith("FAILED:") for s in steps)}, said
     if args.command == "new":
@@ -530,7 +532,9 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             from .onboard import connect_agents
             said = _ready(Project.load(path), [], said, plugins_next=False)
             if not getattr(args, "no_agents", False):
+                from .onboard import compact_sessions
                 steps = connect_agents(args.dry_run, args.refresh_agents, args.plugin_source)
+                steps += compact_sessions(Project.load(path), args.dry_run)
                 said += "\n" + "\n".join(steps)
         return {"default_project": str(path), "ok": not any(s.startswith("FAILED:") for s in steps)}, said
     if args.command == "projects":

@@ -170,6 +170,15 @@ def doctor(project: Project) -> dict:
     rows.append(_row({True: "ok", False: "warn", None: "info"}[codex], "Codex plugin", detail,
                      f"codex plugin marketplace add {REPOSITORY} && codex plugin add zkit@zkit"))
     rows.append(_attribution())
+    if shutil.which("claude"):
+        from .install import AUTO_COMPACT_WINDOW, compact_window_set
+        roots = [project.root(n) for n in project.config["repositories"]]
+        chosen = [w for w in (compact_window_set(r) for r in roots or [None]) if w]
+        rows.append(_row("ok" if chosen else "warn", "Claude Code auto-compact",
+                         f"set in {chosen[0]}" if chosen else "unset: long sessions run toward the model's window, "
+                         "and every turn re-reads all of it",
+                         f'add "autoCompactWindow": {AUTO_COMPACT_WINDOW} to ~/.claude/settings.json or '
+                         "<repo>/.claude/settings.local.json"))
     for name, repo in project.config["repositories"].items():
         root = project.root(name)
         if not root.is_dir():

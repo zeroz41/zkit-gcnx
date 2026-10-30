@@ -224,6 +224,27 @@ class SubagentHook(unittest.TestCase):
         self.assertEqual(len(hooks["SessionStart"]), 1)
         self.assertTrue((repo / ".claude/agents/zkit-worker.md").is_file())
 
+    def test_compact_window_set_once_and_never_over_a_choice(self):
+        from zkit.install import AUTO_COMPACT_WINDOW, compact_window
+        home, repo = Path(self.temp.name) / "home", Path(self.temp.name) / "repo2"
+        home.mkdir()
+        repo.mkdir()
+        local = repo / ".claude/settings.local.json"
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            changed = []
+            compact_window(repo, changed)
+            compact_window(repo, changed)
+            self.assertEqual(len(changed), 1)
+            self.assertEqual(json.loads(local.read_text())["autoCompactWindow"], AUTO_COMPACT_WINDOW)
+            local.write_text(json.dumps({"autoCompactWindow": 400000, "hooks": {}}))
+            compact_window(repo, [])
+            self.assertEqual(json.loads(local.read_text())["autoCompactWindow"], 400000)  # the user's choice
+            local.unlink()
+            (home / ".claude").mkdir()
+            (home / ".claude/settings.json").write_text(json.dumps({"autoCompactWindow": "auto"}))
+            compact_window(repo, [])
+            self.assertFalse(local.exists())
+
     def test_own_worker_agent_gets_only_the_project(self):
         from zkit import session
         for agent in ("zkit:zkit-worker", "zkit-worker"):

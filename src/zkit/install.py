@@ -19,6 +19,36 @@ SKILLS = ["zkit-resume", "zkit-recover-function", "zkit-clean-source", "zkit-por
 
 
 AGENTS = ["zkit-worker"]
+# Claude Code compacts a session when its context reaches this size instead of near the model's window. Every turn
+# re-reads the whole context, so a long session that runs toward a 1M window costs several times one compacted here,
+# and 200k keeps each request below the long-context price boundary. Users who chose a value keep it.
+AUTO_COMPACT_WINDOW = 200000
+
+
+def compact_window_set(root: Path | None = None) -> str | None:
+    """Where an auto-compact window is already chosen: the user's settings, or the repository's."""
+    places = [Path.home() / ".claude" / "settings.json"]
+    if root is not None:
+        places += [root / ".claude" / "settings.json", root / ".claude" / "settings.local.json"]
+    for path in places:
+        try:
+            if "autoCompactWindow" in json.loads(path.read_text(encoding="utf-8")):
+                return str(path)
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def compact_window(root: Path, changed: list[str]) -> None:
+    """Set the auto-compact window in the repository's local Claude settings, unless one is chosen already."""
+    if compact_window_set(root):
+        return
+    path = root / ".claude" / "settings.local.json"
+    path.parent.mkdir(exist_ok=True)
+    data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    data["autoCompactWindow"] = AUTO_COMPACT_WINDOW
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    changed.append(f"{path} (autoCompactWindow {AUTO_COMPACT_WINDOW})")
 
 
 def skills_source(kind: str = "skills") -> Path | None:
@@ -100,6 +130,7 @@ def install(project: Project, client: str, write: Path | None) -> str:
             hooks[:] = [h for h in hooks if "zkit" not in json.dumps(h)] + ours
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         changed.append(str(path))
+        compact_window(root, changed)
         _copy_skills(root / ".claude" / "skills", changed)
         _copy_agents(root / ".claude" / "agents", changed)
         return "updated:\n  " + "\n  ".join(changed) + "\nrestart Claude Code in that repo; `/mcp` lists zkit"
