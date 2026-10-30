@@ -391,21 +391,21 @@ def _namer(project: Project, target: str, db):
                                                                                .split("(", 2)[-1].split(")")[0] + r")\b")
     seen: dict[tuple[str, int], str | None] = {}
 
-    def function(match: re.Match) -> str:
-        address = key(match[1])
-        if ("fn", address) not in seen:
-            row = function_at(db, target, address)
-            seen["fn", address] = row["name"] if row and row["address"] == address else None
-        return seen["fn", address] or match[0]
-
-    def call_target(match: re.Match) -> str:
-        address = key(match[1])
+    def callee(address: int) -> str | None:
+        """The name at a call target: the function starting there, else any symbol starting there (one the decomp
+        files as data)."""
         if ("call", address) not in seen:
             row = function_at(db, target, address)
             symbol = None if row is not None and row["address"] == address else _symbol_lookup(project, target, address)
             seen["call", address] = row["name"] if symbol is None and row is not None else (
                 symbol["name"] if symbol and not symbol["offset"] else None)
-        return seen["call", address] or match[0]
+        return seen["call", address]
+
+    def function(match: re.Match) -> str:
+        return callee(key(match[1])) or match[0]
+
+    def call_target(match: re.Match) -> str:
+        return callee(key(match[1])) or match[0]
 
     module = None
     if current.name == "switch":
