@@ -2,6 +2,6 @@
 
 import os
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 # GitHub owner/name used by `setup` and in hints. ZKIT_REPOSITORY overrides it (a fork, or a local folder).
 REPOSITORY = os.environ.get("ZKIT_REPOSITORY") or "zeroz41/zkit-gcnx"

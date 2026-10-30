@@ -44,7 +44,8 @@ codex plugin marketplace add zeroz41/zkit-gcnx
 codex plugin add zkit@zkit
 ```
 
-Any other MCP agent can use `zkit serve`. `zkit setup` (below) installs the plugin for you.
+Any other MCP agent can use `zkit serve`. `zkit setup` (below) installs the plugin for you. The plugin also
+brings `zkit:zkit-worker`, a subagent for parallel matching rounds that carries only the tools that work needs.
 
 ## Update
 
@@ -102,6 +103,8 @@ Clean up the decomp source in large proven steps. Use zkit-clean-source. Finish 
 | `zkit lookup 0x80012345` | everything about a function |
 | `zkit m2c 0x80012345` | a C starting point for a GameCube function |
 | `zkit try 0x80012345 f.cpp` | compile a candidate and compare it with the original |
+| `zkit try --unit <unit> f.cpp` | a whole unit file: every function, what it gained or lost against the tree |
+| `zkit probe <unit> test.cpp` | compile an experiment with the unit's exact command and read its code |
 | `zkit compiled 0x80012345` | your built function against the original |
 | `zkit progress` | how much is matched and linked |
 | `zkit report --readme` | the browsable progress page, and the progress table in your README |

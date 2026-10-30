@@ -18,9 +18,12 @@ SKILLS = ["zkit-resume", "zkit-recover-function", "zkit-clean-source", "zkit-por
           "zkit-finish"]
 
 
-def skills_source() -> Path | None:
-    """The skills folder of a source checkout (an editable install); a wheel install has none."""
-    folder = Path(__file__).resolve().parents[2] / "skills"
+AGENTS = ["zkit-worker"]
+
+
+def skills_source(kind: str = "skills") -> Path | None:
+    """The skills (or agents) folder of a source checkout (an editable install); a wheel install has none."""
+    folder = Path(__file__).resolve().parents[2] / kind
     return folder if folder.is_dir() else None
 
 
@@ -47,6 +50,22 @@ def _copy_skills(target: Path, changed: list[str]) -> None:
             destination.symlink_to(source / name, target_is_directory=True)
         except OSError:  # Windows without developer mode cannot create symlinks
             shutil.copytree(source / name, destination)
+        changed.append(str(destination))
+
+
+def _copy_agents(target: Path, changed: list[str]) -> None:
+    source = skills_source("agents")
+    if source is None:
+        return
+    target.mkdir(parents=True, exist_ok=True)
+    for name in AGENTS:
+        destination = target / f"{name}.md"
+        if destination.exists() or destination.is_symlink():
+            continue
+        try:
+            destination.symlink_to(source / f"{name}.md")
+        except OSError:
+            shutil.copy2(source / f"{name}.md", destination)
         changed.append(str(destination))
 
 
@@ -82,6 +101,7 @@ def install(project: Project, client: str, write: Path | None) -> str:
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         changed.append(str(path))
         _copy_skills(root / ".claude" / "skills", changed)
+        _copy_agents(root / ".claude" / "agents", changed)
         return "updated:\n  " + "\n  ".join(changed) + "\nrestart Claude Code in that repo; `/mcp` lists zkit"
     if client == "codex":
         toml = (f'[mcp_servers.zkit]\ncommand = "{COMMAND}"\n'

@@ -315,18 +315,24 @@ def _unchanged_since(project: Project, key: str, value: list) -> str | None:
 
 
 SUBAGENT_CONTEXT = (
-    "zkit is available for {project}. Use its CLI via Bash: `zkit lookup <addr|name ...>` (state, owning file:line, "
-    "callers), `zkit asm <addr>`, `zkit decompile <addr ...>` (Ghidra's C), `zkit data <addr> --type f32 --count 8`, "
-    "`zkit xrefs <addr>`, `zkit refs <addr|name>` (where the source defines and uses it), `zkit compiled <addr>` "
-    "(built vs original), `zkit try <addr> <file>` (a candidate with the unit's compiler; four attempts per "
-    "function). Several addresses per call; no greps of symbol or split files. Edit only your own files, never build "
-    "the tree, report one line per address. Each turn re-reads all you have seen: read file slices, not whole "
-    "headers, and keep your state in your files.")
+    "zkit is available for {project}. CLI via Bash, several addresses per call: `zkit lookup <addr|name ...>` "
+    "(state, owning file:line, callers), `zkit asm`, `zkit decompile` (Switch) or `zkit m2c` (GameCube), "
+    "`zkit data <addr> --type f32 --count 8`, `zkit xrefs`, `zkit refs <name>` (where the source uses it), "
+    "`zkit compiled <addr>` (built vs original), `zkit try <addr> <file>` (four attempts per function; `--unit` for "
+    "a whole unit), `zkit probe <unit> <file>` (an experiment compiled with the unit's command); `--include DIR` puts "
+    "header copies first. No greps of symbol or split files. Edit only your own files, never build the tree. Each "
+    "turn re-reads all you have seen: read slices, not whole headers, and keep your state in your files.")
+OWN_AGENT_CONTEXT = "zkit project: {project}."  # zkit's own agents carry the rest in their definition
 
 
-def subagent_context(project: Project) -> str:
-    """The short pointer a subagent gets at start (it never sees the session brief)."""
-    return SUBAGENT_CONTEXT.format(project=project.config.get("id", "this project"))
+def subagent_context(project: Project, agent_type: str = "") -> str:
+    """The short pointer a subagent gets at start (it never sees the session brief); zkit's own agents only need
+    the project."""
+    text = OWN_AGENT_CONTEXT if agent_type.rsplit(":", 1)[-1] in OWN_AGENTS else SUBAGENT_CONTEXT
+    return text.format(project=project.config.get("id", "this project"))
+
+
+OWN_AGENTS = {"zkit-worker"}
 
 
 # Session start records: what a session began from, so its finish gate judges what that session changed.

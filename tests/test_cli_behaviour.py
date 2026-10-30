@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import test_bridge
@@ -221,6 +222,35 @@ class SubagentHook(unittest.TestCase):
         hooks = json.loads((repo / ".claude/settings.local.json").read_text(encoding="utf-8"))["hooks"]
         self.assertEqual(len(hooks["SubagentStart"]), 1)
         self.assertEqual(len(hooks["SessionStart"]), 1)
+        self.assertTrue((repo / ".claude/agents/zkit-worker.md").is_file())
+
+    def test_own_worker_agent_gets_only_the_project(self):
+        from zkit import session
+        for agent in ("zkit:zkit-worker", "zkit-worker"):
+            text = session.subagent_context(self.project, agent)
+            self.assertNotIn("zkit lookup", text)
+            self.assertLess(len(text), 120)
+        self.assertIn("zkit lookup", session.subagent_context(self.project, "general-purpose"))
+        stdin = sys.stdin
+        try:
+            sys.stdin = io.StringIO(json.dumps({"agent_type": "zkit:zkit-worker"}))
+            sys.stdin.isatty = lambda: False
+            from zkit import cli
+            with mock.patch("select.select", return_value=([sys.stdin], [], [])):
+                self.assertEqual(cli._hook_agent(), "zkit:zkit-worker")
+        finally:
+            sys.stdin = stdin
+
+    def test_worker_agent_definition(self):
+        text = (Path(__file__).resolve().parents[1] / "agents/zkit-worker.md").read_text(encoding="utf-8")
+        head = text.split("---")[1]
+        self.assertIn("name: zkit-worker", head)
+        tools = next(line for line in head.splitlines() if line.startswith("tools:"))
+        self.assertEqual({t.strip() for t in tools[6:].split(",")}, {"Bash", "Read", "Edit", "Write", "Glob", "Grep"})
+        self.assertLess(len(text), 6000)  # its whole prompt is in context on every one of its turns
+        for rule in ("zkit contract decomp", "byte-identical", "evidence", "relocation", "zkit try --unit",
+                     "--include", "zkit probe", "NOTES.md"):
+            self.assertIn(rule, text)
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "process and lock detection reads /proc")
