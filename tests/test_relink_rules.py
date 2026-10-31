@@ -219,6 +219,31 @@ class UnitEvidenceTests(unittest.TestCase):
             rows = units._tables_out_of_order(code)
         self.assertEqual([(lo, hi) for lo, hi, _ in rows], [(3, 12)])
 
+    def test_another_class_s_code_forming_a_table_joins_it_short_of_a_deferred_tail(self):
+        """K's table holds K::run (8); K's constructor is inline, and M::M (2), another class's constructor, forms
+        the table's address: a join a deferred tail parts (`inlined`). K::K (5) forming L's table (L nested in K,
+        holding L::run at 7) is K's own, and M::make (3) forming J's table (J::run at 9) is no constructor: joins."""
+        from types import SimpleNamespace
+        from unittest import mock
+        code = _Code(10)
+        k, l = DataObject(0x9000, 0x18, "_ZTV1K", ".data"), DataObject(0x9020, 0x18, "_ZTVN1K1LE", ".data")
+        j = DataObject(0x9040, 0x18, "_ZTV1J", ".data")
+        code.objects = [k, l, j]
+        code.object_at = {0x9000: k, 0x9020: l, 0x9040: j}.get
+        code.functions[2] = type(code.functions[2])(code.functions[2].address, 0x40, "_ZN1MC2Ev")
+        code.functions[3] = type(code.functions[3])(code.functions[3].address, 0x40, "_ZN1M4makeEv")
+        code.functions[5] = type(code.functions[5])(code.functions[5].address, 0x40, "_ZN1KC2Ev")
+        code.refs = {2: [(0, 0x9010, "addr")], 5: [(0, 0x9030, "addr")], 3: [(0, 0x9050, "addr")]}
+        code.users = lambda: {k: {2}, l: {5}, j: {3}}
+        groups = {0x9000: [8], 0x9020: [7], 0x9040: [9]}
+        ev = units.Evidence({}, [], [])
+        with mock.patch("zkit.itanium._groups", side_effect=lambda program, address, size: [SimpleNamespace(
+                slots=[code.functions[i].address for i in groups[address]])]), \
+                mock.patch.object(units, "_function_classes", return_value={2: "M", 3: "M", 5: "K", 7: "K/L", 8: "K", 9: "J"}):
+            rows = units._table_joins(code, ev)
+        self.assertEqual([(lo, hi) for lo, hi, _ in rows], [(2, 8), (5, 7), (3, 9)])
+        self.assertEqual([(lo, hi) for lo, hi, _ in ev.inlined], [(2, 8)])
+
     def test_a_class_without_a_constructor_is_its_cited_file_s(self):
         """K::reflect (1) cites k.cpp, L::reflect (3) l.cpp; K::update (2) cites nothing and another build put it
         in l.cpp: K's file is k.cpp. M's 6 is beyond L's 7 (l.cpp's class) from M's own citation at 9: M says
@@ -626,7 +651,8 @@ class DeferredTailTests(unittest.TestCase):
 
     def test_a_tail_parts_a_global_s_near_users_only(self):
         """A tail's boundary (before 4) goes through the run of a global's near users (2-6, `globals`: the next
-        file reaches it through the GOT as its own file does), not through a run any other data holds."""
+        file reaches it through the GOT as its own file does) or of another class's code forming a table's address
+        (`inlined`: a constructor its header defines), not through a run any other data holds."""
         code = _Code(8)
         code.pointers, code.object_at, code.users = [], lambda a: None, lambda: {}
         row = (2, 6, "g (.bss) is one unit's")
@@ -634,7 +660,9 @@ class DeferredTailTests(unittest.TestCase):
         ev.globals, ev.tails = {row}, [(4, 4, "3 is created only by deferred code")]
         with unittest.mock.patch.object(units, "_function_classes", return_value={}):
             self.assertEqual([b.position for b in units.boundaries(code, ev)], [4])
-            ev.globals = set()
+            ev.globals, ev.inlined = set(), {row}
+            self.assertEqual([b.position for b in units.boundaries(code, ev)], [4])
+            ev.inlined = set()
             self.assertEqual(units.boundaries(code, ev), [])
 
     def test_a_global_is_what_code_loads_from_a_got_slot(self):

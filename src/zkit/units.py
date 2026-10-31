@@ -84,6 +84,8 @@ class Evidence:
     tails: list[tuple[int, int, str]] = field(default_factory=list)   # separations placed after the stated ones,
                                                                       # before `apart`: only where those left none
     globals: set[tuple[int, int, str]] = field(default_factory=set)   # joins only a global's near users make
+    inlined: set[tuple[int, int, str]] = field(default_factory=set)   # joins only another class's constructor
+                                                                      # forming a table's address makes
 
     def joined(self, count: int, joins: list[tuple[int, int, str]] | None = None) -> list[bool]:
         """joined[p]: a boundary before function p would split one unit (by `joins`, default all of them)."""
@@ -241,10 +243,13 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
     emitting a table emits the inline virtuals only it holds, and the link keeps the first copy, so none of them
     is in a later unit than its key function, one of the class's own methods in the table: from the last of
     those to the last of the inline ones is one unit's, whatever another build places between (another build moving
-    code between files), unless the code there cites two files."""
+    code between files), unless the code there cites two files. Another class's constructor forming the address (not
+    the table's class's, nor one enclosing it or nested in it: a member's constructor its header may define, inlined)
+    says little of the table's unit: the order clang creates a unit's functions in (a deferred tail) parts it."""
     if program.platform.name != "switch":
         return []
     from .itanium import _groups
+    from .platform import demangle_itanium
     from .score import placeholder
     weak = _weak(program)
     formed = {address for rows in program.refs.values() for _, address, kind in rows if kind == "addr"}
@@ -285,6 +290,24 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
                 len({ev.files[i] for i in range(first, target + 1) if i in ev.files}) <= 1:
             out.append((first, target, f"{program.functions[target].name} is first emitted with the table at "
                                        f"{text(address)}"))
+    classes = _function_classes(program)
+    names = {a: program.object_at(a).name for a in holders if program.object_at(a).name.startswith("_ZTV")}
+    of_table = {a: d[len("vtable for "):].replace("::", "/") for a, d in
+                zip(names, demangle_itanium(list(names.values()))) if d and d.startswith("vtable for ")}
+
+    def related(i: int, cls: str | None) -> bool:      # code that can be the table's class's own
+        own = classes.get(i)
+        return own is None or cls is None or own == cls or cls.startswith(own + "/") or own.startswith(cls + "/") \
+            or i not in constructors
+
+    def constructor(text: str | None) -> bool:
+        parts = _qualified(text) if text else None
+        return bool(parts) and len(parts) > 1 and parts[-1] == re.sub(r"<.*>$", "", parts[-2])
+    formers_of = set().union(*(users.get(o, ()) for a in holders for o in
+                               {program.object_at(a), program.object_at(a + 16)} if o))
+    candidates = sorted(i for i in formers_of if i in classes)
+    constructors = {i for i, d in zip(candidates, demangle_itanium([program.functions[i].name for i in candidates]))
+                    if constructor(d)}
     for address, slots in holders.items():
         table = program.object_at(address)
         run = set()
@@ -295,8 +318,15 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
                 run = formers | held
         if run and max(run) - min(run) <= TIGHT and \
                 len({ev.files[i] for i in range(min(run), max(run) + 1) if i in ev.files}) <= 1:
-            out.append((min(run), max(run), f"the table at {text(address)}, the code forming its address and "
-                                            "the functions only it holds"))
+            row = (min(run), max(run), f"the table at {text(address)}, the code forming its address and the "
+                                       "functions only it holds")
+            out.append(row)
+            own = {i for i in run if related(i, of_table.get(address))}
+            if own != run:
+                ev.inlined.add(row)
+                if len(own) > 1:
+                    out.append((min(own), max(own), f"the table at {text(address)}, its class's code forming its "
+                                                    "address and the functions only it holds"))
             continue
         if table.scope != "weak" and table.address not in weak:
             own = [index[s] for s in set(slots) if count[s] == 1 and s in index]
@@ -1178,7 +1208,8 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     ev = ev or evidence(program)
     count = len(program.functions)
     joined = ev.joined(count)
-    held = ev.joined(count, [j for j in ev.joins if j not in ev.globals]) if ev.globals else joined
+    soft = ev.globals | ev.inlined
+    held = ev.joined(count, [j for j in ev.joins if j not in soft]) if soft else joined
     cited = ev.joined(count, ev.cited)
     first = ev.joined(count, ev.firsts)
     reach = ev.joined(count, ev.reach)
@@ -1215,6 +1246,7 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
         if any(lo <= c.position <= hi for c in chosen):
             continue
         # the order clang creates a unit's functions in (a deferred tail) parts a global's near users (`globals`)
+        # and another class's constructor inlining a table's constructor (`inlined`)
         bound = held if row in tail_rows else joined
         candidates = [p for p in range(lo, hi + 1) if not bound[p] and not (row in ev.borrowed and reach[p])]
         if not candidates and (lo, hi, because) in ev.direct:   # data one run uses across what the code itself
