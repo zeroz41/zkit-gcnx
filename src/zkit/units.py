@@ -83,6 +83,8 @@ class Evidence:
                                                                       # only where those left none
     tails: list[tuple[int, int, str]] = field(default_factory=list)   # separations placed after the stated ones,
                                                                       # before `apart`: only where those left none
+    beyond: list[tuple[int, int, str]] = field(default_factory=list)  # `apart` for a callee cheap only below the
+                                                                      # threshold itself: placed after `languages`
     languages: list[tuple[int, int, str]] = field(default_factory=list)   # separations placed last, after `apart`:
                                                                           # only where all the others left none
     globals: set[tuple[int, int, str]] = field(default_factory=set)   # joins only a global's near users make
@@ -479,7 +481,8 @@ def _code_referred(program: Program) -> set[int]:
 
 INLINE_INSTRUCTION, INLINE_CALL = 5, 25    # LLVM's inline cost of an instruction and of a call it makes
 INLINE_THRESHOLD = {"-O3": 250, "-O2": 225, "-Os": 75, "-Oz": 25}   # LLVM's inliner, per optimization level
-INLINED = 0.6       # of that threshold: a callee this cheap is always inlined (150 at -O3)
+INLINED = 0.6       # of that threshold: a callee this cheap is always inlined (150 at -O3); a C++ one (mangled)
+                    # calling nothing through a register, below the threshold itself (`_out_of_line_calls`)
 
 
 def inline_threshold(cflags: list[str] | None) -> int | None:
@@ -500,28 +503,47 @@ def got_globals(cflags: list[str] | None) -> bool:
 
 def _out_of_line_calls(program: Program, ev: Evidence) -> None:
     """Switch (clang at a level that inlines, `inline_threshold`): a direct call to a cheap function the same file
-    defines is always inlined, so a call to one that stayed a call is to another file's (a base class's constructor, a utility's accessor): a boundary
-    lies between the two, placed after every other boundary and only where those left none. Cheap is LLVM's
-    inline cost, not size: a short function making several calls stays a call within its file. Not for a
-    function a class table holds, whose call may have been a virtual one the optimizer turned direct after
-    inlining. However far apart the two are (within a unit's reach, `TAIL_REACH`): the call says nothing of the
-    distance, and where other boundaries already lie between them it adds none."""
+    defines is always inlined, so a call to one that stayed a call is to another file's (a base class's
+    constructor, a utility's accessor): a boundary lies between the two, placed after every other boundary and
+    only where those left none. Cheap is LLVM's inline cost, not size: a short function making several calls
+    stays a call within its file. Not for a function a class table holds, whose call may have been a virtual one
+    the optimizer turned direct after inlining, nor for a recursive one, which the inliner never inlines.
+    Cheap is `INLINED` of the threshold; and, as a weaker separation (`beyond`, placed after every other row: it
+    only adds a boundary where all the others left none, never moves one), a C++ function (a mangled name)
+    cheaper than the threshold itself that calls nothing through a register. Measured on a matched build (pairs
+    compiled from one file and identical): C++ callees called out of line within their file cost 275 and more
+    but for two in two thousand calls; below, the calls are across files. The two, and an out-of-line call
+    within one file found since (a callee ending in a tail call through a member function pointer), each call
+    through a register: a virtual or member pointer call is more IR than the machine code shows. A plainly
+    named one may be C, whose header-only libraries define their functions weak, which the inliner never
+    inlines (an interposable definition) and nothing in the image shows. However far apart the two are (within
+    a unit's reach, `TAIL_REACH`): the call says nothing of the distance, and where other boundaries already
+    lie between them it adds none."""
     threshold = inline_threshold(program.cflags)
     if program.platform.name != "switch" or threshold is None:
         return
     cheap = INLINED * threshold
     held = {pointee for _, pointee in program.pointers}
     functions = program.functions
+    costs: dict[int, tuple[int, bool] | None] = {}  # (cost, only below the threshold); None: recursive
     for caller, callees in program.calls.items():
         for callee in callees:
             function = functions[callee]
-            made = len(program.calls.get(callee, ()))
-            cost = INLINE_INSTRUCTION * max(function.size // 4 - made, 0) + INLINE_CALL * made
-            if callee == caller or cost > cheap or function.address in held or abs(callee - caller) > TAIL_REACH:
+            if callee not in costs:
+                made = program.calls.get(callee, ())
+                cost = INLINE_INSTRUCTION * max(function.size // 4 - len(made), 0) + INLINE_CALL * len(made)
+                costs[callee] = None if callee in made else \
+                    (cost, cheap < cost < threshold and function.name.startswith("_Z")
+                     and not program.platform.indirect_calls(program.image, function.address, function.size))
+            if costs[callee] is None:
+                continue
+            cost, beyond = costs[callee]
+            if callee == caller or cost > cheap and not beyond or function.address in held \
+                    or abs(callee - caller) > TAIL_REACH:
                 continue
             lo, hi = min(caller, callee) + 1, max(caller, callee)
-            ev.apart.append((lo, hi, f"{functions[caller].name} calls {function.name} "
-                                     f"({function.size} bytes) without inlining it"))
+            (ev.beyond if beyond else ev.apart).append(
+                (lo, hi, f"{functions[caller].name} calls {function.name} ({function.size} bytes) without inlining it"))
 
 
 CXX_NAMES = ("_Z", "__cxa_", "__gxx_", "_GLOBAL__", "__cxx_")   # names only C++ code defines or reaches (Itanium ABI)
@@ -1362,13 +1384,15 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     # needs its boundary
     rest = sorted(set(rows) - set(stated), key=lambda r: (r[1] - r[0], r[0]))
     apart = sorted(set(ev.apart), key=lambda r: (r[1] - r[0], r[0]))
-    apart_rows = set(apart)
+    beyond = sorted(set(ev.beyond) - set(apart), key=lambda r: (r[1] - r[0], r[0]))  # the weakest of all: it only
+    beyond_rows = set(beyond)                                                            # adds a boundary
+    apart_rows = set(apart) | beyond_rows
     tails = sorted(set(ev.tails) - set(rows), key=lambda r: (r[1] - r[0], r[0]))
     tail_rows = set(tails)
     languages = [r for r in sorted(set(ev.languages), key=lambda r: (r[1] - r[0], r[0])) if r not in apart_rows]
-    owner = _function_classes(program, qualifiers=True) if apart else {}
+    owner = _function_classes(program, qualifiers=True) if apart_rows else {}
     for row in [r for r in stated if r not in ev.edges] + [r for r in stated if r in ev.edges] + rest + tails + apart \
-            + languages:
+            + languages + beyond:
         lo, hi, because = row
         toward = ev.toward.get(row, ev.edges.get(row, lo))  # among equal places, the one nearest the evidence
                                                              # (else the earliest)
@@ -1384,8 +1408,12 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
             # user's unit whatever the files between cite (one file including another)
         if not candidates:
             continue
-        if row in apart_rows:           # a call says nothing of a class's or namespace's run of functions
-            whole = [p for p in candidates if not (owner.get(p - 1) and owner.get(p - 1) == owner.get(p))]
+        if row in apart_rows:           # a call says nothing of a class's or namespace's run of functions, and
+            # the weakest (`beyond`) cuts only at an end of the caller's or the callee's class run
+            left, right = owner.get(lo - 1), owner.get(hi)
+            whole = [p for p in candidates if not (owner.get(p - 1) and owner.get(p - 1) == owner.get(p))
+                     and (row not in beyond_rows or left and owner.get(p - 1) == left
+                          or right and owner.get(p) == right)]
             if not whole:
                 continue
             candidates = whole
@@ -1890,7 +1918,8 @@ def _gap_owners(program: Program, out: list[tuple[int, int, str, str]], owner: d
     """A data object between two units' ranges of a section that no claim placed (only other units' code uses it,
     or several units' do) is one of the units linked between them, both included: the linker lays out each
     object's section whole, in link order. It is the one whose code its name's deepest qualifier qualifies
-    (`ns::Sound::s_configName` is Sound's unit's), when only one candidate's does; the
+    (`ns::Sound::s_configName` is Sound's unit's), when only one candidate's does (or, when several do, the one
+    whose code all its pointers point to: a static table of the class's member functions); the
     objects so placed keep link order, or none of the gap's is. Weak data (the first user's), tables, guards and
     a function's statics follow their own rules, and merged literals their blocks."""
     from .platform import demangle_itanium
@@ -1923,6 +1952,7 @@ def _gap_owners(program: Program, out: list[tuple[int, int, str, str]], owner: d
             candidates.append((k, o))
     texts = demangle_itanium([o.name for _, o in candidates])
     placed: dict[int, list[tuple[int, int, str]]] = collections.defaultdict(list)
+    pointers: list[tuple[int, int]] | None = None
     for (k, o), text in zip(candidates, texts):
         parts = _data_qualifier(text) if text else []
         if len(parts) < 2:
@@ -1936,6 +1966,15 @@ def _gap_owners(program: Program, out: list[tuple[int, int, str, str]], owner: d
                 best, chosen = depth, [unit]
             elif depth and depth == best:
                 chosen.append(unit)
+        if len(chosen) > 1:                           # the names tie: the code it points to, if one unit's
+            if pointers is None:
+                pointers = sorted(program.pointers)
+            at = bisect.bisect_left(pointers, (o.address, -1))
+            pointed = set()
+            while at < len(pointers) and pointers[at][0] < o.address + o.size:
+                pointed.add(owner.get(program.function_index.get(pointers[at][1], -1)))
+                at += 1
+            chosen = [unit for unit in chosen if pointed == {unit}]
         if len(chosen) == 1:
             placed[k].append((o.address, o.address + max(o.size, 1), chosen[0]))
     rows = list(out)

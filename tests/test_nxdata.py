@@ -761,6 +761,63 @@ class OutOfLineCallTests(unittest.TestCase):
             self.assertEqual(owner[first], "game/manager.cpp")
             self.assertNotIn(owner[update], ("game/manager.cpp", "game/other.cpp"))
 
+    def test_a_call_below_the_threshold_separates_and_a_recursive_one_does_not(self):
+        """Mixer::mix (29 instructions, no call) costs more than a C function's cutoff but, being C++ (a mangled
+        name), less than -O2's threshold: within its file it would have been inlined, so tick's call to it parts
+        mixer.cpp from manager.cpp. manager.cpp's own count calls itself: the inliner never inlines a recursive
+        function, so tick's call to it says nothing and count stays tick's."""
+        sources = {
+            "other.cpp": OUT_OF_LINE["other.cpp"],
+            "mixer.cpp": """struct Mixer { int a, b, c, d, e, f, g, h; int mix(int v); };
+int Mixer::mix(int v) { a ^= v; b += a * 3; c -= b >> 2; d ^= c * 5; e += d >> 3; f -= e * 7; g ^= f >> 1;
+    h += g * 9; return a + b + c + d + e + f + g + h; }
+""",
+            "manager.cpp": """void report(const char *file, int line);
+struct Mixer { int a, b, c, d, e, f, g, h; int mix(int v); };
+struct Node { Node *l, *r; };
+int count(Node *n) { return n ? 1 + count(n->l) + count(n->r) : 0; }
+int tick(Mixer *m, Node *n, int v) {
+    if (v > 99) report("C:/proj/src/game/manager.cpp", 2);
+    return m->mix(v) + count(n);
+}
+""",
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in sources.items():
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, "-ffunction-sections", str(root / name), "-o",
+                                str(root / name.replace(".cpp", ".o"))], check=True, capture_output=True)
+            link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                    *(str(root / n.replace(".cpp", ".o")) for n in sources)]
+            subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
+            subprocess.run([*link, "--strip-all", "-o", str(root / "main.elf")], check=True, capture_output=True)
+            at = {s.name: s.value for s in Elf.load(root / "full.elf").symbols}
+            names = {a: n for n, a in at.items()}
+            module = nx.load(root / "main.elf")
+            functions = module.functions()
+            symbols = [Symbol(names.get(a, f"fn_{a:08X}"), ".text", a, "function", s, "global")
+                       for a, s in functions]
+            symbols += [Symbol(f"lbl_{a:08X}", section, a, "object", size, "global")
+                        for a, size, section in nxdata.objects(module, functions)]
+            program = Program.from_symbol_list(Switch(), module, symbols)
+            program.cflags = FLAGS
+            owner = {}
+            for unit in units.propose(program)["units"]:
+                for index in range(unit["first"], unit["end"]):
+                    owner[program.functions[index].address] = unit["unit"]
+            mix, count, tick = at["_ZN5Mixer3mixEi"], at["_Z5countP4Node"], at["_Z4tickP5MixerP4Nodei"]
+            size = program.functions[program.function_index[mix]].size // 4
+            threshold = units.inline_threshold(FLAGS)
+            self.assertGreater(units.INLINE_INSTRUCTION * size, 0.6 * threshold)   # dearer than the old cutoff
+            self.assertLess(units.INLINE_INSTRUCTION * size, threshold)
+            self.assertLess(at["_Z2foi"], mix)
+            self.assertLess(mix, count)
+            self.assertLess(count, tick)
+            self.assertEqual(owner[tick], "game/manager.cpp")
+            self.assertEqual(owner[count], "game/manager.cpp")
+            self.assertNotIn(owner[mix], ("game/manager.cpp", "game/other.cpp"))
+
 
 # beta.cpp's Beta::s_size, which only user.cpp's code reads (linked first), lies between first.cpp's data and
 # beta.cpp's own

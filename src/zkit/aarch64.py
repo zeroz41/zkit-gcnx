@@ -55,8 +55,18 @@ def tail_calls(words: list[int], start: int, end: int) -> list[tuple[int, int]]:
 
 
 def indirect_calls(words: list[int]) -> int:
-    """BLR count: calls through a register (virtual calls and function pointers)."""
-    return sum(1 for word in words if word & 0xFFFFFC1F == 0xD63F0000)
+    """Calls through a register (virtual calls and function pointers): every BLR, and every BR that is a tail
+    call. A BR is a jump table's when an ADD (shifted or extended register: base + scaled entry) last formed its
+    register; anything else (a load from a table or an object) leaves the function."""
+    count = 0
+    for index, word in enumerate(words):
+        if word & 0xFFFFFC1F == 0xD63F0000:
+            count += 1
+        elif word & 0xFFFFFC1F == 0xD61F0000:
+            register = word >> 5 & 31
+            writer = next((w for w in reversed(words[:index]) if register in written(w)), None)
+            count += writer is None or writer & 0x7F000000 != 0x0B000000
+    return count
 
 
 # Load/store (unsigned immediate) access size by (size, V, opc): only the kind of access matters here.

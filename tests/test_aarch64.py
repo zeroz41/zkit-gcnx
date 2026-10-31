@@ -54,6 +54,15 @@ class JoinTests(unittest.TestCase):
         self.assertEqual(sorted((r.offset, r.target) for r in relocations), [(0x1004, 0x5010), (0x1008, 0x5010)])
         self.assertEqual(aarch64.global_stores(self.WORDS, 0x1000), set())
 
+class IndirectCallTests(unittest.TestCase):
+    def test_a_register_branch_is_a_call_unless_a_jump_table_formed_its_target(self):
+        """`ldr x2, [x8, #0x10]; br x2` leaves the function (a tail call through a member or function pointer);
+        `adr x9; ldrb w8, [x10, x0]; add x8, x9, x8, lsl #2; br x8` is a switch's jump table; blr always calls."""
+        self.assertEqual(aarch64.indirect_calls([0xF9400902, 0xD61F0040]), 1)
+        self.assertEqual(aarch64.indirect_calls([0x10000089, 0x38606948, 0x8B080928, 0xD61F0100]), 0)
+        self.assertEqual(aarch64.indirect_calls([0xD63F0100, 0xD65F03C0]), 1)
+
+
 class RelocationTests(unittest.TestCase):
     def test_an_add_into_the_page_register_ends_the_page(self):
         """`adrp x8, page; add x8, x8, #0x110` leaves x8 holding the whole address: a load through it after that
