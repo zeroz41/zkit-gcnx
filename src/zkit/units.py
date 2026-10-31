@@ -83,6 +83,8 @@ class Evidence:
                                                                       # only where those left none
     tails: list[tuple[int, int, str]] = field(default_factory=list)   # separations placed after the stated ones,
                                                                       # before `apart`: only where those left none
+    languages: list[tuple[int, int, str]] = field(default_factory=list)   # separations placed last, after `apart`:
+                                                                          # only where all the others left none
     globals: set[tuple[int, int, str]] = field(default_factory=set)   # joins only a global's near users make
     inlined: set[tuple[int, int, str]] = field(default_factory=set)   # joins only another class's constructor
                                                                       # forming a table's address makes
@@ -169,6 +171,7 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     ev.cited += out_of_order
     ev.joins += _held_statics(program, ev)
     _out_of_line_calls(program, ev)
+    _language_runs(program, ev)
     _deferred_tails(program, ev)
     _initializer_ends(program, ev)
     _start_up_object(program, ev)
@@ -519,6 +522,87 @@ def _out_of_line_calls(program: Program, ev: Evidence) -> None:
             lo, hi = min(caller, callee) + 1, max(caller, callee)
             ev.apart.append((lo, hi, f"{functions[caller].name} calls {function.name} "
                                      f"({function.size} bytes) without inlining it"))
+
+
+CXX_NAMES = ("_Z", "__cxa_", "__gxx_", "_GLOBAL__", "__cxx_")   # names only C++ code defines or reaches (Itanium ABI)
+FREE_MANGLED = re.compile(r"^_ZL?\d")      # a mangled function at namespace scope with a plain identifier: what a C
+                                            # interface compiled as C++ gets outside its `extern "C"`
+
+
+def _language_runs(program: Program, ev: Evidence) -> None:
+    """Switch (Itanium C++ ABI): a C file's external functions carry plain names and its code reaches plain names
+    only (no mangled function or global, none of the ABI's runtime: guards, `__cxa_atexit`). Where such a function
+    meets a C++ file's own function, one whose name only C++ declares (a class's or namespace's member, an operator,
+    a static initializer), with only file-local functions reaching no C++ name between the two, a boundary lies
+    between them, placed after every other boundary (the calls' too, `apart`) and only where those left none: its
+    window is narrow, the calls' are wide (one met first would leave a call's boundary unplaced). Neither side is
+    told apart by a plainly named function whose code reaches C++ names (a C++ file's `extern "C"` function) nor by
+    a mangled one at namespace scope (a C interface compiled as C++): either may share a file with both. Nor is
+    a C++ file's own C interface (`extern "C"` functions reaching no C++ name) told from a C file, so a C run is
+    parted from its C++ neighbour only when it holds two plain functions and one of its functions calls or takes
+    the address of another of them: a lone C-callable stub, or C functions that never reach one another, stay."""
+    if program.platform.name != "switch":
+        return
+    from .score import placeholder
+    from .platform import _got
+    _, local, strong = _bindings(program)
+    functions = program.functions
+    index = program.function_index
+    slots = _got(program.image)
+    load64 = program.image.pointers.get
+
+    def name_at(address: int) -> str | None:
+        if any(lo <= address < hi for lo, hi in slots):
+            value = load64(address)
+            if value is None:
+                return None
+            address = value
+        j = index.get(address)
+        if j is not None:
+            return functions[j].name
+        found = program.object_at(address)
+        return found.name if found is not None else None
+
+    language: list[str | None] = [None] * len(functions)    # "c++", "c", "either" or nothing known
+    for i, f in enumerate(functions):
+        reached = [functions[j].name for j in program.calls.get(i, ())] + \
+            [n for _, a, _ in program.refs.get(i, ()) for n in [name_at(a)] if n]
+        cxx = any(n.startswith(CXX_NAMES) for n in reached)
+        if f.name.startswith(CXX_NAMES) and not FREE_MANGLED.match(f.name):
+            language[i] = "c++"
+        elif placeholder(f.name):
+            language[i] = "either" if cxx else None
+        elif f.name.startswith("_Z") or cxx:
+            language[i] = "either"
+        elif strong[i] and i not in local:
+            language[i] = "c"
+    # A C run (its plain functions and the unknown ones between, up to a function of either other kind) stands as
+    # a file of its own only with two plain functions, one reaching another: a C++ file's C interface (`extern "C"`
+    # functions that reach no C++ name) is told apart from a C file by nothing else.
+    stands = [False] * len(functions)
+    i = 0
+    while i < len(functions):
+        if language[i] not in ("c", None):
+            i += 1
+            continue
+        j = i
+        while j < len(functions) and language[j] in ("c", None):
+            j += 1
+        plain = sum(language[k] == "c" for k in range(i, j))
+        linked = any(i <= t < j and t != k for k in range(i, j) for t in [*program.calls.get(k, ()),
+                     *(index.get(a, -1) for _, a, _ in program.refs.get(k, ()))])
+        for k in range(i, j):
+            stands[k] = plain >= 2 and linked
+        i = j
+    last = None
+    for i, kind in enumerate(language):
+        if kind is None:
+            continue
+        if last is not None and {language[last], kind} == {"c", "c++"} and i - last <= SHORT_CALL \
+                and stands[last if language[last] == "c" else i]:
+            ev.languages.append((last + 1, i, f"{functions[last].name} is {language[last]} code, "
+                                          f"{functions[i].name} {kind} code"))
+        last = i
 
 
 def _weak(program: Program) -> set[int]:
@@ -1281,8 +1365,10 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     apart_rows = set(apart)
     tails = sorted(set(ev.tails) - set(rows), key=lambda r: (r[1] - r[0], r[0]))
     tail_rows = set(tails)
+    languages = [r for r in sorted(set(ev.languages), key=lambda r: (r[1] - r[0], r[0])) if r not in apart_rows]
     owner = _function_classes(program, qualifiers=True) if apart else {}
-    for row in [r for r in stated if r not in ev.edges] + [r for r in stated if r in ev.edges] + rest + tails + apart:
+    for row in [r for r in stated if r not in ev.edges] + [r for r in stated if r in ev.edges] + rest + tails + apart \
+            + languages:
         lo, hi, because = row
         toward = ev.toward.get(row, ev.edges.get(row, lo))  # among equal places, the one nearest the evidence
                                                              # (else the earliest)
