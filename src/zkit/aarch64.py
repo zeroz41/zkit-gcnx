@@ -25,6 +25,14 @@ def written(word: int) -> tuple[int, ...]:
         if not load:
             return ()
         return (word & 31, word >> 10 & 31) if pair else (word & 31,)
+    if group & 0b0111 == 0b0111:                                    # SIMD/FP data processing writes SIMD/FP
+        if word & 0x5F20FC00 == 0x1E200000:                         # registers, except conversions to integer,
+            return () if word >> 16 & 7 in (2, 3, 7) else (word & 31,)  # (scvtf/ucvtf/fmov from general: FP)
+        if word & 0x5F200000 == 0x1E000000:                         # fixed-point conversions (fcvtzs/fcvtzu),
+            return (word & 31,) if word >> 16 & 7 < 2 else ()
+        if word & 0xBFE00000 == 0x0E000000 and word >> 10 & 0x3F in (0x0B, 0x0F):  # and smov/umov
+            return (word & 31,)
+        return ()
     return (word & 31,)
 
 

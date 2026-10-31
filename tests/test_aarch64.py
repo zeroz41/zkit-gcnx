@@ -75,6 +75,18 @@ class RelocationTests(unittest.TestCase):
                                                                             (0x100C, 0x1000)])
         self.assertEqual(sorted(aarch64.track_addresses(words, 0x1000).items()), [(0x1004, (0x5110, "addr"))])
 
+    def test_a_floating_point_write_leaves_the_page_register(self):
+        """`fmul s8, s1, s2` writes v8, not x8: an adrp x8 before it still pairs with the add after it. A
+        conversion to an integer register (`fcvtzs w8, s0`, `fmov w8, s0`) does replace the page."""
+        # adrp x8, page; fmul s8, s1, s2; scvtf s8, w0; add x8, x8, #0x10; ret
+        words = [0x90000028, 0x1E220828, 0x1E220008, 0x91004108, 0xD65F03C0]
+        relocations, _ = aarch64.code_relocations(words, 0x1000, {})
+        self.assertEqual(sorted((r.offset, r.target) for r in relocations), [(0x1000, 0x5010), (0x100C, 0x5010)])
+        for word in (0x1E380008, 0x1E260008, 0x0E0C3C08):            # fcvtzs w8, s0; fmov w8, s0; mov w8, v0.s[1]
+            self.assertEqual(aarch64.written(word), (8,), hex(word))
+        for word in (0x1E220828, 0x1E220008, 0x1E270008, 0x4EA01C08):  # fmul; scvtf; fmov s8, w0; mov v8.16b
+            self.assertEqual(aarch64.written(word), (), hex(word))
+
     def test_a_got_load_reads_a_slot_of_the_got_not_any_relocated_pointer(self):
         """`ldr x, [page, #lo12]` of a relocated word is a GOT load (to the pointee) only when the word is a slot
         of `.got`: element 0 of a pointer table in `.data` is relocated too, yet its load is a plain LDST64 of the
