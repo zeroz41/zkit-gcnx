@@ -151,3 +151,59 @@ def test_mwcc_parse_flags(tmp_path):
     assert "-Ibuild/GPOE8P/include" in cmd and "-Iinclude" in cmd and "-DVERSION=1" in cmd
     assert cmd[cmd.index("-x") + 1] == "c++" and (tmp_path / "mwcc_intrinsics.h").exists()
     assert "-proc" not in cmd and "gekko" not in cmd
+
+
+def test_header_copies_come_before_the_commands_include_paths(tmp_path):
+    from zkit.sweep import parse_command
+    copies = [tmp_path / "copies", tmp_path / "unit"]
+    clang = parse_command(["cc", "--target=aarch64-none-elf", "-Iinclude", "-c", "x.cpp"], "clang++",
+                          tmp_path / "parse.cpp", "f", copies)
+    assert clang.index(f"-I{copies[0]}") < clang.index(f"-I{copies[1]}") < clang.index("-Iinclude")
+    mwcc = parse_command(["wibo", "mwcceppc.exe", "-i", "include", "-c", "src/a.cpp", "-o", "build/a"],
+                         "clang++", tmp_path / "parse.cpp", "f", copies)
+    assert mwcc.index(f"-I{copies[0]}") < mwcc.index(f"-I{copies[1]}") < mwcc.index("-Iinclude")
+
+
+def test_sweep_takes_include_folders():
+    from zkit.cli import build_parser
+    args = build_parser().parse_args(["sweep", "0x10", "a.cpp", "--include", "one", "--include", "two"])
+    assert args.include == [Path("one"), Path("two")]
+
+
+@unittest.skipUnless(CLANG, "needs a host clang that writes JSON ASTs")
+def test_sweep_parses_and_compiles_with_the_header_copies(tmp_path):
+    """The parse finds the function only through a header copy and the unit folder's quoted include, and every
+    compile is handed the same copies."""
+    from types import SimpleNamespace
+    from unittest import mock
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "local.h").write_text("struct Local { int v; };\n", encoding="utf-8")
+    copies = tmp_path / "copies"
+    copies.mkdir()
+    (copies / "holder.h").write_text("struct Holder { int a; int b; void run(int n); };\n", encoding="utf-8")
+    candidate = tmp_path / "candidate.cpp"
+    candidate.write_text('#include "holder.h"\n#include "local.h"\n'
+                         "void Holder::run(int n) { Local l; l.v = n; a = n + b; b += l.v; }\n", encoding="utf-8")
+    project = SimpleNamespace(target=lambda name: {"repository": "decomp"}, root=lambda repo: root)
+    unit = {"name": "a", "target_path": "orig/a.o", "metadata": {"source_path": "src/a.cpp"}}
+    row = {"address": 0x10, "name": "_ZN6Holder3runEi", "demangled": "Holder::run(int)", "unit": "a"}
+    seen = []
+
+    def compile_(project, target, unit, text, work, includes=None):
+        seen.append(includes)
+        return None, "", ""
+    with mock.patch("zkit.index.refresh"), mock.patch("zkit.index.connect"), \
+            mock.patch("zkit.index.containing", return_value=row), \
+            mock.patch("zkit.bridge.resolve", return_value=[0x10]), \
+            mock.patch("zkit.objects.objdiff_units", return_value={"a": unit}), \
+            mock.patch("zkit.objects.label_reader"), \
+            mock.patch("zkit.candidate.compile_command",
+                       return_value=(["cc", "--target=aarch64-none-elf", "-std=gnu++14", "-c", "src/a.cpp"],
+                                     root, "src/a.cpp")), \
+            mock.patch("zkit.candidate._scratch", return_value=tmp_path), \
+            mock.patch("zkit.candidate._compile", side_effect=compile_):
+        result = sweep.sweep(project, "main", "0x10", candidate, out=tmp_path / "best.cpp", jobs=1, rounds=1,
+                             includes=[copies])
+    assert seen and all(includes == [copies] for includes in seen)
+    assert result["includes"] == [str(copies)] and (tmp_path / "best.cpp").is_file()

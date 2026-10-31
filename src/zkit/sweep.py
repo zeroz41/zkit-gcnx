@@ -582,8 +582,12 @@ def _mwcc_parse_flags(argv: list[str], shim: Path) -> list[str]:
     return keep
 
 
-def parse_command(argv: list[str], clang: str, source: Path, name: str) -> list[str]:
-    """The unit's compile flags (target, standard, includes, defines) for a syntax-only JSON dump of `name`."""
+def parse_command(argv: list[str], clang: str, source: Path, name: str,
+                  includes: list[Path] | None = None) -> list[str]:
+    """The unit's compile flags (target, standard, includes, defines) for a syntax-only JSON dump of `name`;
+    `includes` (header copies, the unit's folder) are searched before the command's own include paths, as the
+    compile searches them."""
+    first = [f"-I{folder}" for folder in includes or []]
     if any("mwcc" in Path(a).name.lower() for a in argv[:3]):
         shim = source.parent / "mwcc_intrinsics.h"
         if not shim.exists():
@@ -591,8 +595,8 @@ def parse_command(argv: list[str], clang: str, source: Path, name: str) -> list[
         keep = _mwcc_parse_flags(argv, shim)
         if source.suffix in (".cpp", ".cp", ".cc", ".cxx") and "-x" not in keep:
             keep += ["-x", "c++", "-std=c++98"]
-        return [clang, *keep, "-fsyntax-only", "-Wno-everything", "-ferror-limit=0", "-Xclang", "-ast-dump=json",
-                "-Xclang", f"-ast-dump-filter={name}", str(source)]
+        return [clang, *first, *keep, "-fsyntax-only", "-Wno-everything", "-ferror-limit=0", "-Xclang",
+                "-ast-dump=json", "-Xclang", f"-ast-dump-filter={name}", str(source)]
     keep: list[str] = []
     skip = False
     for i, arg in enumerate(argv[1:], 1):
@@ -607,15 +611,16 @@ def parse_command(argv: list[str], clang: str, source: Path, name: str) -> list[
         if arg.startswith(("-I", "-D", "-U", "-std=", "--target=", "-nostdlibinc", "-isystem", "-include",
                            "-fno-exceptions", "-fno-rtti", "-fms-extensions", "-fshort-wchar")):
             keep.append(arg)
-    return [clang, *keep, "-fsyntax-only", "-Wno-everything", "-Xclang", "-ast-dump=json", "-Xclang",
+    return [clang, *first, *keep, "-fsyntax-only", "-Wno-everything", "-Xclang", "-ast-dump=json", "-Xclang",
             f"-ast-dump-filter={name}", str(source)]
 
 
 def sweep(project, target: str, query: str, candidate: Path, out: Path | None = None, jobs: int | None = None,
-          rounds: int = 12, seconds: float = 600.0) -> dict[str, Any]:
-    """Sweep the rewrites of one function in `candidate` (a file `zkit try` takes) and write the best text."""
+          rounds: int = 12, seconds: float = 600.0, includes: list[Path] | None = None) -> dict[str, Any]:
+    """Sweep the rewrites of one function in `candidate` (a file `zkit try` takes) and write the best text;
+    `includes` are header copies searched before the tree's headers, in the parse and in every compile."""
     from . import bridge, objects
-    from .candidate import _compile, _scratch, compile_command
+    from .candidate import _compile, _planned_source, _scratch, compile_command
     from .index import connect, containing, refresh
     clang = host_clang()
     if clang is None:
@@ -636,20 +641,23 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
     labels = objects.label_reader(project, target)
     simple = _simple_name(row["demangled"] or row["name"])
     argv, _, _ = compile_command(project, target, unit)
+    unit_source = (unit.get("metadata") or {}).get("source_path") or _planned_source(project, target, unit)
+    # the compile's search order: header copies, then the unit's folder (its quoted includes)
+    searched = [*(includes or []), *([(root / unit_source).parent] if unit_source else [])]
     text = candidate.read_text(encoding="utf-8", errors="replace")
     work_root = Path(tempfile.mkdtemp(prefix="zkit-sweep-", dir=_scratch(project, target)))
 
     def propose(source: str) -> list[Rewrite]:
         path = work_root / f"parse{candidate.suffix or '.cpp'}"
         path.write_text(source, encoding="utf-8")
-        dump = subprocess.run(parse_command(argv, clang, path, simple), capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=120)
+        dump = subprocess.run(parse_command(argv, clang, path, simple, searched), capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", timeout=120)
         body = body_of(definitions(dump.stdout), source, simple, row["name"])
         return rewrites(source, body) if body else []
 
     def evaluate(source: str) -> Score:
         with tempfile.TemporaryDirectory(dir=work_root) as work:
-            built, _, _ = _compile(project, target, unit, source, Path(work))
+            built, _, _ = _compile(project, target, unit, source, Path(work), includes)
             return FAILED if built is None else score(original, built, row["name"], labels)
 
     try:
@@ -663,7 +671,7 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
     destination.write_text(result.pop("text"), encoding="utf-8")
     from .index import address_text
     return {"address": address_text(row["address"]), "function": row["name"], "unit": row["unit"],
-            "candidate": str(candidate),
+            "candidate": str(candidate), **({"includes": [str(f) for f in includes]} if includes else {}),
             "written": str(destination), **result}
 
 
