@@ -136,6 +136,20 @@ class ClimbTests(unittest.TestCase):
         self.assertTrue(result["exact"])
         self.assertEqual(result["history"][1]["step"], "first; second")
 
+    def test_a_worse_rewrite_pairs_with_one_that_keeps_the_score(self):
+        """Eight rewrites change nothing; one (S) only shows together with another (W) that alone is worse."""
+        def evaluate(text: str) -> sweep.Score:
+            if "S" in text and "W" in text:
+                return sweep.Score(True, 0, 0)
+            return sweep.Score(False, 5, 5, 0, frozenset({3})) if "W" in text else \
+                sweep.Score(False, 1, 1, 0, frozenset({7}))
+
+        def propose(text: str) -> list[sweep.Rewrite]:
+            return [sweep.Rewrite(f"{c} up", ((at, at + 1, c.upper()),)) for at, c in enumerate(text) if c.islower()]
+        result = sweep.climb("abcdefghsw", propose, evaluate, jobs=1, rounds=3, pairs=6)
+        self.assertTrue(result["exact"])
+        self.assertEqual(result["history"][1]["step"], "w up; s up")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -294,3 +308,93 @@ def test_the_body_is_the_definition_with_the_symbols_mangled_name():
         dump = subprocess.run(command, capture_output=True, text=True, check=True)
     body = sweep.body_of(sweep.definitions(dump.stdout), text, "calc", "_ZN1B4calcEv")
     assert text[sweep._span(body)[0]:].startswith("{ return 2; }")
+
+
+HELD_SOURCE = """struct Item { int handle; int pad[3]; };
+Item fetch(int i);
+struct Data { bool mask; int count; };
+Data *getData(int i);
+bool find(int &out, int n, int key) {
+    int seen = n * 2;
+    // only the large ones
+    if (seen > 4) {
+        if (!getData(n)->mask) {
+            return false;
+        }
+        out = seen;
+        if (key != 0) {
+            out = key;
+            return true;
+        }
+    }
+    return false;
+}
+int scan(int n, int key) {
+    for (int i = 0; i < n; i++) {
+        if (i != key && fetch(i).handle == key) {
+            return i;
+        }
+        if (fetch(i + 1).handle == key) {
+            return -2;
+        }
+    }
+    return -1;
+}
+void mark(int i, bool m) {
+    getData(i)->mask = m;
+    getData(i)->count += 1;
+}
+"""
+
+
+def _held(name):
+    body = parse(HELD_SOURCE, name)
+    assert body is not None
+    return {r.what: r for r in sweep.rewrites(HELD_SOURCE, body)}
+
+
+@unittest.skipUnless(CLANG, "needs a host clang that writes JSON ASTs")
+def test_early_returns_become_one_exit_through_a_result():
+    found = _held("find")
+    expected = HELD_SOURCE.replace("""    // only the large ones
+    if (seen > 4) {
+        if (!getData(n)->mask) {
+            return false;
+        }
+        out = seen;
+        if (key != 0) {
+            out = key;
+            return true;
+        }
+    }
+    return false;""", """    bool result = false;
+    // only the large ones
+    if (seen > 4) {
+        if (getData(n)->mask) {
+            out = seen;
+            if (key != 0) {
+                out = key;
+                result = true;
+            }
+        }
+    }
+    return result;""")
+    assert found["one exit through result"].apply(HELD_SOURCE) == expected
+    assert not any(what.startswith("one exit") for what in _held("scan"))      # a return in a loop stays
+
+
+@unittest.skipUnless(CLANG, "needs a host clang that writes JSON ASTs")
+def test_condition_temporaries_and_returned_pointers_get_named_locals(tmp_path):
+    scan, mark = _held("scan"), _held("mark")
+    both = scan["assign all 2 condition temporaries to locals"].apply(HELD_SOURCE)
+    assert "        Item item;\n        if (i != key && (item = fetch(i)).handle == key) {" in both
+    assert "        Item item2;\n        if ((item2 = fetch(i + 1)).handle == key) {" in both
+    assert "Data* data = getData(i);\n    data->mask = m;\n    getData(i)->count" in \
+        mark["hold getData(i) in data (line 32)"].apply(HELD_SOURCE)
+    assert "data->mask = m;\n    data->count += 1;" in \
+        mark["hold getData(i) in data (line 32, all 2 uses)"].apply(HELD_SOURCE)
+    for rewrite in [*scan.values(), *mark.values(), *_held("find").values()]:
+        (tmp_path / "a.cpp").write_text(rewrite.apply(HELD_SOURCE), encoding="utf-8")
+        result = subprocess.run([CLANG, "--target=aarch64-none-elf", "-fsyntax-only", str(tmp_path / "a.cpp")],
+                                capture_output=True, text=True)
+        assert result.returncode == 0, f"{rewrite.what}: {result.stderr}"

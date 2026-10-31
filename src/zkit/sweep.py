@@ -5,9 +5,10 @@ order usually has a source spelling that clang compiles to the original's code: 
 commutative operator, `a = a + b` for `a += b`, a loop counting up instead of down, an `if` with its branches
 swapped, a counter of another integer type, two independent statements the other way round, and how a value is
 held (an explicit copy, a named temporary, a re-read instead of a cached local, an out parameter updated in place,
-a record's arithmetic member by member), which decides the order of float operands. The sweep parses the
-function with a host clang's JSON AST (the project's compiler may be too old to write one), rewrites one site at
-a time, compiles every rewrite with the unit's exact command, and climbs to the spelling with the fewest
+a record's arithmetic member by member), which decides the order of float operands, a named local for a
+condition's temporary or a returned pointer, and one exit through a result local for early returns. The sweep
+parses the function with a host clang's JSON AST (the project's compiler may be too old to write one), rewrites
+one site at a time, compiles every rewrite with the unit's exact command, and climbs to the spelling with the fewest
 differing words. A rewrite need not keep the meaning: a byte-identical result proves itself, and anything else
 is only a step. Records no attempts; the result is a candidate for `zkit try`."""
 
@@ -21,7 +22,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -162,6 +163,13 @@ def rewrites(text: str, body: dict, components: Callable[[str], tuple[str, ...] 
         for kid in kids:
             visit(kid, node)
     visit(body, None)
+    _single_exit(text, body, out)
+    if len(values.assigns) > 1:                       # every such temporary named: one only may change nothing
+        whole: Rewrite | None = values.assigns[0]
+        for one in values.assigns[1:]:
+            whole = _combined(whole, one) if whole else None
+        if whole:
+            out.append(Rewrite(f"assign all {len(values.assigns)} condition temporaries to locals", whole.edits))
     return out
 
 
@@ -436,6 +444,189 @@ def _adjacent(text: str, kids: list[dict], out: list[Rewrite]) -> None:
         out.append(Rewrite(f"swap `{one.strip()}` / `{two.strip()}`", ((a[0], b_end, two + gap + one),)))
 
 
+# One exit. Several `return v;` reach the return block as a phi of their values, and SimplifyCFG may fold those
+# into the branches (a `mov w0, #1` before a store); a result local assigned on each path and returned once
+# keeps the stores and the materialised value where the source assigns them. The rewrite nests what follows an
+# early return into the `if` (its condition negated) or its `else`.
+
+LITERALS = ("IntegerLiteral", "CXXBoolLiteralExpr", "FloatingLiteral", "CXXNullPtrLiteralExpr", "GNUNullExpr",
+            "CharacterLiteral")
+NEGATED = {"==": "!=", "!=": "==", "<": ">=", ">=": "<", ">": "<=", "<=": ">"}
+
+
+def _returns(node: dict) -> bool:
+    """Whether a statement holds a `return` of its function (a lambda's are its own)."""
+    if node.get("kind") == "ReturnStmt":
+        return True
+    return node.get("kind") != "LambdaExpr" and any(_returns(k) for k in _children(node))
+
+
+def _exits(node: dict | None) -> bool:
+    """Whether every path through a statement returns."""
+    kind, kids = (node or {}).get("kind"), _children(node or {})
+    if kind == "ReturnStmt":
+        return True
+    if kind == "CompoundStmt":
+        return any(_exits(k) for k in kids)
+    return kind == "IfStmt" and bool(node.get("hasElse")) and len(kids) == 3 and _exits(kids[1]) and _exits(kids[2])
+
+
+def _constant(node: dict) -> bool:
+    node = _strip(_bare(node))
+    if node.get("kind") == "UnaryOperator" and node.get("opcode") in ("-", "+") and _children(node):
+        return _constant(_children(node)[0])
+    return node.get("kind") in LITERALS or node.get("kind") == "DeclRefExpr" and \
+        (node.get("referencedDecl") or {}).get("kind") == "EnumConstantDecl"
+
+
+class _SingleExit:
+    """`return` statements of one body lowered into assignments of a result local (see above)."""
+
+    def __init__(self, text: str, name: str, default: str, unit: str):
+        self.text, self.name, self.default, self.unit = text, name, default, unit
+
+    def end(self, node: dict) -> int:
+        """Where a statement ends, its `;` included."""
+        span = _span(node)
+        if self.text[span[1] - 1:span[1]] == ";":
+            return span[1]
+        closed = self.text[span[1] - 1:span[1]] == "}" and node.get("kind") in SEQUENCED
+        return span[1] if closed else (_statement_end(self.text, span[1]) or span[1])
+
+    def lead(self, node: dict) -> int:
+        """The start of a statement's first line, with the `//` comment lines just above it."""
+        start = self.text.rfind("\n", 0, _span(node)[0]) + 1
+        if self.text[start:_span(node)[0]].strip():
+            return _span(node)[0]
+        while start > 0:
+            above = self.text.rfind("\n", 0, start - 1) + 1
+            if not self.text[above:start].strip().startswith("//"):
+                break
+            start = above
+        return start
+
+    def lines(self, start: int, end: int, base: str, indent: str) -> list[str]:
+        """Source lines moved from indentation `base` to `indent`."""
+        out = []
+        for line in self.text[start:end].split("\n"):
+            if not line.strip():
+                continue
+            out.append(indent + (line[len(base):] if line.startswith(base) else line.lstrip()))
+        return out
+
+    def base(self, node: dict) -> str:
+        line = self.text.rfind("\n", 0, _span(node)[0]) + 1
+        return self.text[line:_span(node)[0]] if not self.text[line:_span(node)[0]].strip() else ""
+
+    def negated(self, cond: dict) -> str:
+        bare, written = _strip(cond), self.text[_span(cond)[0]:_span(cond)[1]]
+        while bare.get("kind") == "ParenExpr" and _children(bare):
+            bare = _strip(_children(bare)[0])
+        kids = _children(bare)
+        if bare.get("kind") == "UnaryOperator" and bare.get("opcode") == "!" and kids and _span(kids[0]):
+            inner = _span(kids[0])
+            return self.text[inner[0]:inner[1]]
+        op = bare.get("opcode")
+        if bare.get("kind") == "BinaryOperator" and op in NEGATED and len(kids) == 2 and _span(kids[0]) and \
+                _span(kids[1]):
+            types = {_qual(k) for k in kids}
+            if op in ("==", "!=") or all(t in INTEGERS or t.endswith("*") for t in types):
+                a, b = _span(kids[0]), _span(kids[1])
+                return f"{self.text[a[0]:a[1]]} {NEGATED[op]} {self.text[b[0]:b[1]]}"
+        return f"!{_wrap(written)}"
+
+    def branch(self, node: dict | None, indent: str) -> list[str] | None:
+        if node is None:
+            return []
+        return self.lower(_children(node) if node.get("kind") == "CompoundStmt" else [node], indent)
+
+    def lower(self, statements: list[dict], indent: str) -> list[str] | None:
+        """The statements with every return an assignment and what follows a return nested; None when a return
+        cannot be lowered (in a loop or a switch, or code that only some paths reach)."""
+        out: list[str] = []
+        for at, node in enumerate(statements):
+            rest = statements[at + 1:]
+            if not _span(node):
+                return None
+            if not _returns(node):
+                out += self.lines(self.lead(node), self.end(node), self.base(node), indent)
+                continue
+            out += self.lines(self.lead(node), _span(node)[0], self.base(node), indent)       # its comments
+            kids = _children(node)
+            if node.get("kind") == "ReturnStmt":
+                if rest or not kids or not _span(kids[0]):
+                    return None
+                value = self.text[_span(kids[0])[0]:_span(kids[0])[1]]
+                return out + ([f"{indent}{self.name} = {value};"] if value != self.default else [])
+            if node.get("kind") != "IfStmt" or node.get("hasInit") or node.get("hasVar") or \
+                    node.get("isConstexpr") or len(kids) < 2 or not _span(kids[0]):
+                return None
+            cond, then, other = kids[0], kids[1], kids[2] if node.get("hasElse") and len(kids) > 2 else None
+            deeper = indent + self.unit
+            then_lines, other_lines = self.branch(then, deeper), self.branch(other, deeper)
+            tail = self.lower(rest, deeper)
+            if then_lines is None or other_lines is None or tail is None:
+                return None
+            then_exits, other_exits = _exits(then), other is not None and _exits(other)
+            if then_exits and not other_exits:
+                other_lines += tail
+            elif other_exits and not then_exits:
+                then_lines += tail
+            elif rest:
+                return None                           # reached by some paths only, or by none
+            written = self.text[_span(cond)[0]:_span(cond)[1]]
+            if then_lines:
+                out += [f"{indent}if ({written}) {{", *then_lines]
+                out += [f"{indent}}} else {{", *other_lines, f"{indent}}}"] if other_lines else [f"{indent}}}"]
+            elif other_lines:
+                out += [f"{indent}if ({self.negated(cond)}) {{", *other_lines, f"{indent}}}"]
+            elif not _effects(cond, set(), set()):
+                return None                           # a test whose calls would be lost
+            return out                                # what followed is nested above
+        return out
+
+
+def _single_exit(text: str, body: dict, out: list[Rewrite]) -> None:
+    """Several `return v;` -> `T result = default; ... result = v; ... return result;` (the default the last
+    return's constant)."""
+    statements = _children(body)
+    if not statements or statements[-1].get("kind") != "ReturnStmt" or not _children(statements[-1]):
+        return
+    returns: list[dict] = []
+
+    def collect(node: dict) -> None:
+        if node.get("kind") == "ReturnStmt":
+            returns.append(node)
+        elif node.get("kind") != "LambdaExpr":
+            for kid in _children(node):
+                collect(kid)
+    collect(body)
+    values = [_children(r)[0] if _children(r) else None for r in returns]
+    final = values[-1]
+    if len(returns) < 2 or None in values or not _constant(final) or not _span(final) or \
+            any(v.get("valueCategory") not in (None, "prvalue") or _record(v) for v in values):
+        return
+    spelled = (final.get("type") or {}).get("qualType", "")
+    if not spelled or spelled == "void" or "(" in spelled:
+        return
+    first = next(i for i, s in enumerate(statements) if _returns(s))
+    if first == len(statements) - 1 or not all(_span(s) for s in statements[first:]):
+        return
+    name = _local_name(text[_span(body)[0]:_span(body)[1]], "result")       # a file's other `result`s may stay
+    default = text[_span(final)[0]:_span(final)[1]]
+    exit_ = _SingleExit(text, name or "", default, "")
+    opening = text.rfind("\n", 0, _span(body)[0]) + 1
+    outer = re.match(r"[ \t]*", text[opening:]).group(0)
+    indent = exit_.base(statements[first])
+    exit_.unit = indent[len(outer):] if indent.startswith(outer) and len(indent) > len(outer) else "    "
+    lowered = exit_.lower(statements[first:-1], indent) if name else None
+    if lowered is None:
+        return
+    start, end = exit_.lead(statements[first]), exit_.end(statements[-1])
+    new = "\n".join([f"{indent}{spelled} {name} = {default};", *lowered, f"{indent}return {name};"])
+    out.append(Rewrite(f"one exit through {name}", ((start, end, new),)))
+
+
 # How a value is held. LLVM's Reassociate puts the lower-ranked operand of every commutative operation first (float
 # ones too): a fresh load ranks by its place among its block's loads and calls, a computed value by its depth, and
 # source order only breaks ties. Swapping the source operands then changes nothing; what decides the order is
@@ -540,6 +731,8 @@ class _Values:
     def __init__(self, text: str, body: dict, components: Callable[[str], tuple[str, ...] | None]):
         self.text, self.components = text, components
         self.low, self.high = _span(body)
+        self.assigns: list[Rewrite] = []
+        self.names: list[str] = []
 
     def source(self, node: dict) -> str | None:
         span = _span(node)
@@ -631,6 +824,10 @@ class _Values:
             elif kid.get("kind") == "DeclStmt":
                 self.declared(kid, kids[at + 1:], out)
             self.named(kid, out)
+        for at, kid in enumerate(kids):
+            if _span(kid):
+                self.assigned(kid, out)
+                self.pointer(kid, kids[at + 1:], out)
 
     def assignment(self, kid: dict, expr: dict, out: list[Rewrite]) -> None:
         parts, op = _children(expr), _callee(expr)
@@ -847,6 +1044,101 @@ class _Values:
             where = _span(value)
             out.append(Rewrite(f"hold {written} in {held}", ((span[0], span[0], insert), (where[0], where[1], held))))
 
+    @staticmethod
+    def tested(kid: dict, loops: bool) -> list[dict]:
+        """What a statement evaluates first: an expression statement itself, an `if`'s or a `switch`'s
+        condition (a `while`'s with `loops`: evaluated again each time)."""
+        kids = _children(kid)
+        if kid.get("kind") in EXPRESSIONS:
+            return [kid]
+        if kid.get("kind") in ("IfStmt", "SwitchStmt") + (("WhileStmt",) if loops else ()) and kids and \
+                not kid.get("hasInit") and not kid.get("hasVar"):
+            return [kids[0]]
+        return []
+
+    def held_name(self, callee: str | None, fallback: str, taken: Iterable[str] = ()) -> str | None:
+        """A local's name for what `callee` returns: its name without `get` (`getItem` -> `item`), else the
+        type's (`Item` -> `item`)."""
+        base = re.sub(r"^[Gg]et(?:_(?=[A-Za-z])|(?=[A-Z]))", "", callee or "")
+        return _local_name(" ".join([self.text, *taken]), base if callee and base != callee else fallback)
+
+    def assigned(self, kid: dict, out: list[Rewrite]) -> None:
+        """A computed record temporary that a condition evaluates (an `if`'s or a `while`'s, or an operand of
+        && / || / ?:) assigned to a local declared just before the statement: `T held; if (a && (held =
+        f()).x)`. A named object gets lifetime markers, so its stack slot is shared with the block's others."""
+        span = _span(kid)
+        found: list[dict] = []
+
+        def walk(node: dict, conditional: bool) -> None:
+            kind = node.get("kind")
+            if kind == "LambdaExpr" or kind in SEQUENCED and kind != "ConditionalOperator":
+                return
+            if kind == "MaterializeTemporaryExpr" and conditional:
+                value = _bare(node)
+                if value.get("kind") in COMPUTED and _record(value) and _span(value):
+                    found.append(value)
+            inner = conditional or kind == "ConditionalOperator" or \
+                kind == "BinaryOperator" and node.get("opcode") in ("&&", "||")
+            for child in _children(node):
+                walk(child, inner)
+        for root in self.tested(kid, True):
+            walk(root, kid.get("kind") not in EXPRESSIONS)
+        indent = self.indent(span[0])
+        for value in found:
+            held = self.held_name(_callee(value) if value.get("kind") in CALLED else None, _record(value),
+                                  self.names)                 # unique: they may all be applied together
+            if held is None:
+                continue
+            written = self.source(value)
+            insert = f"{self.spelled(_record(value), value)} {held};\n{indent}"
+            where = _span(value)
+            self.names.append(held)
+            self.assigns.append(Rewrite(f"assign {written} to {held} declared before the statement",
+                                        ((span[0], span[0], insert), (where[0], where[1], f"({held} = {written})"))))
+            out.append(self.assigns[-1])
+
+    def pointer(self, kid: dict, later: list[dict], out: list[Rewrite]) -> None:
+        """A returned pointer the statement reaches through (`f(x)->m = v`) held in a named local first: `T* p =
+        f(x); p->m = v`, and with the same call's later `f(x)->` in the block read from it too."""
+        span = _span(kid)
+        found: dict[str, dict] = {}
+
+        def walk(node: dict) -> None:
+            kind = node.get("kind")
+            if kind in SEQUENCED or kind == "BinaryOperator" and node.get("opcode") in ("&&", "||", ","):
+                return
+            if kind == "MemberExpr" and node.get("isArrow") and _children(node):
+                base = _bare(_children(node)[0])
+                if base.get("kind") in CALLED and _span(base) and _qual(base).endswith("*") and \
+                        "(" not in _qual(base):
+                    found.setdefault(self.source(base), base)
+            for child in _children(node):
+                walk(child)
+        for root in self.tested(kid, False):
+            walk(root)
+        indent = self.indent(span[0])
+        for written, call in found.items():
+            qual = (call.get("type") or {}).get("qualType", "")
+            match = re.fullmatch(r"((?:const |volatile )*)(?:\w+::)*(\w+) \*", qual)
+            spelled = f"{match.group(1)}{self.spelled(match.group(2))}*" if match else qual
+            pointee = match.group(2) if match else "value"
+            held = self.held_name(_callee(call), pointee[0].lower() + pointee[1:])
+            if held is None:
+                continue
+            insert = f"{spelled} {held} = {written};\n{indent}"
+            where = _span(call)
+            line = self.text.count("\n", 0, span[0]) + 1
+            out.append(Rewrite(f"hold {written} in {held} (line {line})",
+                               ((span[0], span[0], insert), (where[0], where[1], held))))
+            again = [(m.start(), m.end() - 2) for k in [kid, *later] if _span(k)
+                     for m in re.finditer(re.escape(written) + r"\s*->", self.text[:_span(k)[1]])
+                     if m.start() >= _span(k)[0] and m.start() != where[0]]
+            if again:
+                edits = [(span[0], span[0], insert), (where[0], where[1], held)]
+                edits += [(s, s + len(written), held) for s, _ in again]
+                out.append(Rewrite(f"hold {written} in {held} (line {line}, all {len(edits) - 1} uses)",
+                                   tuple(edits)))
+
 
 REGISTERS = 0x001F03FF          # Rm, Rn, Rd/Rt: what register allocation changes in most AArch64 encodings
 PPC_REGISTERS = 0x03FFF800      # rD/rS, rA, rB (frD, frA, frB): the same for PowerPC's big-endian words
@@ -862,6 +1154,7 @@ class Score:
     shape: int
     words: int
     size_gap: int = 0
+    wrong: frozenset = field(default=frozenset(), compare=False)    # the original's words left unpaired
 
     def key(self) -> tuple:
         return (not self.exact, self.shape, self.words, self.size_gap)
@@ -875,9 +1168,15 @@ FAILED = Score(False, 1 << 30, 1 << 30, 1 << 30)
 
 
 def _distance(a: list[int], b: list[int]) -> int:
+    return _aligned(a, b)[0]
+
+
+def _aligned(a: list[int], b: list[int]) -> tuple[int, frozenset]:
+    """The edit distance of two word streams and the indices of `a`'s words left unpaired."""
     from difflib import SequenceMatcher
-    same = sum(block.size for block in SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks())
-    return len(a) + len(b) - 2 * same
+    blocks = SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks()
+    paired = {i for block in blocks for i in range(block.a, block.a + block.size)}
+    return len(a) + len(b) - 2 * len(paired), frozenset(range(len(a))) - paired
 
 
 def score(original_path: Path, built_path: Path, name: str, labels=None) -> Score:
@@ -906,7 +1205,8 @@ def score(original_path: Path, built_path: Path, name: str, labels=None) -> Scor
         streams.append(words)
     shapes = [[w & ~mask if w < 1 << 32 else w for w in words] for words in streams]
     gap = abs(diff.get("size", 0) - diff.get("compiled_size", 0))
-    return Score(False, _distance(*shapes), _distance(*streams), gap)
+    words, wrong = _aligned(*streams)
+    return Score(False, _distance(*shapes), words, gap, wrong)
 
 
 def _combined(one: Rewrite, two: Rewrite) -> Rewrite | None:
@@ -921,7 +1221,8 @@ def climb(text: str, propose: Callable[[str], list[Rewrite]], evaluate: Callable
     """Steepest ascent: every rewrite of the current text is compiled (each distinct text once) and the best one
     that improves the score is taken, until the function is identical, nothing improves, or the rounds or time
     run out. On a plateau, pairs of the `pairs` best single rewrites are tried before giving up (two changes that
-    only help together, like a loop's direction and its counter's type). Deterministic: no random moves."""
+    only help together, like a loop's direction and its counter's type), and pairs of up to `pairs` worse ones
+    with those that keep the score (at most 4 * pairs * pairs). Deterministic: no random moves."""
     started = time.monotonic()
     cache: dict[str, Score] = {}
 
@@ -947,6 +1248,14 @@ def climb(text: str, propose: Callable[[str], list[Rewrite]], evaluate: Callable
         if result.key() >= best.key() and pairs > 1:
             top = [options[i] for _, i in ranked[:pairs]]
             combos = [c for i, a in enumerate(top) for b in top[i + 1:] if (c := _combined(a, b))]
+            # a worse rewrite (first those that pair a word of the original's the current text leaves unpaired)
+            # with one that keeps the score: a change that only shows together with another (a counter's type
+            # that lets a re-read be hoisted), bounded
+            worse = sorted(((s, i) for s, i in ranked if best.key() < s.key() < FAILED.key()),
+                           key=lambda r: (not best.wrong - r[0].wrong, r[0].key()))[:pairs]
+            level = dict.fromkeys([i for _, i in ranked[:pairs]] + [i for s, i in ranked if s.key() == best.key()])
+            wider = [c for p in level for _, w in worse if w != p and (c := _combined(options[w], options[p]))]
+            combos += wider[:4 * pairs * pairs]
             if combos:
                 scored = sorted(zip(measured([c.apply(text) for c in combos]), combos), key=lambda r: r[0].key())
                 if scored[0][0].key() < result.key():
