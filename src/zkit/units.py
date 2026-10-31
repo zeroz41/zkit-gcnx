@@ -879,10 +879,13 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
             if kind == "addr" and address in signatures:
                 named[index].add(signatures[address])
     ev.roots = _roots(list(files.values()))
+    several: dict[int, set[str]] = {}               # function index -> the source files one function cites
     for index, paths in cited.items():
         sources = {p for p in paths if not HEADER.search(p)}
         if len(sources) == 1:
             ev.files[index] = _unit_name(next(iter(sources)), ev.roots)
+        elif len(sources) > 1 and _compiled_alone(program):
+            several[index] = {_unit_name(p, ev.roots) for p in sources}
     for index, candidates in named.items():
         if len(candidates) == 1:                       # several: an inlined callee's string, not this function's
             ev.names[index] = next(iter(candidates))
@@ -899,8 +902,14 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
         if len(longer) == 1:
             full[short] = longer[0]
     ev.files = {index: full.get(name, name) for index, name in ev.files.items()}
-    alias = _included(ev)                              # files one compiles inside another: the unit's one name
+    several = {index: {full.get(name, name) for name in names} for index, names in several.items()}
+    alias = _included(ev, several)                     # files one compiles inside another: the unit's one name
     ev.files = {index: alias.get(name, name) for index, name in ev.files.items()}
+    for index, names in several.items():             # a function citing the files of one compile is its
+        one = {alias.get(name, name) for name in names}
+        if len(one) == 1:
+            ev.files[index] = one.pop()
+            ev.placed.discard(index)
     _class_files(program, ev)
     # A unit's code is one run in the link: one function another build put in X between two that agree on Y is
     # no evidence for X there (an inline that build kept from X, code that moved, other code that compiles alike).
@@ -994,17 +1003,28 @@ def _header_spellings(program: Program, ev: Evidence, files: dict[int, str]) -> 
                 ev.toward[row] = leaving
 
 
-def _included(ev: Evidence) -> dict[str, str]:
+def _included(ev: Evidence, several: dict[int, set[str]] | None = None) -> dict[str, str]:
     """{file: the name of the unit it is compiled in} for files whose own citations interleave with another's
-    (`a.cpp`, then `b.cpp`, then `a.cpp` again): one includes the other, and they are one unit, named after the one
-    citing most (another build may name it after the other: its units take this name too)."""
+    (`a.cpp`, then `b.cpp`, then `a.cpp` again), or that one function cites together (`several`: one file's
+    function inlined into another's, which only one compile can do): one includes the other, and they are one
+    unit, named after the one citing most (another build may name it after the other: its units take this name
+    too)."""
     own = sorted((i, f) for i, f in ev.files.items() if i not in ev.placed)
+    counts = collections.Counter(f for _, f in own)
     parent: dict[str, str] = {}
 
     def root(f: str) -> str:
         while parent.get(f, f) != f:
             f = parent[f]
         return f
+    for names in (several or {}).values():
+        first, *rest = sorted(names)
+        for other in rest:
+            a, b = root(first), root(other)
+            if a != b:
+                parent[b] = a
+    if parent:                                         # those functions are the compile's too, under one name
+        own = sorted([(i, root(f)) for i, f in own] + [(i, root(min(names))) for i, names in several.items()])
     last: dict[str, int] = {}
     for position, (_, file) in enumerate(own):
         if file in last:
@@ -1014,7 +1034,6 @@ def _included(ev: Evidence) -> dict[str, str]:
                     if a != b:
                         parent[b] = a
         last[file] = position
-    counts = collections.Counter(f for _, f in own)
     groups: dict[str, list[str]] = collections.defaultdict(list)
     for f in {f for _, f in own} | set(parent):
         groups[root(f)].append(f)
@@ -1024,6 +1043,14 @@ def _included(ev: Evidence) -> dict[str, str]:
             name = max(members, key=lambda f: (counts[f], f))
             out.update({f: name for f in members if f != name})
     return out
+
+
+def _compiled_alone(program: Program) -> bool:
+    """Switch: whether the target's flags are known and compile each unit alone (no link-time optimization), so
+    a function only inlines code of the unit it is compiled in, and a `__FILE__` it cites is a file of that
+    compile."""
+    flags = program.cflags
+    return program.platform.name == "switch" and flags is not None and not any(f.startswith("-flto") for f in flags)
 
 
 def _wide_statics(program: Program, ev: Evidence) -> None:
