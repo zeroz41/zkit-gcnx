@@ -133,8 +133,18 @@ def _functions(report: dict, linked_only: bool = False, single: str | None = Non
     return out
 
 
-def _data_ranges(report: dict, exact_only: bool = False, linked_only: bool = False, single: str | None = None) -> dict:
-    """Original non-code intervals per (module, section), merged so a split or a fold is not a loss."""
+def _has_ranges(report: dict) -> bool:
+    """Whether the report records the original intervals of its units' sections (`apply_link` writes them)."""
+    return any("ranges" in (section.get("metadata") or {})
+               for unit in report.get("units", []) for section in unit.get("sections") or [])
+
+
+def _data_ranges(report: dict, exact_only: bool = False, linked_only: bool = False, single: str | None = None,
+                 recorded: bool = False) -> dict:
+    """Original non-code intervals per (module, section), merged so a split or a fold is not a loss. objdiff
+    gives a section one address and its object's size: a unit holding several pieces of a section reads as one
+    interval from its first piece (and its size counts the padding between them). With `recorded`, a section's
+    original intervals are taken from the report where `apply_link` wrote them."""
     ranges: dict[tuple[str, str], list[tuple[int, int]]] = {}
     for unit in report.get("units", []):
         if linked_only and not (unit.get("metadata") or {}).get("complete"):
@@ -145,6 +155,10 @@ def _data_ranges(report: dict, exact_only: bool = False, linked_only: bool = Fal
             if is_code(name) or not size:
                 continue
             if exact_only and number(section.get("fuzzy_match_percent")) != 100:
+                continue
+            pieces = (section.get("metadata") or {}).get("ranges") if recorded else None
+            if pieces is not None:
+                ranges.setdefault((module, name), []).extend((int(number(a)), int(number(b))) for a, b in pieces)
                 continue
             address = (section.get("metadata") or {}).get("virtual_address")
             if address is None or not int(number(address)):
@@ -198,11 +212,13 @@ def compare(before: dict, after: dict, single: str | None = None) -> dict[str, A
     first, last = measures(before.get("measures")), measures(after.get("measures"))
     for key in COUNTERS:
         metrics[key] = {"before": first[key], "after": last[key], "delta": last[key] - first[key]}
-    exact_data_lost = _lost(_data_ranges(before, exact_only=True, single=single),
-                            _data_ranges(after, exact_only=True, single=single))
-    coverage_lost = _lost(_data_ranges(before, single=single), _data_ranges(after, single=single))
-    linked_data_lost = _lost(_data_ranges(before, linked_only=True, single=single),
-                             _data_ranges(after, linked_only=True, single=single))
+    recorded = _has_ranges(before) and _has_ranges(after)   # else both read alike, from objdiff's addresses
+    exact_data_lost = _lost(_data_ranges(before, exact_only=True, single=single, recorded=recorded),
+                            _data_ranges(after, exact_only=True, single=single, recorded=recorded))
+    coverage_lost = _lost(_data_ranges(before, single=single, recorded=recorded),
+                          _data_ranges(after, single=single, recorded=recorded))
+    linked_data_lost = _lost(_data_ranges(before, linked_only=True, single=single, recorded=recorded),
+                             _data_ranges(after, linked_only=True, single=single, recorded=recorded))
     failures = []
     if old_exact - new_exact:
         failures.append(f"{len(old_exact - new_exact)} exact function(s) lost their match")
@@ -219,7 +235,11 @@ def compare(before: dict, after: dict, single: str | None = None) -> dict[str, A
     for key in ("matched_code", "matched_data", "complete_code", "complete_data", "matched_functions"):
         if metrics[key]["delta"] < 0:
             failures.append(f"{key} fell by {-metrics[key]['delta']}")
-    for key in ("total_code", "total_data", "total_functions"):
+    if recorded:   # the original's data, not the objects' padding between a unit's pieces of a section
+        original = [sum(b - a for rows in _data_ranges(r, single=single, recorded=True).values() for a, b in rows)
+                    for r in (before, after)]
+        metrics["original_data"] = {"before": original[0], "after": original[1], "delta": original[1] - original[0]}
+    for key in ("total_code", "original_data" if recorded else "total_data", "total_functions"):
         if metrics[key]["delta"]:
             failures.append(f"{key} changed by {metrics[key]['delta']:+d}: the split or target changed; "
                             "compare reports of the same configuration")
@@ -329,11 +349,14 @@ def progress(project: Project, target: str) -> dict[str, Any]:
 
 # A link's proof, written into the report
 
-def apply_link(path: Path, linked: list[str]) -> bool:
+def apply_link(path: Path, linked: list[str],
+               ranges: dict[str, dict[str, list[tuple[int, int]]]] | None = None) -> bool:
     """Mark the units a link proved (zkit link: every byte of them placed from the compiled objects and found
     identical) complete in objdiff's report, with their data matched, and unmark the rest; the totals and
     categories are recounted from the units. objdiff's own data counts are kept under `zkit_link` so a unit that
-    stops linking gets them back. True when the report changed."""
+    stops linking gets them back. `ranges` (unit name without extension -> section -> original [start, end)
+    intervals, as the report addresses them) is recorded in each section's metadata: objdiff gives a section one
+    address, which places a unit's later pieces of it wrongly. True when the report changed."""
     report = load(path)
     before = json.dumps(report, sort_keys=True)
     names = set(linked)
@@ -342,6 +365,14 @@ def apply_link(path: Path, linked: list[str]) -> bool:
         name = str(unit.get("name", ""))
         meta, own = unit.setdefault("metadata", {}), unit.setdefault("measures", {})
         sections = unit.get("sections") or []
+        if ranges is not None:
+            pieces = ranges.get(name, ranges.get(name.split("/", 1)[-1], {}))
+            for section in sections:
+                info = section.setdefault("metadata", {})
+                if section.get("name") in pieces:
+                    info["ranges"] = [[start, end] for start, end in sorted(pieces[section["name"]])]
+                else:
+                    info.pop("ranges", None)
         proven = name in names or name.split("/", 1)[-1] in names
         if name in kept:   # objdiff's values first, as if no link had marked it
             saved = kept.pop(name)

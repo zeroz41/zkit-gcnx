@@ -338,7 +338,10 @@ def link(project: Project, target: str, out: Path, compiled: str = "functions", 
         from .progress import apply_link
         report = project.file(config["repository"], config["report"])
         if report.is_file():
-            result["report_updated"] = apply_link(report, [u.rsplit(".", 1)[0] for u in linked])
+            base = linker.platform.base
+            ranges = {u.name.rsplit(".", 1)[0]: {section: [(start + base, end + base) for start, end in spans]
+                                                 for section, spans in u.ranges.items()} for u in units}
+            result["report_updated"] = apply_link(report, [u.rsplit(".", 1)[0] for u in linked], ranges)
     return result
 
 

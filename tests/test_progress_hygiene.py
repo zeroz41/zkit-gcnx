@@ -81,6 +81,44 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(delta["exact_data_lost"][0]["size"], 0x40)
         self.assertEqual(len(delta["unlinked"]), 2)
 
+    def test_a_section_in_pieces_is_read_from_its_recorded_ranges(self):
+        """objdiff gives a unit's section one address (its first piece's) and the object's size (every piece plus
+        the padding between them). Cutting a unit's later piece off into a new unit then seems to drop the data
+        after its first piece and changes total_data by the padding; the ranges the link records show nothing
+        moved out of the report."""
+        pieces = {"main/g": {".rodata": [(0x1000, 0x1009), (0x3000, 0x3010)]},
+                  "main/b": {".rodata": [(0x0800, 0x0810), (0x1010, 0x1020)]}}
+        after_pieces = {"main/g": {".rodata": [(0x1000, 0x1009)]}, "main/n": {".rodata": [(0x3000, 0x3010)]},
+                        "main/b": pieces["main/b"]}
+        before = report([], [("main/g", ".rodata", 0x1000, 0x9 + 3 + 0x10, 0.0),
+                             ("main/b", ".rodata", 0x0800, 0x20, 0.0)])
+        after = report([], [("main/g", ".rodata", 0x1000, 0x9, 0.0), ("main/n", ".rodata", 0x3000, 0x10, 0.0),
+                            ("main/b", ".rodata", 0x0800, 0x20, 0.0)])
+        delta = progress.compare(before, after)                       # objdiff's addresses alone: a false loss
+        self.assertEqual(sum(r["size"] for r in delta["data_coverage_lost"]), 0x1C - 0x9)
+        self.assertEqual(delta["metrics"]["total_data"]["delta"], -3)
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, value, table in (("before", before, pieces), ("after", after, after_pieces)):
+                path = Path(tmp) / f"{name}.json"
+                path.write_text(json.dumps(value), encoding="utf-8")
+                self.assertTrue(progress.apply_link(path, [], {u.split("/", 1)[1]: t for u, t in table.items()}))
+                if name == "before":
+                    recorded_before = progress.load(path)
+                    self.assertEqual(recorded_before["units"][0]["sections"][0]["metadata"]["ranges"],
+                                     [[0x1000, 0x1009], [0x3000, 0x3010]])
+                    self.assertFalse(progress.compare(recorded_before, after)["ok"])   # one side alone: as before
+                else:
+                    recorded_after = progress.load(path)
+        delta = progress.compare(recorded_before, recorded_after)
+        self.assertTrue(delta["ok"], delta["failures"])
+        self.assertEqual(delta["metrics"]["original_data"]["delta"], 0)
+        recorded_after["units"][2]["sections"][0]["metadata"]["ranges"] = [[0x0800, 0x0810]]   # b's piece dropped
+        delta = progress.compare(recorded_before, recorded_after)
+        self.assertEqual(delta["data_coverage_lost"], [{"module": "main", "section": ".rodata", "address": "0x00001010",
+                                                        "size": 0x10}])
+        self.assertIn("original_data changed by -16: the split or target changed; compare reports of the same "
+                      "configuration", delta["failures"])
+
     def test_summary_page_and_baselines(self):
         summary = progress.summary(self.before)
         self.assertEqual(summary["modules"][0]["measures"]["complete_units"], 1)
