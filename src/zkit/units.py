@@ -1895,7 +1895,36 @@ def _data_ownership(program: Program, ev: Evidence, owner: dict[int, str],
     out.sort()
     if program.platform.name == "switch":
         out = _gap_owners(program, out, owner, order, weak, merged)
+        out = _through_gaps(program, ev, out, order)
     return out
+
+
+def _through_gaps(program: Program, ev: Evidence, out: list[tuple[int, int, str, str]], order: dict[str, int]
+                  ) -> list[tuple[int, int, str, str]]:
+    """Data no code uses that only one unit's data points to (`_through_data`), where it lies in a gap between
+    two units' ranges of its section that keeps link order and that unit is linked between them, both included:
+    the data a range placed after the claims (`_gap_owners`) points to, a table of tables its own code never
+    names. Repeated as far as the pointers reach."""
+    rows = out
+    while True:
+        index = {(start, section): k for k, (start, _, _, section) in enumerate(rows)}
+        starts = [r[0] for r in rows]
+        placed: dict[int, list[tuple[int, int, str]]] = collections.defaultdict(list)
+        for start, stop, unit, section in _through_data(program, ev, rows, deep=False):
+            k = bisect.bisect_right(starts, start) - 1
+            if k < 0 or k + 1 >= len(rows) or unit not in order:
+                continue
+            a, b = rows[k], rows[k + 1]
+            if a[3] == b[3] == section and a[1] <= start and stop <= b[0] and a[2] in order and b[2] in order \
+                    and order[a[2]] <= order[unit] <= order[b[2]] and order[a[2]] < order[b[2]] and \
+                    (unit in (a[2], b[2]) or not any(r[2] == unit and r[3] == section for r in rows)):
+                placed[k].append((start, stop, unit))
+        if not placed:
+            return rows
+        grown = _into_gaps(rows, placed, order)
+        if grown == rows:
+            return rows
+        rows = grown
 
 
 def _data_qualifier(text: str) -> list[str]:
@@ -1977,6 +2006,14 @@ def _gap_owners(program: Program, out: list[tuple[int, int, str, str]], owner: d
             chosen = [unit for unit in chosen if pointed == {unit}]
         if len(chosen) == 1:
             placed[k].append((o.address, o.address + max(o.size, 1), chosen[0]))
+    return _into_gaps(out, placed, order)
+
+
+def _into_gaps(out: list[tuple[int, int, str, str]], placed: dict[int, list[tuple[int, int, str]]],
+               order: dict[str, int]) -> list[tuple[int, int, str, str]]:
+    """`out` with the objects `placed` in the gap after its range k ({k: [(start, stop, unit)]}): the range
+    before or after the gap grows over those of its own unit, another unit gets a range there when it has none in
+    the section; a gap whose objects go against link order gets none."""
     rows = list(out)
     for k, objects in placed.items():
         objects.sort()
@@ -2097,10 +2134,10 @@ def _instance(program: Program, address: int) -> int:
     return next((start for _, start, end in program.sections if start <= address < end), 0)
 
 
-def _through_data(program: Program, ev: Evidence, claims: list[tuple[int, int, str, str]]
+def _through_data(program: Program, ev: Evidence, claims: list[tuple[int, int, str, str]], deep: bool = True
                   ) -> list[tuple[int, int, str, str]]:
     """Data no code uses that only data one unit owns points to (the strings of a table, the entries of a table of
-    tables) belongs to that unit too, as far as the pointers reach."""
+    tables) belongs to that unit too, as far as the pointers reach (`deep`; else one step from the claims)."""
     used = {o.address for o in program.users()}
     claimed = sorted((start, stop, unit) for start, stop, unit, _ in claims)
     starts = [c[0] for c in claimed]
@@ -2125,7 +2162,7 @@ def _through_data(program: Program, ev: Evidence, claims: list[tuple[int, int, s
                 index = bisect.bisect_left(starts, row[0])
                 starts.insert(index, row[0])
                 claimed.insert(index, row[:3])
-                found = True
+                found = deep
     return out
 
 

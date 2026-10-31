@@ -875,6 +875,78 @@ class GapOwnerTests(unittest.TestCase):
             self.assertEqual(holder, ["game/beta.cpp"])
 
 
+# Util::ADJ, which two other files' code reads, points at two byte tables nothing else refers to; they follow
+# table.cpp's own read-only data (each file has its own data and read-only data)
+THROUGH = {
+    "early.cpp": """void report(const char *file, int line);
+struct Util { static const unsigned char *ADJ[2]; };
+extern const int early_rows[4] = {11, 12, 13, 14};
+int early_state[2] = {1, 2};
+int early(int v) {
+    if (v > 9) report("C:/proj/src/game/early.cpp", 1);
+    return Util::ADJ[v & 1][0] + early_rows[v & 3] + early_state[v & 1]++;
+}
+""",
+    "table.cpp": """void report(const char *file, int line);
+struct Util { static const unsigned char *ADJ[2]; static int pick(int v); };
+extern const int table_rows[4] = {21, 22, 23, 24};
+static const unsigned char s_three[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+static const unsigned char s_four[16] = {9, 8, 7, 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6, 7, 8};
+const unsigned char *Util::ADJ[2] = {s_three, s_four};
+int table_state[2] = {3, 4};
+int Util::pick(int v) {
+    if (v > 9) report("C:/proj/src/game/table.cpp", 2);
+    return table_rows[v & 3] * v + table_state[v & 1]++;
+}
+""",
+    "late.cpp": """void report(const char *file, int line);
+struct Util { static const unsigned char *ADJ[2]; };
+extern const int late_rows[4] = {31, 32, 33, 34};
+int late_state[2] = {5, 6};
+int late(int v) {
+    if (v > 9) report("C:/proj/src/game/late.cpp", 3);
+    return Util::ADJ[v & 1][1] + late_rows[v & 3] + late_state[v & 1]++;
+}
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class ThroughGapTests(unittest.TestCase):
+    def test_data_only_a_gap_placed_tables_points_to_is_that_tables_unit(self):
+        """Util::ADJ is read by early.cpp's and late.cpp's code, so no claim places it; its qualifier puts it in
+        table.cpp's range. The byte tables only it points to lie after table.cpp's read-only data: table.cpp's."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in THROUGH.items():
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, "-ffunction-sections", "-fdata-sections", str(root / name), "-o",
+                                str(root / name.replace(".cpp", ".o"))], check=True, capture_output=True)
+            link = [LLD, "-shared", "--no-relax", "--eh-frame-hdr", "--unresolved-symbols=ignore-all",
+                    *(str(root / n.replace(".cpp", ".o")) for n in THROUGH)]
+            subprocess.run([*link, "-o", str(root / "full.elf")], check=True, capture_output=True)
+            elf = Elf.load(root / "full.elf")
+            at = {s.name: s.value for s in elf.symbols}
+            module = nx.load(root / "full.elf")
+            functions = module.functions()
+            names = {s.value: s.name for s in elf.symbols if s.kind == "func"}
+            symbols = [Symbol(names.get(a, f"fn_{a:08X}"), ".text", a, "function", s, "global")
+                       for a, s in functions]
+            symbols += [Symbol(s.name, "." + module.segment_at(s.value).name, s.value, "object", s.size, "global")
+                        for s in elf.symbols if s.kind == "object" and s.size]
+            program = Program.from_symbol_list(Switch(), module, symbols)
+            proposed = units.propose(program)["units"]
+
+            def holder(address):
+                return [u["unit"] for u in proposed for row in u["data"] if row["start_key"] <= address < row["end_key"]]
+            three, four = at["_ZL7s_three"], at["_ZL6s_four"]
+            self.assertLess(at["table_rows"], three)
+            self.assertLess(four, at["late_rows"])
+            self.assertEqual(holder(at["_ZN4Util3ADJE"]), ["game/table.cpp"])
+            self.assertEqual(holder(three), ["game/table.cpp"])
+            self.assertEqual(holder(four), ["game/table.cpp"])
+
+
 # a function's static whose code reaches it only through its guard's address plus an offset (clang -O3 keeps the
 # guard's address in one register and stores the static's members through it)
 REACHED = {
