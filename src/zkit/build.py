@@ -120,6 +120,10 @@ class Layout:
     def link(self) -> str:
         return f"{self.dir}/link"
 
+    @property
+    def view(self) -> str:
+        return f"{self.dir}/view"
+
 
 def layout(name: str, target: dict[str, Any]) -> Layout:
     """build.dir, else the report's folder (build/<ID>/report.json), else build/<target>."""
@@ -371,6 +375,9 @@ def configure(project: Project, repository: str | None = None, only: str | None 
     ninja.rule("clang_rooted", "$cc $cflags -MM -MT $out -MF $object.d $in && cd $folder && "
                "$cc $cflags -c $source -o $object", depfile="$out.d", deps="gcc", description="CC $out")
     ninja.rule("report", "$objdiff report generate -p $project $args -o $out", description="REPORT $out")
+    # restat: a view whose bytes did not change keeps its time, so the report reruns only for a changed one
+    ninja.rule("views", _command(python) + " views $list $folders", rspfile="$list", rspfile_content="$in_newline",
+               restat="1", description="VIEWS $list")
     inputs = [str(project.path)]
     stamp = "build/zkit.stamp"                       # the target objects are cut again when zkit itself changes
     _write(root / stamp, _zkit_stamp())
@@ -432,10 +439,16 @@ def configure(project: Project, repository: str | None = None, only: str | None 
             notes.append(f"{len(uncategorized)} units in no category (first: {uncategorized[0]})")
         report, tool = None, objdiff_cli(root, config)
         if tool and objdiff.name == "objdiff.json":
-            report = paths.report
-            ninja.build([report], "report", implicit=[_relative(objdiff, root), *objects, *compiled,
+            report, measured, compared = paths.report, objdiff, compiled
+            if config["platform"] == "switch" and compiled:
+                # The report compares each compiled object as the link keeps it (`views`): objdiff's project file
+                # for it beside the views, objdiff.json itself left on the compiled objects for every other reader.
+                measured, compared = root / paths.view / "objdiff.json", _views(ninja, paths, sorted(sources))
+                _write(measured, write_objdiff(measured, root, units, sources, paths, target.get("module") or name,
+                                               target.get("categories"), base=paths.view))
+            ninja.build([report], "report", implicit=[_relative(measured, root), *objects, *compared,
                                                       _relative(tool, root)], variables={
-                "objdiff": _command([_relative(tool, root)]), "project": _command([_relative(objdiff.parent, root)]),
+                "objdiff": _command([_relative(tool, root)]), "project": _command([_relative(measured.parent, root)]),
                 "args": _command(words(config.get("report_args")))})
         elif tool:
             notes.append(f"no report: objdiff-cli reads a file named objdiff.json, not {objdiff.name}")
@@ -566,20 +579,54 @@ def categories_of(unit: str, categories: list[dict[str, Any]]) -> list[str]:
             if any(fnmatch.fnmatchcase(unit, p + "*" if p.endswith("/") else p) for p in c.get("paths", []))]
 
 
+def _views(ninja: Ninja, paths: Layout, units: list[str]) -> list[str]:
+    """One edge writes each compiled unit's view (`write_views`) from its compiled and target objects."""
+    views = [f"{paths.view}/{stem(u)}.o" for u in units]
+    ninja.build(views, "views", [f"{paths.src}/{stem(u)}.o" for u in units],
+                implicit=[f"{paths.obj}/{stem(u)}.o" for u in units], variables={
+                    "list": _command([f"{paths.view}.rsp"]), "folders": _command([paths.src, paths.obj, paths.view])})
+    return views
+
+
+def write_views(rows: list[tuple[Path, Path, Path]]) -> int:
+    """Each compiled object as the link keeps it, for the report: COMDAT groups of data whose signature its unit's
+    target object does not define are the copy another unit owns (`elf.without_foreign_data`), so a weak inline
+    static or template vtable that the link deduplicates is not scored as this unit's data. objdiff has no switch
+    for it: it combines a unit's .bss.* / .data.* sections and pairs data by name, else by each symbol's offset
+    and size, so an extra copy shifts or outnumbers the unit's own. Writes a view only when its bytes change;
+    returns how many it wrote."""
+    from .elf import Elf, without_foreign_data
+    written = 0
+    for target, compiled, view in rows:
+        raw = compiled.read_bytes()
+        if target.is_file():
+            elf = Elf.load(target)
+            owned = {s.name for s in elf.symbols if 0 < s.section < 0xFF00 and s.kind not in ("section", "file")}
+            raw = without_foreign_data(raw, owned)[0]
+        if view.is_file() and view.read_bytes() == raw:
+            continue
+        view.parent.mkdir(parents=True, exist_ok=True)
+        view.write_bytes(raw)
+        written += 1
+    return written
+
+
 def write_objdiff(path: Path, root: Path, units: list[str], compiled: set[str], paths: Layout,
-                  module: str = "main", categories: list[dict[str, Any]] | None = None) -> str:
+                  module: str = "main", categories: list[dict[str, Any]] | None = None,
+                  base: str | None = None) -> str:
     """objdiff's project file: each unit's target object, and its compiled one when it has a source (objdiff
     refuses a base object that does not exist), and the module it links into, so a unit that moves to another
     folder keeps its functions' place in the report. Paths are relative to the file's folder; objdiff rebuilds a
     compiled object with `ninja -f build/build.ninja <object>`. `categories` (the target's: `{id, name, paths}`)
-    become objdiff's progress categories, each unit in those its path matches."""
+    become objdiff's progress categories, each unit in those its path matches. `base`: the folder of the compiled
+    objects (the build's src/ folder, else the views the report compares)."""
     folder = path.parent
     relative = lambda p: os.path.relpath(root / p, folder).replace(os.sep, "/")
     rows = []
     for unit in units:
         row: dict[str, Any] = {"name": stem(unit), "target_path": relative(f"{paths.obj}/{stem(unit)}.o")}
         if unit in compiled:
-            row["base_path"] = relative(f"{paths.src}/{stem(unit)}.o")
+            row["base_path"] = relative(f"{base or paths.src}/{stem(unit)}.o")
         row["metadata"] = {"source_path": f"src/{unit}", "module_name": module}
         if categories:
             row["metadata"]["progress_categories"] = categories_of(unit, categories)
@@ -807,7 +854,13 @@ def main(argv: list[str]) -> int:
         return 0
     if len(argv) == 4 and argv[0] == "sha1":
         return check_sha1(Path(argv[1]), argv[2], Path(argv[3]))
-    print("usage: python -m zkit.build depfile FILE OBJECT | sha1 FILE EXPECTED STAMP", file=sys.stderr)
+    if len(argv) == 5 and argv[0] == "views":   # LIST: the compiled objects under SRC, one per line
+        src, obj, view = (Path(a) for a in argv[2:])
+        compiled = [Path(line) for line in Path(argv[1]).read_text(encoding="utf-8").splitlines() if line.strip()]
+        write_views([(obj / c.relative_to(src), c, view / c.relative_to(src)) for c in compiled])
+        return 0
+    print("usage: python -m zkit.build depfile FILE OBJECT | sha1 FILE EXPECTED STAMP | views LIST SRC OBJ VIEW",
+          file=sys.stderr)
     return 2
 
 

@@ -355,6 +355,73 @@ class SwitchBuildTests(unittest.TestCase):
                 measures = json.loads((game / "build/test/report.json").read_text())["measures"]
                 self.assertEqual(measures["matched_code"], measures["total_code"])
 
+    def test_a_weak_copy_another_unit_owns_is_not_this_unit_s_data(self):
+        """Both units call an inline function with a static; the link kept a.cpp's copy (its COMDAT group came
+        first), so b.cpp's original .bss holds only its own table while its compiled object also defines the weak
+        copy. The report compares b's view, where that copy is a reference to a's (as the link resolves it), so
+        b's .bss scores exact; a's view keeps the copy it owns; a wrong size in b's own data still fails."""
+        from zkit.elf import Elf
+        a_cpp = "inline int *slot() { static int s; return &s; }\nint a_counter;\n" \
+                "int use_a() { return ++*slot() + a_counter; }\n"
+        b_cpp = "inline int *slot() { static int s; return &s; }\nstatic int b_table[%d];\n" \
+                "int use_b(int i) { b_table[i & 3] += *slot(); return b_table[i & 3]; }\n"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in (("a.cpp", a_cpp), ("b.cpp", b_cpp % 4)):
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, str(root / name), "-o", str(root / name.replace(".cpp", ".o"))],
+                               check=True, capture_output=True)
+            subprocess.run([LLD, "-shared", "--no-relax", "--unresolved-symbols=ignore-all", "-o",
+                            str(root / "main.elf"), str(root / "a.o"), str(root / "b.o")], check=True,
+                           capture_output=True)
+            result = new.new(root / "main.elf", root / "game", game_id="test")
+            game, manifest = root / "game", Path(result["manifest"])
+            at = {s.name: (s.value, s.size) for s in Elf.load(game / "orig/test/main.elf").symbols if s.name}
+            (a_start, _), (b_start, b_size) = at["_Z5use_av"], at["_Z5use_bi"]
+            (static, _), (counter, _), (table, _) = at["_ZZ4slotvE1s"], at["a_counter"], at["_ZL7b_table"]
+            self.assertEqual(sorted([static, counter]), [min(static, counter), table - 4])  # a's .bss, then b's
+            symbols = game / "config/test/symbols.txt"   # b's table unnamed: objdiff pairs it by place, not name
+            symbols.write_text(symbols.read_text().replace("_ZL7b_table =", f"lbl_{table:X} ="), encoding="utf-8")
+            (game / "config/test/splits.txt").write_text(
+                f"a.cpp:\n\t.text start:{a_start:#x} end:{b_start:#x}\n"
+                f"\t.bss start:{min(static, counter):#x} end:{table:#x}\n\n"
+                f"b.cpp:\n\t.text start:{b_start:#x} end:{b_start + b_size:#x}\n"
+                f"\t.bss start:{table:#x} end:{table + 16:#x}\n", encoding="utf-8")
+            (game / "src/a.cpp").write_text(a_cpp, encoding="utf-8")
+            (game / "src/b.cpp").write_text(b_cpp % 4, encoding="utf-8")
+            data = json.loads(manifest.read_text())
+            data["targets"]["test"]["build"].update(compiler=CLANG, cflags=[f for f in FLAGS if f != "-c"])
+            data["targets"]["test"]["build"]["objdiff_cli"] = OBJDIFF or str(root / "objdiff-cli")  # views: either
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+            if OBJDIFF:
+                self.assertTrue(build.build(Project.load(manifest), quiet=True)["ok"])
+            else:   # a stand-in tool: the views are built, never its report
+                (root / "objdiff-cli").write_text("", encoding="utf-8")
+                build.configure(Project.load(manifest))
+                self.assertEqual(build.run_ninja(game, ["build/test/view/a.o"], quiet=True), 0)
+            defined = lambda path: {s.name for s in Elf.load(path).symbols if 0 < s.section < 0xFF00}
+            self.assertIn("_ZZ4slotvE1s", defined(game / "build/test/src/b.o"))      # the compiled object: as built
+            self.assertNotIn("_ZZ4slotvE1s", defined(game / "build/test/view/b.o"))  # the report's: a's copy
+            self.assertIn("_ZZ4slotvE1s", defined(game / "build/test/view/a.o"))     # its owner's view keeps it
+            self.assertEqual(Elf.load(game / "build/test/view/a.o").raw,
+                             Elf.load(game / "build/test/src/a.o").raw)
+            project = json.loads((game / "build/test/view/objdiff.json").read_text())
+            self.assertEqual({u["name"]: u["base_path"] for u in project["units"]},
+                             {"a": "a.o", "b": "b.o"})
+            self.assertTrue(json.loads((game / "objdiff.json").read_text())["units"][1]["base_path"]
+                            .endswith("build/test/src/b.o"))                         # every other reader's
+            if not OBJDIFF:
+                return
+
+            def bss(unit):
+                report = json.loads((game / "build/test/report.json").read_text())
+                row = next(u for u in report["units"] if u["name"] == unit)
+                return next(s for s in row["sections"] if s["name"] == ".bss").get("fuzzy_match_percent", 0)
+            self.assertEqual((bss("a"), bss("b")), (100, 100))
+            (game / "src/b.cpp").write_text(b_cpp % 5, encoding="utf-8")
+            build.build(Project.load(manifest), quiet=True)
+            self.assertLess(bss("b"), 100)
+
     def test_link_rebuilds_the_module_and_marks_the_units_it_proves(self):
         """`zkit link` on Switch: both units' objects placed where the original holds them, every relocation
         resolved as the module's linker did (calls, a string literal, a merged constant, a GOT load), the module

@@ -177,3 +177,48 @@ class Elf:
                     out[symbol.name] = symbol
             self._functions = out
         return self._functions
+
+
+SHT_GROUP, GRP_COMDAT, SHF_EXECINSTR = 17, 1, 0x4
+
+
+def without_foreign_data(raw: bytes, owned: set[str]) -> tuple[bytes, list[str]]:
+    """The object as the link keeps it for a unit that owns the names in `owned`: each COMDAT group of data only
+    (an inline function's static, its guard, a template's vtable) whose signature `owned` lacks is the copy another
+    unit's object provided, so the link discarded it. Its sections are emptied and its symbols left undefined, as
+    references to that other copy; layout, code and every other section are unchanged. Returns the bytes and the
+    discarded groups' signatures (no change: the same bytes, [])."""
+    elf = Elf(raw)
+    discarded: dict[int, str] = {}
+    for section in elf.sections:
+        if section.type != SHT_GROUP or section.size < 8 or section.info >= len(elf.symbols):
+            continue
+        words = struct.unpack(f"{elf.endian}{section.size // 4}I", elf.data(section))
+        members = [i for i in words[1:] if i < len(elf.sections)]
+        signature = elf.symbols[section.info].name
+        if not words[0] & GRP_COMDAT or not signature or signature in owned or \
+                any(elf.sections[i].flags & SHF_EXECINSTR for i in members):
+            continue
+        discarded.update(dict.fromkeys(members, signature))
+    if not discarded:
+        return raw, []
+    out, e = bytearray(raw), elf.endian
+    if elf.bits == 64:
+        shoff, shentsize = struct.unpack_from(e + "Q", raw, 40)[0], struct.unpack_from(e + "H", raw, 58)[0]
+        size_at, size_format = 32, "Q"
+    else:
+        shoff, shentsize = struct.unpack_from(e + "I", raw, 32)[0], struct.unpack_from(e + "H", raw, 46)[0]
+        size_at, size_format = 20, "I"
+    for index in discarded:
+        struct.pack_into(e + size_format, out, shoff + index * shentsize + size_at, 0)
+    table = next((s for s in elf.sections if s.type == SHT_SYMTAB), None)
+    for symbol in elf.symbols:
+        if symbol.section not in discarded or symbol.kind == "section" or table is None:
+            continue
+        base = table.offset + symbol.index * (24 if elf.bits == 64 else 16)
+        if elf.bits == 64:   # st_shndx, st_value, st_size
+            struct.pack_into(e + "HQQ", out, base + 6, 0, 0, 0)
+        else:
+            struct.pack_into(e + "II", out, base + 4, 0, 0)
+            struct.pack_into(e + "H", out, base + 14, 0)
+    return bytes(out), list(dict.fromkeys(discarded.values()))
