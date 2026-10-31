@@ -189,6 +189,36 @@ class UnitEvidenceTests(unittest.TestCase):
             units._file_evidence(code, ev, placed)
         self.assertFalse({row for row in ev.direct if row[0] <= 9 and row[1] >= 4})
 
+    def test_one_header_spelled_two_ways_is_two_units(self):
+        """2 and 9 cite one header through two include folders (two projects' compiles): a boundary lies between
+        them, where the code leaves 2's namespace (a:: for b:: at 6), though nothing else prefers a place; two
+        citations spelled alike, or a module not clang's, say nothing."""
+        code = _Code(12)
+        from zkit.program import Function
+        code.functions = [Function(f.address, f.size, f"_ZN1{'a' if i < 6 else 'b'}3f{i:02d}Ev")   # a::f00()..
+                          for i, f in enumerate(code.functions)]
+        code.strings = lambda: {0x8000: "D:/lib/a/proj/../../mcl\\inc/h.h", 0x8040: "D:/lib/b/proj/../../mcl/inc/h.h"}
+        code.refs = {2: [(0, 0x8000, "addr")], 9: [(0, 0x8040, "addr")]}
+        code.users = lambda: {}
+        ev = units.Evidence({}, [], [])
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            units._file_evidence(code, ev)
+            cuts = [c.position for c in units.boundaries(code, ev)]
+        row = next(r for r in ev.direct if r[:2] == (3, 9))
+        self.assertIn("spelled two ways", row[2])
+        self.assertEqual(cuts, [6])
+        code.strings = lambda: {0x8000: "D:/lib/a/proj/../../mcl\\inc/h.h", 0x8040: "D:/lib/a/proj/../../mcl\\inc/h.h"}
+        ev = units.Evidence({}, [], [])
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            units._file_evidence(code, ev)
+        self.assertFalse(ev.separations)
+        from zkit.platform import GameCube
+        code.strings = lambda: {0x8000: "D:/lib/a/proj/../../mcl\\inc/h.h", 0x8040: "D:/lib/b/proj/../../mcl/inc/h.h"}
+        code.platform = GameCube()
+        ev = units.Evidence({}, [], [])
+        units._header_spellings(code, ev, code.strings())
+        self.assertFalse(ev.separations)
+
     def test_files_whose_citations_interleave_are_one_unit(self):
         """a.cpp cites 2, 6 and 8 around b.cpp's 4: b.cpp is compiled inside a.cpp, one unit named after the
         file citing most, its other build's name too; c.cpp after them is its own."""

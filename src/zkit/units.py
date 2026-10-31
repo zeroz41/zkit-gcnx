@@ -86,6 +86,8 @@ class Evidence:
     globals: set[tuple[int, int, str]] = field(default_factory=set)   # joins only a global's near users make
     inlined: set[tuple[int, int, str]] = field(default_factory=set)   # joins only another class's constructor
                                                                       # forming a table's address makes
+    toward: dict[tuple[int, int, str], int] = field(default_factory=dict)   # separation -> the place its
+                                                                            # boundary takes among equal ones
 
     def joined(self, count: int, joins: list[tuple[int, int, str]] | None = None) -> list[bool]:
         """joined[p]: a boundary before function p would split one unit (by `joins`, default all of them)."""
@@ -843,7 +845,47 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
             ev.separations.append(row)
             ev.pairs[row] = (file_a, file_b)
             ev.direct.add(row)
+    _header_spellings(program, ev, files)
     _untied(program, ev, anchors)
+
+
+def _header_spellings(program: Program, ev: Evidence, files: dict[int, str]) -> None:
+    """Switch (clang): a compile names a file by the path it first opened it by, so one unit spells each header it
+    cites one way; one header cited under two spellings (another project's include folder, another including
+    file's folder) is two units, and a boundary lies between two functions citing it spelled differently."""
+    if program.platform.name != "switch":
+        return
+    citers: dict[str, set[tuple[int, str]]] = collections.defaultdict(set)
+    for index, rows in program.refs.items():
+        for _, address, kind in rows:
+            path = files.get(address)
+            if kind == "addr" and path is not None and HEADER.search(path):
+                citers[_normalized(path).casefold()].add((index, path))
+    rows = set()
+    for cited in citers.values():
+        ordered = sorted(cited)
+        for (a, spelled_a), (b, spelled_b) in zip(ordered, ordered[1:]):
+            if b > a and spelled_a != spelled_b:
+                rows.add((a + 1, b, f"{spelled_a} then {spelled_b}: one header spelled two ways"))
+    if not rows:
+        return
+    # Two spellings are two projects' or folders' compiles: where the code between leaves the first citer's
+    # namespace for another, the first's ends (among places the rest of the evidence finds equal).
+    from .platform import demangle_itanium
+    wanted = sorted({i for lo, hi, _ in rows for i in range(lo - 1, hi + 1)
+                     if program.functions[i].name.startswith("_Z")})
+    texts = demangle_itanium([program.functions[i].name for i in wanted])
+    space = {i: parts[0] for i, text in zip(wanted, texts)
+             if text and (parts := _qualified(text)) and len(parts) > 1}
+    for row in sorted(rows):
+        lo, hi, _ = row
+        ev.separations.append(row)
+        ev.direct.add(row)
+        first, last = space.get(lo - 1), space.get(hi)
+        if first and last and first != last:
+            leaving = next((p for p in range(lo, hi + 1) if space.get(p, first) != first), None)
+            if leaving is not None:
+                ev.toward[row] = leaving
 
 
 def _included(ev: Evidence) -> dict[str, str]:
@@ -1242,7 +1284,8 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     owner = _function_classes(program, qualifiers=True) if apart else {}
     for row in [r for r in stated if r not in ev.edges] + [r for r in stated if r in ev.edges] + rest + tails + apart:
         lo, hi, because = row
-        toward = ev.edges.get(row, lo)  # among equal places, the one nearest the evidence (else the earliest)
+        toward = ev.toward.get(row, ev.edges.get(row, lo))  # among equal places, the one nearest the evidence
+                                                             # (else the earliest)
         if any(lo <= c.position <= hi for c in chosen):
             continue
         # the order clang creates a unit's functions in (a deferred tail) parts a global's near users (`globals`)
