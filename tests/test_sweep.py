@@ -207,3 +207,90 @@ def test_sweep_parses_and_compiles_with_the_header_copies(tmp_path):
                              includes=[copies])
     assert seen and all(includes == [copies] for includes in seen)
     assert result["includes"] == [str(copies)] and (tmp_path / "best.cpp").is_file()
+
+
+VALUES_SOURCE = """struct Vec3 {
+    float x, y, z;
+    Vec3() {}
+    Vec3(float x, float y, float z) : x(x), y(y), z(z) {}
+    Vec3 operator+(const Vec3& v) const { return Vec3(x + v.x, y + v.y, z + v.z); }
+    Vec3 operator*(float s) const { return Vec3(x * s, y * s, z * s); }
+    Vec3& operator+=(const Vec3& v) { x += v.x; y += v.y; z += v.z; return *this; }
+};
+struct Quat {
+    float x, y, z, w;
+    static Quat inverse(const Quat& q);
+    Vec3 rotate(const Vec3& v) const;
+    void rotate(Vec3& out, const Vec3& v) const;
+};
+void place(const Vec3& v);
+struct Body { Vec3 m_pos; Vec3 m_target; float m_speed; Quat m_rot; void step(const Vec3& from, float d); };
+void Body::step(const Vec3& from, float d) {
+    Vec3 pos = from;
+    float speed = m_speed;
+    Vec3 target;
+    Quat::inverse(m_rot).rotate(target, m_target + pos);
+    pos = m_rot.rotate(pos);
+    m_pos = from * d + m_pos;
+    m_pos += target;
+    m_speed = speed;
+    place(pos * speed);
+}
+"""
+
+
+def _members(name):
+    return {"Vec3": ("x", "y", "z")}.get(name)
+
+
+@unittest.skipUnless(CLANG, "needs a host clang that writes JSON ASTs")
+def test_value_rewrites_change_what_an_operand_is():
+    """How a value is held (a copy, a named temporary, a re-read, an out parameter, member-wise arithmetic)
+    decides whether an operand is a load or a computed value when Reassociate orders it."""
+    found = {r.what: r for r in sweep.rewrites(VALUES_SOURCE, parse(VALUES_SOURCE, "step"), _members)}
+    for what in ("Quat::inverse(m_rot).rotate(target, m_target + pos) in place on target (object held first)",
+                 "pos = m_rot.rotate(pos) -> m_rot.rotate(pos, pos)", "m_pos -> Vec3(m_pos)",
+                 "from * d -> Vec3(from.x * d, from.y * d, from.z * d)",
+                 "from * d -> Vec3(d * from.x, d * from.y, d * from.z)",
+                 "hold Quat::inverse(m_rot) in inverse2", "re-read from for pos (line 21)",
+                 "re-read m_speed for speed (line 26)"):
+        assert what in found, (what, sorted(found))
+    assert any(w.startswith("m_pos += target member by member: m_pos.x += target.x;") for w in found)
+    assert not any(w.startswith("re-read from for pos (line 26)") for w in found)   # pos was written by then
+    in_place = found["Quat::inverse(m_rot).rotate(target, m_target + pos) in place on target (object held first)"]
+    assert "Quat inverse2 = Quat::inverse(m_rot);\n    Vec3 target = m_target + pos;\n    inverse2.rotate(target, " \
+        "target);" in in_place.apply(VALUES_SOURCE)
+    for rewrite in found.values():
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / "a.cpp").write_text(rewrite.apply(VALUES_SOURCE), encoding="utf-8")
+            result = subprocess.run([CLANG, "--target=aarch64-none-elf", "-fsyntax-only", str(Path(temp) / "a.cpp")],
+                                    capture_output=True, text=True)
+        assert result.returncode == 0, f"{rewrite.what}: {result.stderr}"
+
+
+@unittest.skipUnless(CLANG, "needs a host clang that writes JSON ASTs")
+def test_a_records_members_are_read_from_its_definition(tmp_path):
+    path = tmp_path / "a.cpp"
+    path.write_text(VALUES_SOURCE, encoding="utf-8")
+
+    def members(name):
+        command = sweep.parse_command(["cc", "--target=aarch64-none-elf", "-c", "x.cpp"], CLANG, path, name)
+        dump = subprocess.run(command, capture_output=True, text=True, check=True)
+        return sweep.record_members(sweep.definitions(dump.stdout), name)
+    assert members("Vec3") == ("x", "y", "z") and members("Quat") == ("x", "y", "z", "w")
+    assert members("Body") is None                    # members of several types: nothing to write member-wise
+
+
+@unittest.skipUnless(CLANG, "needs a host clang that writes JSON ASTs")
+def test_the_body_is_the_definition_with_the_symbols_mangled_name():
+    text = ("struct A { int calc(); };\nstruct B { int calc(); };\n"
+            "int A::calc() { return 1; }\nint B::calc() { return 2; }\n")
+    body = parse(text, "calc")
+    assert text[sweep._span(body)[0]:].startswith("{ return 1; }")
+    with tempfile.TemporaryDirectory() as temp:
+        path = Path(temp) / "a.cpp"
+        path.write_text(text, encoding="utf-8")
+        command = sweep.parse_command(["cc", "--target=aarch64-none-elf", "-c", "x.cpp"], CLANG, path, "calc")
+        dump = subprocess.run(command, capture_output=True, text=True, check=True)
+    body = sweep.body_of(sweep.definitions(dump.stdout), text, "calc", "_ZN1B4calcEv")
+    assert text[sweep._span(body)[0]:].startswith("{ return 2; }")

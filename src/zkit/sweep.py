@@ -3,7 +3,9 @@
 A function whose candidate differs from the original only by register choice, instruction order or operand
 order usually has a source spelling that clang compiles to the original's code: the other operand order of a
 commutative operator, `a = a + b` for `a += b`, a loop counting up instead of down, an `if` with its branches
-swapped, a counter of another integer type, two independent statements the other way round. The sweep parses the
+swapped, a counter of another integer type, two independent statements the other way round, and how a value is
+held (an explicit copy, a named temporary, a re-read instead of a cached local, an out parameter updated in place,
+a record's arithmetic member by member), which decides the order of float operands. The sweep parses the
 function with a host clang's JSON AST (the project's compiler may be too old to write one), rewrites one site at
 a time, compiles every rewrite with the unit's exact command, and climbs to the spelling with the fewest
 differing words. A rewrite need not keep the meaning: a byte-identical result proves itself, and anything else
@@ -86,7 +88,11 @@ def definitions(ast_text: str) -> list[dict]:
 
 def body_of(decls: Iterable[dict], text: str, name: str, symbol: str | None = None) -> dict | None:
     """The body (CompoundStmt) of the definition of `name` (the function's unqualified name, or its `symbol` when
-    the source spells the mangled name with C linkage) in the parsed text."""
+    the source spells the mangled name with C linkage) in the parsed text; of several (methods of other classes,
+    overloads) the one whose mangled name is `symbol`, when the dump names one."""
+    decls = list(decls)
+    if symbol and any(d.get("mangledName") == symbol for d in decls):
+        decls = sorted(decls, key=lambda d: d.get("mangledName") != symbol)
     for decl in decls:
         if decl.get("kind") not in ("FunctionDecl", "CXXMethodDecl", "CXXConstructorDecl", "CXXDestructorDecl"):
             continue
@@ -99,10 +105,13 @@ def body_of(decls: Iterable[dict], text: str, name: str, symbol: str | None = No
     return None
 
 
-def rewrites(text: str, body: dict) -> list[Rewrite]:
-    """Every single-site rewrite of the function body."""
+def rewrites(text: str, body: dict, components: Callable[[str], tuple[str, ...] | None] | None = None) \
+        -> list[Rewrite]:
+    """Every single-site rewrite of the function body; `components` names a record's scalar members (`Vec3` ->
+    x, y, z) for the rewrites that write a record's arithmetic out member by member."""
     out: list[Rewrite] = []
     low, high = _span(body)
+    values = _Values(text, body, components or (lambda name: None))
 
     def inside(span) -> bool:
         return span is not None and low <= span[0] and span[1] <= high
@@ -145,6 +154,11 @@ def rewrites(text: str, body: dict) -> list[Rewrite]:
         if kind == "CompoundStmt":
             _adjacent(text, kids, out)
             _temporaries(text, kids, out)
+            values.statements(kids, out)
+        if kind == "CXXOperatorCallExpr":
+            values.operator(node, out)
+        elif kind in ("CallExpr", "CXXMemberCallExpr"):
+            values.call_arguments(node, out)
         for kid in kids:
             visit(kid, node)
     visit(body, None)
@@ -422,6 +436,418 @@ def _adjacent(text: str, kids: list[dict], out: list[Rewrite]) -> None:
         out.append(Rewrite(f"swap `{one.strip()}` / `{two.strip()}`", ((a[0], b_end, two + gap + one),)))
 
 
+# How a value is held. LLVM's Reassociate puts the lower-ranked operand of every commutative operation first (float
+# ones too): a fresh load ranks by its place among its block's loads and calls, a computed value by its depth, and
+# source order only breaks ties. Swapping the source operands then changes nothing; what decides the order is
+# whether an operand is still a load when Reassociate runs (memory that escapes and is read again after another
+# write) or a value forwarded from a store. These rewrites change that: an explicit copy of a record operand, a
+# temporary held in a named local, a local's uses read again from what it copied, a returned record written
+# through an out parameter (in place when an input is that same object), and a record's arithmetic written out
+# member by member in the caller (where a rank tie keeps the source order; inside the operator, InstCombine has
+# already put the load before the argument).
+
+ARITHMETIC = {"operator+": "+", "operator-": "-", "operator*": "*", "operator/": "/"}
+ASSIGNING = {"operator+=": "+=", "operator-=": "-=", "operator*=": "*=", "operator/=": "/="}
+HELD = ("ImplicitCastExpr", "ExprWithCleanups", "MaterializeTemporaryExpr", "CXXBindTemporaryExpr", "ParenExpr")
+LVALUES = ("DeclRefExpr", "MemberExpr", "ArraySubscriptExpr")
+CALLED = ("CallExpr", "CXXMemberCallExpr")
+COMPUTED = CALLED + ("CXXOperatorCallExpr",)
+SEQUENCED = ("CompoundStmt", "LambdaExpr", "ConditionalOperator", "IfStmt", "ForStmt", "WhileStmt", "DoStmt",
+             "SwitchStmt", "CXXForRangeStmt")    # below these a subexpression is not evaluated once, first
+EXPRESSIONS = ("ExprWithCleanups", "CXXOperatorCallExpr", "CXXMemberCallExpr", "CallExpr", "BinaryOperator",
+               "CompoundAssignOperator", "DeclStmt", "ReturnStmt")
+COMPARING = ("operator==", "operator!=", "operator<=", "operator>=")
+
+
+def _bare(node: dict) -> dict:
+    """Below the casts, temporaries, parentheses and elided copies the value itself."""
+    while True:
+        kids = _children(node)
+        if kids and (node.get("kind") in HELD or node.get("kind") == "CXXConstructExpr" and node.get("elidable")
+                     and len(kids) == 1):
+            node = kids[0]
+        else:
+            return node
+
+
+def _qual(node: dict) -> str:
+    return re.sub(r"^(?:(?:const|volatile) )+|\s*&+$", "", (node.get("type") or {}).get("qualType") or "").strip()
+
+
+def _record(node: dict) -> str | None:
+    """The unqualified name of a node's record type (`const math::Vec3 &` -> `Vec3`); None for a scalar, a pointer, a
+    template or a function type."""
+    names = []
+    for key in ("qualType", "desugaredQualType"):
+        spelled = (node.get("type") or {}).get(key)
+        if spelled is None:
+            continue
+        qual = re.sub(r"^(?:(?:const|volatile) )+|\s*&+$", "", spelled).strip()
+        match = re.fullmatch(r"(?:\w+::)*(\w+)", qual)
+        if not match or qual in VALUES or qual in ("void", "nullptr_t", "std::nullptr_t"):
+            return None
+        names.append(match.group(1))
+    return names[0] if names else None
+
+
+def _lvalue(node: dict) -> bool:
+    return node.get("kind") in LVALUES or node.get("kind") == "UnaryOperator" and node.get("opcode") == "*"
+
+
+def _root(node: dict) -> dict | None:
+    """The variable an lvalue names or is a member of (`pos.y` -> `pos`); None through a pointer."""
+    node = _bare(node)
+    while node.get("kind") == "MemberExpr" and not node.get("isArrow") and _children(node):
+        node = _bare(_children(node)[0])
+    return node if node.get("kind") == "DeclRefExpr" else None
+
+
+def _callee(node: dict) -> str | None:
+    kids = _children(node)
+    head = _bare(kids[0]) if kids else {}
+    return head.get("name") if head.get("kind") == "MemberExpr" else (head.get("referencedDecl") or {}).get("name")
+
+
+def _arguments(call: dict) -> list[dict]:
+    """A call's spelled arguments (defaults the source leaves out are not)."""
+    return [a for a in _children(call)[1:] if a.get("kind") != "CXXDefaultArgExpr"]
+
+
+def record_members(decls: Iterable[dict], name: str) -> tuple[str, ...] | None:
+    """The members of record `name` when it holds nothing else than two to four of one arithmetic type (no bases,
+    no unions): what writing its arithmetic out member by member spells."""
+    found = set()
+    for decl in decls:
+        if decl.get("kind") not in ("CXXRecordDecl", "RecordDecl") or decl.get("name") != name or \
+                not decl.get("completeDefinition"):
+            continue
+        kids = _children(decl)
+        fields = [k for k in kids if k.get("kind") == "FieldDecl"]
+        types = {(f.get("type") or {}).get("qualType") for f in fields}
+        if decl.get("bases") or any(k.get("kind") in ("CXXRecordDecl", "RecordDecl") and not k.get("isImplicit")
+                                    for k in kids) or \
+                not 2 <= len(fields) <= 4 or len(types) != 1 or types.pop() not in VALUES or \
+                not all(f.get("name") for f in fields):
+            found.add(None)
+            continue
+        found.add(tuple(f["name"] for f in fields))
+    return found.pop() if len(found) == 1 else None
+
+
+class _Values:
+    """The value-holding rewrites of one function body (see above)."""
+
+    def __init__(self, text: str, body: dict, components: Callable[[str], tuple[str, ...] | None]):
+        self.text, self.components = text, components
+        self.low, self.high = _span(body)
+
+    def source(self, node: dict) -> str | None:
+        span = _span(node)
+        return self.text[span[0]:span[1]] if span else None
+
+    def spelled(self, name: str, node: dict | None = None) -> str:
+        """A record's name as the function or the node's type spells it, most qualified (`math::Vec3`)."""
+        found = [q + name for q in re.findall(rf"(?<![\w:])((?:\w+::)*){re.escape(name)}\b",
+                                              self.text[self.low:self.high])]
+        if node is not None and re.fullmatch(rf"(?:\w+::)*{re.escape(name)}", _qual(node)):
+            found.append(_qual(node))
+        return max(found, key=len, default=name)
+
+    def indent(self, at: int) -> str:
+        line = self.text.rfind("\n", 0, at) + 1
+        return self.text[line:at] if not self.text[line:at].strip() else ""
+
+    def members(self, node: dict) -> tuple[str, tuple[str, ...]] | None:
+        name = _record(node)
+        members = self.components(name) if name else None
+        return (self.spelled(name, node), members) if members else None
+
+    # an operator's operands -------------------------------------------------------------------------------------
+    def operator(self, node: dict, out: list[Rewrite]) -> None:
+        kids, op = _children(node), _callee(node)
+        if op not in ARITHMETIC or len(kids) != 3:
+            return
+        for operand in kids[1:]:
+            self.copy(operand, out)
+        span, whole = _span(node), self.source(node)
+        for spelled, parts in self.member_forms(node, kids):
+            replacement = f"{spelled}({', '.join(parts)})"
+            out.append(Rewrite(f"{whole} -> {replacement}", ((span[0], span[1], replacement),)))
+
+    def call_arguments(self, node: dict, out: list[Rewrite]) -> None:
+        for argument in _arguments(node):
+            if argument.get("kind") == "ImplicitCastExpr":         # bound to a const reference: a copy binds too
+                self.copy(argument, out)
+
+    def copy(self, operand: dict, out: list[Rewrite]) -> None:
+        """A record lvalue read through an explicit copy (`m_a` -> `Vec3(m_a)`): the copy's loads are fresh."""
+        bare = _bare(operand)
+        span, name = _span(bare), _record(bare)
+        if not _lvalue(bare) or not span or not name:
+            return
+        spelled = self.text[span[0]:span[1]]
+        replacement = f"{self.spelled(name, bare)}({spelled})"
+        out.append(Rewrite(f"{spelled} -> {replacement}", ((span[0], span[1], replacement),)))
+
+    def member_forms(self, node: dict, kids: list[dict]) -> list[tuple[str, list[str]]]:
+        """`a op b` of records written member by member: `Vec3(a.x op b.x, ...)`, a scalar operand on either side
+        of a product."""
+        result = self.members(node)
+        if result is None:
+            return []
+        spelled, members = result
+        op = ARITHMETIC[_callee(node)]
+
+        def part(operand: dict) -> tuple[bool, str] | None:
+            bare = _bare(operand)
+            written = self.source(bare)
+            if written is None:
+                return None
+            if _record(bare) is not None:
+                return (True, _wrap(written)) if _record(bare) == _record(node) and _lvalue(bare) else None
+            return (False, _wrap(written)) if _qual(operand) in VALUES and _effects(bare, set(), set()) else None
+
+        a, b = part(kids[1]), part(kids[2])
+        if not a or not b or not (a[0] or b[0]):
+            return []
+
+        def of(p: tuple[bool, str], member: str) -> str:
+            return f"{p[1]}.{member}" if p[0] else p[1]
+        forms = [(spelled, [f"{of(a, m)} {op} {of(b, m)}" for m in members])]
+        if op == "*" and a[0] != b[0]:
+            forms.append((spelled, [f"{of(b, m)} {op} {of(a, m)}" for m in members]))
+        return forms
+
+    # statements -------------------------------------------------------------------------------------------------
+    def statements(self, kids: list[dict], out: list[Rewrite]) -> None:
+        for at, kid in enumerate(kids):
+            if kid.get("kind") not in EXPRESSIONS or not _span(kid):
+                continue
+            expr = _bare(kid)
+            if expr.get("kind") == "CXXOperatorCallExpr":
+                self.assignment(kid, expr, out)
+            elif expr.get("kind") in CALLED:
+                self.in_place(kids[at - 1] if at else None, kid, expr, out)
+            elif kid.get("kind") == "DeclStmt":
+                self.declared(kid, kids[at + 1:], out)
+            self.named(kid, out)
+
+    def assignment(self, kid: dict, expr: dict, out: list[Rewrite]) -> None:
+        parts, op = _children(expr), _callee(expr)
+        span = _span(kid)
+        if len(parts) != 3 or not span:
+            return
+        target, value = parts[1], _bare(parts[2])
+        lhs = self.source(target)
+        if lhs is None:
+            return
+        indent = self.indent(span[0])
+        if op == "operator=" and value.get("kind") in CALLED and _record(value) == _record(target) and \
+                _lvalue(_bare(target)):
+            call = self.out_parameter(value, lhs)
+            if call:
+                out.append(Rewrite(f"{self.source(kid)} -> {call}", ((span[0], span[1], call),)))
+        if op == "operator=" and value.get("kind") == "CXXOperatorCallExpr" and _callee(value) in ARITHMETIC:
+            for _, form in self.member_forms(value, _children(value)):
+                result = self.members(target)
+                if result and len(result[1]) == len(form):
+                    each = f";\n{indent}".join(f"{lhs}.{m} = {f}" for m, f in zip(result[1], form))
+                    out.append(Rewrite(f"{self.source(kid)} member by member: {each}", ((span[0], span[1], each),)))
+        if op in ASSIGNING:
+            result, written = self.members(target), self.source(_bare(parts[2]))
+            other = _bare(parts[2])
+            if result is None or written is None:
+                return
+            if _record(other) is not None:
+                if _record(other) != _record(target) or not _lvalue(other):
+                    return
+                rhs = [f"{_wrap(written)}.{m}" for m in result[1]]
+            elif _qual(parts[2]) in VALUES and _effects(other, set(), set()):
+                rhs = [_wrap(written)] * len(result[1])
+            else:
+                return
+            each = f";\n{indent}".join(f"{lhs}.{m} {ASSIGNING[op]} {r}" for m, r in zip(result[1], rhs))
+            out.append(Rewrite(f"{self.source(kid)} member by member: {each}", ((span[0], span[1], each),)))
+
+    def out_parameter(self, call: dict, target: str) -> str | None:
+        """`f(args)` with its result written through a first out parameter: `f(target, args)`."""
+        head = self.source(_children(call)[0]) if _children(call) else None
+        arguments = [self.source(a) for a in _arguments(call)]
+        if head is None or None in arguments:
+            return None
+        return f"{head}({', '.join([target] + arguments)})"
+
+    def declared(self, kid: dict, later: list[dict], out: list[Rewrite]) -> None:
+        decls = _children(kid)
+        if len(decls) != 1 or decls[0].get("kind") != "VarDecl" or not _children(decls[0]):
+            return
+        var, name = decls[0], decls[0].get("name")
+        span, loc = _span(kid), (var.get("loc") or {}).get("offset")
+        init = _children(var)[0]
+        value = _bare(init)
+        if not span or loc is None or "&" in (var.get("type") or {}).get("qualType", ""):
+            return
+        spelled = self.text[span[0]:loc].rstrip()
+        if value.get("kind") in CALLED and _record(value) == _record(var):
+            call = self.out_parameter(value, name)
+            if call:
+                held = f"{spelled} {name};\n{self.indent(span[0])}{call};"
+                out.append(Rewrite(f"{self.source(kid)} -> {held}", ((span[0], span[1], held),)))
+        if value.get("kind") == "CXXConstructExpr" and len(_children(value)) == 1:
+            value = _bare(_children(value)[0])                 # a copy: what it copies
+        if _lvalue(value) and _effects(value, set(), set()):
+            self.reread(name, self.source(value), later, out)
+
+    def reread(self, name: str, origin: str | None, later: list[dict], out: list[Rewrite]) -> None:
+        """The uses of a local copy read from what holds the same value: what it copied (until it is first
+        written: `v.y` -> `from.y` for `Vec3 v = from`) and where it was stored (after `m_rate =
+        rate`, until it is written again: `rate` -> `m_rate`). A reread member stays a load for Reassociate."""
+        uses = [u for k in later for u in _uses(k, name, [])]
+        written: list[tuple[int, int, int, int]] = []
+        stored: list[tuple[int, str]] = []
+        for k in later:
+            self.writes(k, name, written)
+            self.stores(k, name, stored)
+        roots = {(w[2], w[3]) for w in written}
+        reads = [_span(u) for u in uses if _span(u) and _span(u) not in roots]
+        holders = ([(self.low, origin)] if origin is not None else []) + stored
+        for at, holder in holders:
+            until = min((w[1] for w in written if w[0] >= at), default=None)    # the next write, its value read
+            these = [r for r in reads if r[0] >= at and (until is None or r[0] < until)]
+            replacement = _wrap(holder)
+            lines = [self.text.count("\n", 0, span[0]) + 1 for span in these]
+            for span, line in zip(these, lines):
+                out.append(Rewrite(f"re-read {holder} for {name} (line {line})", ((span[0], span[1], replacement),)))
+            if len(these) > 1:
+                out.append(Rewrite(f"re-read {holder} for {name} (lines {', '.join(map(str, lines))})",
+                                   tuple((s[0], s[1], replacement) for s in these)))
+
+    def stores(self, node: dict, name: str, found: list) -> None:
+        """(end, target) of every `target = name` (target an lvalue that calls nothing)."""
+        kind, kids = node.get("kind"), _children(node)
+        pair = kids[:2] if kind == "BinaryOperator" and node.get("opcode") == "=" else \
+            kids[1:3] if kind == "CXXOperatorCallExpr" and _callee(node) == "operator=" else []
+        if len(pair) == 2 and _span(node):
+            value, target = _bare(pair[1]), _bare(pair[0])
+            if value.get("kind") == "DeclRefExpr" and (value.get("referencedDecl") or {}).get("name") == name and \
+                    _lvalue(target) and _effects(target, set(), set()) and self.source(target):
+                found.append((_span(node)[1], self.source(target)))
+        for kid in kids:
+            self.stores(kid, name, found)
+
+    def writes(self, node: dict, name: str, found: list) -> None:
+        """(start, end, root start, root end) of what writes the local `name` (an assignment, ++/--, an address,
+        a non-const reference or method)."""
+        kind, kids = node.get("kind"), _children(node)
+        target = None
+        if kind in ("BinaryOperator", "CompoundAssignOperator") and node.get("opcode") in WRITES and kids:
+            target = kids[0]
+        elif kind == "UnaryOperator" and node.get("opcode") in ("++", "--", "&") and kids:
+            target = kids[0]
+        elif kind == "CXXOperatorCallExpr" and len(kids) > 1 and (_callee(node) or "").endswith("=") and \
+                _callee(node) not in COMPARING:
+            target = kids[1]
+        elif kind == "CXXMemberCallExpr" and kids and _children(kids[0]) and \
+                _children(kids[0])[0].get("kind") != "ImplicitCastExpr":
+            target = _children(kids[0])[0]                      # a non-const method of it
+        if kind in CALLED:
+            for argument in _arguments(node):
+                root = _root(argument) if argument.get("kind") != "ImplicitCastExpr" else None
+                if root and (root.get("referencedDecl") or {}).get("name") == name and _span(root):
+                    found.append((*_span(node), *_span(root)))
+        root = _root(target) if target else None
+        if root and (root.get("referencedDecl") or {}).get("name") == name and _span(root) and _span(node):
+            found.append((*_span(node), *_span(root)))
+        for kid in kids:
+            self.writes(kid, name, found)
+
+    def in_place(self, before: dict | None, kid: dict, call: dict, out: list[Rewrite]) -> None:
+        """`f(out, in)` with `out` a local record and `in` another value of its type: `out = in; f(out, out)`, so
+        that the call reads what it writes (in place) - with the object of a method held first when it is a
+        temporary, which keeps the order the statement evaluated them in."""
+        span = _span(kid)
+        arguments = _arguments(call)
+        locals_ = [a for a in arguments if a.get("kind") == "DeclRefExpr" and _record(a) and
+                   (a.get("referencedDecl") or {}).get("kind") == "VarDecl"]
+        if not span:
+            return
+        indent = self.indent(span[0])
+        hoists = [None]
+        if call.get("kind") == "CXXMemberCallExpr":
+            head = _children(_children(call)[0])
+            object_ = head[0] if head else {}
+            if object_.get("kind") in HELD and _bare(object_).get("kind") in COMPUTED and _record(_bare(object_)):
+                hoists.append(_bare(object_))
+        for local in locals_:
+            name = (local.get("referencedDecl") or {}).get("name")
+            for other in arguments:
+                if other is local or _record(other) != _record(local) or not _span(_bare(other)):
+                    continue
+                if _root(other) and (_root(other).get("referencedDecl") or {}).get("name") == name:
+                    continue
+                value = _bare(other)
+                declared = self.uninitialised(before, name)
+                for hoist in hoists:
+                    edits = [(_span(value), name)]
+                    prefix = ""
+                    if hoist is not None:
+                        held = _local_name(self.text, _callee(hoist) if hoist.get("kind") in CALLED else
+                                           _record(hoist).lower())
+                        if held is None:
+                            continue
+                        edits.append((_span(hoist), held))
+                        prefix = f"{self.spelled(_record(hoist), hoist)} {held} = {self.source(hoist)};\n{indent}"
+                    start = declared[0] if declared else span[0]
+                    assign = f"{declared[1]} {name} = {self.source(value)};" if declared else \
+                        f"{name} = {self.source(value)};"
+                    body = self.text[span[0]:span[1]]
+                    for (s, e), replacement in sorted(edits, reverse=True):
+                        body = body[:s - span[0]] + replacement + body[e - span[0]:]
+                    new = f"{prefix}{assign}\n{indent}{body}"
+                    what = f"{self.source(call)} in place on {name}" + (" (object held first)" if hoist else "")
+                    out.append(Rewrite(what, ((start, span[1], new),)))
+
+    def uninitialised(self, node: dict | None, name: str) -> tuple[int, str] | None:
+        """(start, spelled type) of `T name;` (no initial value) when `node` is that declaration."""
+        decls = _children(node) if node and node.get("kind") == "DeclStmt" else []
+        if len(decls) != 1 or decls[0].get("name") != name or not _span(node):
+            return None
+        init = _children(decls[0])
+        if init and not (init[0].get("kind") == "CXXConstructExpr" and not _children(init[0])):
+            return None
+        loc = (decls[0].get("loc") or {}).get("offset")
+        return (_span(node)[0], self.text[_span(node)[0]:loc].rstrip()) if loc is not None else None
+
+    def named(self, kid: dict, out: list[Rewrite]) -> None:
+        """A computed record temporary of the statement held in a named local first (`T held = expr;`)."""
+        span = _span(kid)
+        if not span:
+            return
+        found: list[dict] = []
+
+        def walk(node: dict) -> None:
+            if node.get("kind") in SEQUENCED or node.get("kind") == "BinaryOperator" and \
+                    node.get("opcode") in ("&&", "||", ","):
+                return
+            if node.get("kind") == "MaterializeTemporaryExpr":
+                value = _bare(node)
+                if value.get("kind") in COMPUTED and _record(value) and _span(value):
+                    found.append(value)
+            for child in _children(node):
+                walk(child)
+        walk(kid)
+        indent = self.indent(span[0])
+        for value in found:
+            base = _callee(value) if value.get("kind") in CALLED else _record(value).lower()
+            held = _local_name(self.text, base or "value")
+            if held is None:
+                continue
+            written = self.source(value)
+            insert = f"{self.spelled(_record(value), value)} {held} = {written};\n{indent}"
+            where = _span(value)
+            out.append(Rewrite(f"hold {written} in {held}", ((span[0], span[0], insert), (where[0], where[1], held))))
+
+
 REGISTERS = 0x001F03FF          # Rm, Rn, Rd/Rt: what register allocation changes in most AArch64 encodings
 PPC_REGISTERS = 0x03FFF800      # rD/rS, rA, rB (frD, frA, frB): the same for PowerPC's big-endian words
 
@@ -653,7 +1079,18 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
         dump = subprocess.run(parse_command(argv, clang, path, simple, searched), capture_output=True,
                               text=True, encoding="utf-8", errors="replace", timeout=120)
         body = body_of(definitions(dump.stdout), source, simple, row["name"])
-        return rewrites(source, body) if body else []
+        return rewrites(source, body, components) if body else []
+
+    records: dict[str, tuple[str, ...] | None] = {}
+
+    def components(name: str) -> tuple[str, ...] | None:
+        """A record's scalar members, from a dump of its definition in the parsed text (once per name)."""
+        if name not in records:
+            path = work_root / f"parse{candidate.suffix or '.cpp'}"
+            dump = subprocess.run(parse_command(argv, clang, path, name, searched), capture_output=True,
+                                  text=True, encoding="utf-8", errors="replace", timeout=120)
+            records[name] = record_members(definitions(dump.stdout), name)
+        return records[name]
 
     def evaluate(source: str) -> Score:
         with tempfile.TemporaryDirectory(dir=work_root) as work:
