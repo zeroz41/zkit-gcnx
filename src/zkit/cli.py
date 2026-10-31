@@ -184,7 +184,8 @@ def build_parser() -> argparse.ArgumentParser:
     c = add("sweep", help="Near-misses (Switch and GameCube): rewrite one function's source site by site (operand order, compound "
                           "assignment, ++ form, if/else, counter type, loop direction, statement order, how a value is held: "
                           "a copy, a named temporary, a re-read, an out parameter, member-wise arithmetic, a named local "
-                          "for a condition's temporary or a returned pointer), one exit for early returns, compile "
+                          "for a condition's temporary, its first call or a returned pointer), an index loop over a "
+                          "container as a range-for and back, one exit for early returns, compile "
                           "each with its unit's command and climb to the closest; writes the best text, records "
                           "no attempts")
     c.add_argument("query", help="the function's address or name")

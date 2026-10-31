@@ -398,3 +398,91 @@ def test_condition_temporaries_and_returned_pointers_get_named_locals(tmp_path):
         result = subprocess.run([CLANG, "--target=aarch64-none-elf", "-fsyntax-only", str(tmp_path / "a.cpp")],
                                 capture_output=True, text=True)
         assert result.returncode == 0, f"{rewrite.what}: {result.stderr}"
+
+
+LOOP_SOURCE = """template <class T> struct List {
+    T *m_items;
+    unsigned long m_size;
+    T *begin() { return m_items; }
+    T *end() { return m_items + m_size; }
+    unsigned long size() const { return m_size; }
+    T &operator[](unsigned long i) { return m_items[i]; }
+};
+int use(unsigned short id);
+bool release(int *p);
+void drop(int *p);
+struct Box {
+    List<unsigned short> ids;
+    int total;
+    int sum();
+    int first();
+    void free(int *p);
+};
+int Box::sum() {
+    unsigned long num = ids.size();
+    for (unsigned long i = 0; i < num; i++) {
+        total += use(ids.begin()[i]);
+    }
+    for (int i = 0; i < ids.size(); ++i) {
+        unsigned short id = ids[i];
+        total += id;
+    }
+    return total;
+}
+int Box::first() {
+    for (unsigned short id : ids) {
+        if (use(id)) {
+            return id;
+        }
+    }
+    return 0;
+}
+void Box::free(int *p) {
+    if (!release(p) && p != nullptr) {
+        drop(p);
+    }
+}
+"""
+
+
+def _loops(name):
+    body = parse(LOOP_SOURCE, name)
+    assert body is not None
+    return {r.what: r for r in sweep.rewrites(LOOP_SOURCE, body)}
+
+
+@unittest.skipUnless(CLANG, "needs a host clang that writes JSON ASTs")
+def test_an_index_loop_over_a_container_walks_it_and_back(tmp_path):
+    loops, walk = _loops("sum"), _loops("first")
+    walked = loops["for i over ids -> for (unsigned short item : ids)"].apply(LOOP_SOURCE)
+    assert "int Box::sum() {\n    for (unsigned short item : ids) {\n        total += use(item);\n    }" in walked
+    assert "for (auto& item : ids) {\n        total += use(item);" in \
+        loops["for i over ids -> for (auto& item : ids)"].apply(LOOP_SOURCE)
+    declared = loops["for i over ids -> for (unsigned short id : ids)"].apply(LOOP_SOURCE)
+    assert "    for (unsigned short id : ids) {\n        total += id;\n    }" in declared
+    assert "for (const unsigned short& id : ids) {\n        total += id;" in \
+        loops["for i over ids -> for (const unsigned short& id : ids)"].apply(LOOP_SOURCE)
+    indexed = walk["for (unsigned short id : ids) -> index loop over ids[i]"].apply(LOOP_SOURCE)
+    assert "    for (int i = 0; i < ids.size(); i++) {\n        unsigned short id = ids[i];\n        if (use(id))" \
+        in indexed
+    assert "unsigned short id = ids.begin()[i];" in \
+        walk["for (unsigned short id : ids) -> index loop over ids.begin()[i]"].apply(LOOP_SOURCE)
+    for rewrite in [r for r in [*loops.values(), *walk.values()] if " over " in r.what or "index loop" in r.what]:
+        (tmp_path / "a.cpp").write_text(rewrite.apply(LOOP_SOURCE), encoding="utf-8")
+        result = subprocess.run([CLANG, "--target=aarch64-none-elf", "-std=gnu++14", "-fsyntax-only",
+                                 str(tmp_path / "a.cpp")], capture_output=True, text=True)
+        assert result.returncode == 0, f"{rewrite.what}: {result.stderr}"
+
+
+@unittest.skipUnless(CLANG, "needs a host clang that writes JSON ASTs")
+def test_a_conditions_first_call_is_held_and_the_other_test_comes_first(tmp_path):
+    found = _loops("free")
+    held = "    bool flag = release(p);\n    if (!flag && p != nullptr) {"
+    assert held in found["hold release(p) in flag before the condition"].apply(LOOP_SOURCE)
+    last = found["hold release(p) in flag before the condition, test it last"].apply(LOOP_SOURCE)
+    assert "    bool flag = release(p);\n    if (p != nullptr && !flag) {" in last
+    for rewrite in [r for r in found.values() if "before the condition" in r.what]:
+        (tmp_path / "a.cpp").write_text(rewrite.apply(LOOP_SOURCE), encoding="utf-8")
+        result = subprocess.run([CLANG, "--target=aarch64-none-elf", "-std=gnu++14", "-fsyntax-only",
+                                 str(tmp_path / "a.cpp")], capture_output=True, text=True)
+        assert result.returncode == 0, f"{rewrite.what}: {result.stderr}"

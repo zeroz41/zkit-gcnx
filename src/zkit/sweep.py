@@ -6,7 +6,8 @@ commutative operator, `a = a + b` for `a += b`, a loop counting up instead of do
 swapped, a counter of another integer type, two independent statements the other way round, and how a value is
 held (an explicit copy, a named temporary, a re-read instead of a cached local, an out parameter updated in place,
 a record's arithmetic member by member), which decides the order of float operands, a named local for a
-condition's temporary or a returned pointer, and one exit through a result local for early returns. The sweep
+condition's temporary, its first call or a returned pointer, an index loop over a container as a range-for (a
+pointer walk) and back, and one exit through a result local for early returns. The sweep
 parses the function with a host clang's JSON AST (the project's compiler may be too old to write one), rewrites
 one site at a time, compiles every rewrite with the unit's exact command, and climbs to the spelling with the fewest
 differing words. A rewrite need not keep the meaning: a byte-identical result proves itself, and anything else
@@ -141,6 +142,10 @@ def rewrites(text: str, body: dict, components: Callable[[str], tuple[str, ...] 
             _integer_type(text, kids[0], out)
         elif kind == "ForStmt":
             _for_direction(text, node, out)
+            _range_for(text, node, _children(parent) if parent and parent.get("kind") == "CompoundStmt" else [],
+                       body, out)
+        elif kind == "CXXForRangeStmt":
+            _index_loop(text, node, body, out)
         if kind in ("IfStmt", "WhileStmt", "DoStmt", "ConditionalOperator") and kids:
             _condition(text, kids[1] if kind == "DoStmt" and len(kids) > 1 else kids[0], out)
         if kind == "BinaryOperator" and node.get("opcode") in ("&&", "||") and len(kids) == 2:
@@ -298,6 +303,216 @@ def _for_direction(text: str, node: dict, out: list[Rewrite]) -> None:
         for test in ("!= 0", "> 0"):
             new = f"for ({spelled} {name} = {bound}; {name} {test}; {name}--) "
             out.append(Rewrite(f"for {name} up -> down ({test})", ((head[0], head[1], new),)))
+
+
+def _line(text: str, start: int, end: int) -> tuple[int, int]:
+    """A statement's [start, end) widened to its whole line when nothing else stands on it."""
+    head = text.rfind("\n", 0, start) + 1
+    tail = text.find("\n", end)
+    tail = len(text) if tail < 0 else tail
+    if text[head:start].strip() or text[end:tail].strip():
+        return start, end
+    return head, tail + 1
+
+
+def _same(text: str, one: tuple[int, int], two: str) -> bool:
+    return re.sub(r"\s+", "", text[one[0]:one[1]]) == re.sub(r"\s+", "", two)
+
+
+def _sized(text: str, node: dict) -> str | None:
+    """The container `c` of a `c.size()` / `p->size()` call (`*p`), or None."""
+    call = _strip(node)
+    member = _children(call)[0] if call.get("kind") == "CXXMemberCallExpr" and _children(call) else {}
+    objects = _children(member)
+    if member.get("kind") != "MemberExpr" or member.get("name") != "size" or len(_children(call)) != 1 or \
+            not objects or _strip(objects[0]).get("kind") == "CXXThisExpr":
+        return None
+    span = _span(objects[0])
+    if not span:
+        return None
+    return f"*{_wrap(text[span[0]:span[1]])}" if member.get("isArrow") else text[span[0]:span[1]]
+
+
+def _element(text: str, node: dict, index: str, container: str) -> bool:
+    """`node` reads element `index` of `container`: `c[i]`, `c.begin()[i]` or `c.data()[i]`."""
+    node = _strip(node)
+    kids = _children(node)
+    if node.get("kind") == "CXXOperatorCallExpr" and len(kids) == 3:
+        callee, target, at = _strip(kids[0]), _span(kids[1]), _strip(kids[2])
+        return (callee.get("referencedDecl") or {}).get("name") == "operator[]" and \
+            at.get("kind") == "DeclRefExpr" and (at.get("referencedDecl") or {}).get("name") == index and \
+            target is not None and _same(text, target, container)
+    if node.get("kind") != "ArraySubscriptExpr" or len(kids) != 2:
+        return False
+    base, at = _strip(kids[0]), _strip(kids[1])
+    if at.get("kind") != "DeclRefExpr" or (at.get("referencedDecl") or {}).get("name") != index:
+        return False
+    member = _children(base)[0] if base.get("kind") == "CXXMemberCallExpr" and _children(base) else {}
+    objects = _children(member)
+    if member.get("kind") != "MemberExpr" or member.get("name") not in ("begin", "data") or not objects:
+        return False
+    span = _span(objects[0])
+    spelled = text[span[0]:span[1]] if span else ""
+    return bool(span) and (_same(text, span, container) if not member.get("isArrow") else
+                           re.sub(r"\s+", "", f"*{_wrap(spelled)}") == re.sub(r"\s+", "", container))
+
+
+def _elements(text: str, node: dict, index: str, container: str, found: list[dict]) -> bool:
+    """Every read of `index` below `node` is an element of `container` (collected in `found`)."""
+    if _element(text, node, index, container):
+        found.append(_strip(node))
+        return True
+    if node.get("kind") == "DeclRefExpr" and (node.get("referencedDecl") or {}).get("name") == index:
+        return False
+    return all(_elements(text, kid, index, container, found) for kid in _children(node))
+
+
+def _names(node: dict, found: set[str]) -> set[str]:
+    if node.get("name"):
+        found.add(node["name"])
+    if (node.get("referencedDecl") or {}).get("name"):
+        found.add(node["referencedDecl"]["name"])
+    for kid in _children(node):
+        _names(kid, found)
+    return found
+
+
+def _fresh(text: str, whole: dict, base: str) -> str:
+    """A local's name not yet used in the function `whole` (its body in `text`)."""
+    span, taken = _span(whole) or (0, len(text)), _names(whole, set())
+    text = text[span[0]:span[1]]
+    for name in [base] + [f"{base}{n}" for n in range(2, 9)]:
+        if name not in taken and not re.search(rf"\b{name}\b", text):
+            return name
+    return f"{base}9"
+
+
+def _range_for(text: str, node: dict, siblings: list[dict], whole: dict, out: list[Rewrite]) -> None:
+    """`for (T i = 0; i < c.size(); i++)` (or `i < n` with `n = c.size()` counted first) whose body reads `i`
+    only as an element of `c` (`c[i]`, `c.begin()[i]`) -> `for (E x : c)`: a pointer walk to the end instead of
+    an index. A leading `E x = c[i];` becomes the loop variable; else the elements become `item`, held by
+    reference (`auto&`) or, for a scalar, by value."""
+    kids = node.get("inner", [])
+    if len(kids) != 5 or not all(isinstance(k, dict) and k for k in (kids[0], kids[2], kids[3], kids[4])):
+        return
+    init, cond, inc, body = kids[0], _strip(kids[2]), kids[3], kids[4]
+    decls = _children(init)
+    if init.get("kind") != "DeclStmt" or not 1 <= len(decls) <= 2 or not all(d.get("kind") == "VarDecl" and
+                                                                              _children(d) for d in decls):
+        return
+    index = decls[0].get("name")
+    zero = _strip(_children(decls[0])[0])
+    if zero.get("kind") != "IntegerLiteral" or zero.get("value") != "0":
+        return
+    stepped = _strip(_children(inc)[0]) if _children(inc) else {}
+    if inc.get("kind") != "UnaryOperator" or inc.get("opcode") != "++" or \
+            (stepped.get("referencedDecl") or {}).get("name") != index:
+        return
+    parts = _children(cond)
+    if cond.get("kind") != "BinaryOperator" or cond.get("opcode") not in ("<", "!=") or len(parts) != 2 or \
+            (_strip(parts[0]).get("referencedDecl") or {}).get("name") != index:
+        return
+    bound, removed = _strip(parts[1]), []
+    container = _sized(text, bound)
+    if container is None and bound.get("kind") == "DeclRefExpr":
+        count = (bound.get("referencedDecl") or {}).get("name")
+        held = [d for d in decls[1:] if d.get("name") == count]
+        if held:                                      # for (T i = 0, n = c.size(); i < n; i++)
+            container = _sized(text, _children(held[0])[0])
+        else:                                         # T n = c.size(); just before, read by the loop only
+            for sibling in siblings:
+                one = _children(sibling)
+                if sibling.get("kind") == "DeclStmt" and len(one) == 1 and one[0].get("name") == count and \
+                        _children(one[0]) and len(_uses(whole, count, [])) == 1:
+                    container = _sized(text, _children(one[0])[0])
+                    removed = [_line(text, *_span(sibling))] if container and _span(sibling) else []
+        if container is None:
+            return
+    elif len(decls) != 1:
+        return
+    if container is None or not _span(body) or not _span(node):
+        return
+    found: list[dict] = []
+    if not _elements(text, body, index, container, found) or not found or any(_span(f) is None for f in found):
+        return
+    start, (b0, b1) = _span(node)[0], _span(body)
+    statements = _children(body) if body.get("kind") == "CompoundStmt" else []
+    first = _children(statements[0]) if statements and statements[0].get("kind") == "DeclStmt" else []
+    if len(found) == 1 and len(first) == 1 and first[0].get("kind") == "VarDecl" and _children(first[0]) and \
+            _strip(_children(first[0])[0]) is found[0] and _span(first[0]) and _span(statements[0]):
+        var = first[0]                                # for (...) { E x = c[i]; ... } -> for (E x : c)
+        spelled = text[_span(var)[0]:(var.get("loc") or {}).get("offset", 0)].rstrip()
+        drop = _line(text, *_span(statements[0]))
+        kinds = [spelled] + ([f"const {spelled}&"] if not spelled.endswith(("&", "*")) and
+                             not spelled.startswith("const ") else [])
+        for kind in kinds:
+            head = f"for ({kind} {var['name']} : {container}) "
+            out.append(Rewrite(f"for {index} over {container} -> for ({kind} {var['name']} : {container})",
+                               ((start, b0, head), (drop[0], drop[1], ""),
+                                *((a, b, "") for a, b in removed))))
+        return
+    name = _fresh(text, whole, "item")
+    qual = (found[0].get("type") or {}).get("qualType", "")
+    kinds = ([qual] if qual in VALUES or re.fullmatch(r"[\w:]+ \*", qual) else []) + ["auto&"]
+    for kind in kinds:
+        head = f"for ({kind} {name} : {container}) "
+        edits = [(start, b0, head), *((a, b, "") for a, b in removed)]
+        edits += [(*_span(f), name) for f in found]
+        out.append(Rewrite(f"for {index} over {container} -> for ({kind} {name} : {container})", tuple(edits)))
+
+
+def _index_loop(text: str, node: dict, whole: dict, out: list[Rewrite]) -> None:
+    """`for (E x : c)` over a named container -> `for (int i = 0; i < c.size(); i++) { E x = c[i]; ... }`
+    (an array's length for an array): an index instead of a pointer walk."""
+    kids = node.get("inner", [])
+    if len(kids) != 8 or not all(isinstance(k, dict) and k for k in (kids[1], kids[6], kids[7])):
+        return
+    ranged = _children(_children(kids[1])[0]) if _children(kids[1]) else []
+    loop = _children(kids[6])
+    if not ranged or len(loop) != 1 or loop[0].get("kind") != "VarDecl":
+        return
+    expr, var, body = ranged[0], loop[0], kids[7]
+    span, vspan, bspan, nspan = _span(expr), _span(var), _span(body), _span(node)
+    if not span or not vspan or not bspan or not nspan or not _plain(expr):
+        return
+    container = text[span[0]:span[1]]
+    sized = re.search(r"\[(\d+)\]$", (_strip(expr).get("type") or {}).get("qualType", ""))
+    bound = sized.group(1) if sized else f"{_wrap(container)}.size()"
+    index = _fresh(text, whole, "i")
+    spelled = text[vspan[0]:(var.get("loc") or {}).get("offset", vspan[0])].rstrip()
+    indent = re.match(r"[ \t]*", text[text.rfind("\n", 0, nspan[0]) + 1:]).group(0)
+    reads = [f"{_wrap(container)}[{index}]"] + ([] if sized else [f"{_wrap(container)}.begin()[{index}]"])
+    for read in reads:
+        held = f"{spelled} {var.get('name')} = {read};"
+        head = f"for (int {index} = 0; {index} < {bound}; {index}++) "
+        if body.get("kind") == "CompoundStmt":
+            edits = ((nspan[0], bspan[0], head), (bspan[0] + 1, bspan[0] + 1, f"\n{indent}    {held}"))
+        else:
+            edits = ((nspan[0], bspan[0], f"{head}{{\n{indent}    {held}\n{indent}    "),
+                     (bspan[1], bspan[1], f"\n{indent}}}" if text[bspan[1]:bspan[1] + 1] != ";" else ""))
+            if text[bspan[1]:bspan[1] + 1] == ";":
+                edits = (edits[0], (bspan[1] + 1, bspan[1] + 1, f"\n{indent}}}"))
+        out.append(Rewrite(f"for ({spelled} {var.get('name')} : {container}) -> index loop over {read}", edits))
+
+
+def _calls(node: dict) -> bool:
+    """The expression calls something or writes (an assignment, ++ / --)."""
+    kind = node.get("kind")
+    if kind in ("CallExpr", "CXXMemberCallExpr", "CXXOperatorCallExpr", "CompoundAssignOperator") or \
+            kind == "BinaryOperator" and node.get("opcode") == "=" or \
+            kind == "UnaryOperator" and node.get("opcode") in ("++", "--"):
+        return True
+    return any(_calls(k) for k in _children(node))
+
+def _plain(node: dict) -> bool:
+    """An expression naming an object without calling anything (a local, a member, `*p`): read twice safely."""
+    node = _strip(node)
+    kind = node.get("kind")
+    if kind == "DeclRefExpr" or kind == "CXXThisExpr":
+        return True
+    if kind == "MemberExpr" or kind == "UnaryOperator" and node.get("opcode") == "*" or kind == "ParenExpr":
+        return all(_plain(k) for k in _children(node))
+    return False
 
 
 STATEMENTS = ("BinaryOperator", "CompoundAssignOperator", "CXXOperatorCallExpr", "DeclStmt", "UnaryOperator")
@@ -828,6 +1043,7 @@ class _Values:
             if _span(kid):
                 self.assigned(kid, out)
                 self.pointer(kid, kids[at + 1:], out)
+                self.first_call(kid, out)
 
     def assignment(self, kid: dict, expr: dict, out: list[Rewrite]) -> None:
         parts, op = _children(expr), _callee(expr)
@@ -1139,6 +1355,49 @@ class _Values:
                 out.append(Rewrite(f"hold {written} in {held} (line {line}, all {len(edits) - 1} uses)",
                                    tuple(edits)))
 
+
+    def first_call(self, kid: dict, out: list[Rewrite]) -> None:
+        """The call an `if`'s or a `switch`'s condition makes first (the condition, the left operand of && / ||
+        or of a comparison, below a `!`) held in a named scalar local before the statement: `bool flag = f(x);
+        if (!flag && p)`. The call is then no longer ordered with the rest, so the operands may swap."""
+        if kid.get("kind") in EXPRESSIONS:
+            return
+        for node in self.tested(kid, False):
+            junction = None                           # the && / || whose left operand holds the call
+            while True:
+                node = _bare(node)
+                kids = _children(node)
+                if node.get("kind") == "BinaryOperator" and node.get("opcode") in ("&&", "||") and len(kids) == 2:
+                    junction = node
+                if node.get("kind") == "ParenExpr" and kids or \
+                        node.get("kind") == "UnaryOperator" and node.get("opcode") == "!" and kids or \
+                        node.get("kind") == "BinaryOperator" and len(kids) == 2 and \
+                        node.get("opcode") in ("&&", "||", "==", "!=", "<", ">", "<=", ">="):
+                    node = kids[0]
+                    continue
+                break
+            qual = _qual(node)
+            if node.get("kind") not in CALLED or not _span(node) or \
+                    not (qual in VALUES or re.fullmatch(r"(?:\w+::)*\w+ \*", qual)):
+                continue
+            span, where = _span(kid), _span(node)
+            fallback = "flag" if qual == "bool" else "value"
+            held = self.held_name(_callee(node), fallback)
+            if held is None:
+                continue
+            written = self.source(node)
+            spelled = qual if qual in VALUES else f"{self.spelled(qual[:-2].split('::')[-1])}*"
+            insert = f"{spelled} {held} = {written};\n{self.indent(span[0])}"
+            out.append(Rewrite(f"hold {written} in {held} before the condition",
+                               ((span[0], span[0], insert), (where[0], where[1], held))))
+            sides = [_span(k) for k in _children(junction)] if junction else []
+            if len(sides) == 2 and None not in sides and sides[0][1] <= sides[1][0] and \
+                    not _calls(_children(junction)[1]) and sides[0][0] <= where[0] and where[1] <= sides[0][1]:
+                (a0, a1), (b0, b1) = sides            # nothing left to order: the other test may come first
+                left = self.text[a0:where[0]] + held + self.text[where[1]:a1]
+                swapped = self.text[b0:b1] + self.text[a1:b0] + left
+                out.append(Rewrite(f"hold {written} in {held} before the condition, test it last",
+                                   ((span[0], span[0], insert), (a0, b1, swapped))))
 
 REGISTERS = 0x001F03FF          # Rm, Rn, Rd/Rt: what register allocation changes in most AArch64 encodings
 PPC_REGISTERS = 0x03FFF800      # rD/rS, rA, rB (frD, frA, frB): the same for PowerPC's big-endian words
