@@ -1480,7 +1480,9 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
                 continue
             candidates = whole
         affinity = _call_affinity(program, ev, row, candidates, near)
-        best = min(candidates, key=lambda p: (*cost(p), affinity.get(p, 0), abs(p - toward)))
+        sides = _class_sides(program, row, candidates, owner) if row in apart_rows else {}
+        best = min(candidates, key=lambda p: (*cost(p)[:2], sides.get(p, 0), cost(p)[2], affinity.get(p, 0),
+                                              abs(p - toward)))
         chosen.append(Boundary(best, (candidates[0], candidates[-1]), crossings[best], because))
     return sorted(chosen, key=lambda c: c.position)
 
@@ -1500,6 +1502,34 @@ def _call_affinity(program: Program, ev: Evidence, row: tuple[int, int, str], ca
     if not any(a or b for a, b in calls.values()):
         return {}
     return {p: sum(calls[k][1] for k in range(lo, p)) + sum(calls[k][0] for k in range(p, hi)) for p in candidates}
+
+
+def _class_sides(program: Program, row: tuple[int, int, str], candidates: list[int],
+                 owner: dict[int, str]) -> dict[int, int]:
+    """Switch: a call that says two functions are in different files (`apart`) leaves the classes between to
+    either side; a class's own (strong) functions are its file's, so each goes to the side its class's other
+    strong functions nearby are on, ahead of short calls (a widely used constructor is called from beside it):
+    per place, the functions it leaves apart from all of their class's others outside the window."""
+    if program.platform.name != "switch" or len(candidates) < 2:
+        return {}
+    from .score import placeholder
+    weak, bound = set(getattr(program.image, "weak", ())), getattr(program.image, "symbols", None) or {}
+    functions = program.functions
+    strong = lambda i: functions[i].scope != "weak" and functions[i].address not in weak and \
+        (functions[i].address in bound or functions[i].scope == "global" and not placeholder(functions[i].name))
+    lo, hi = candidates[0], candidates[-1]
+    side: dict[int, int] = {}            # window function -> -1 (its class is left of the window), 1 (right)
+    for k in range(lo, hi):
+        cls = owner.get(k)
+        if not cls or not strong(k):
+            continue
+        others = {-1 if i < lo else 1 for i in range(max(0, k - CLASS_SPAN), min(len(functions), k + CLASS_SPAN + 1))
+                  if not lo <= i < hi and owner.get(i) == cls and strong(i)}
+        if len(others) == 1:
+            side[k] = others.pop()
+    if not side:
+        return {}
+    return {p: sum(1 for k, s in side.items() if (k < p) == (s > 0)) for p in candidates}
 
 
 def _stated(ev: Evidence) -> list[tuple[int, int, str]]:
@@ -1750,11 +1780,25 @@ def _unnamed(program: Program, class_of: dict[int, str], first: int, end: int,
     """A name for a unit no file names: the class most of its functions belong to, else the class (or namespace)
     most of their names qualify them with when no class has a constructor here (`ns::Util`'s static
     functions), else its address."""
-    classes = collections.Counter(class_of[i] for i in range(first, end) if i in class_of) or \
-        collections.Counter((qualified or {})[i] for i in range(first, end) if i in (qualified or {}))
+    classes = collections.Counter(class_of[i] for i in range(first, end) if i in class_of)
+    named = collections.Counter((qualified or {})[i] for i in range(first, end) if i in (qualified or {}))
+    if not classes or program.platform.name == "switch" and named and \
+            named.most_common(1)[0][1] > classes.most_common(1)[0][1] and \
+            _only_structors(program, class_of, classes.most_common(1)[0][0], first, end):
+        classes = named or classes      # (Switch) a class only constructed here (a value type's constructors
+        # beside the methods of a class whose constructor every caller inlined) names nothing
     if classes:
         return classes.most_common(1)[0][0] + ".cpp", "class"
     return f"unit_{program.platform.text(program.functions[first].address)[2:]}.cpp", "placeholder"
+
+
+def _only_structors(program: Program, class_of: dict[int, str], cls: str, first: int, end: int) -> bool:
+    """Whether every function of `cls` in first..end is one of its constructors or destructors."""
+    from .platform import demangle_itanium
+    leaf = cls.rsplit("/", 1)[-1]
+    wanted = [i for i in range(first, end) if class_of.get(i) == cls]
+    texts = demangle_itanium([program.functions[i].name for i in wanted])
+    return all(text and (parts := _qualified(text)) and parts[-1] in (leaf, "~" + leaf) for text in texts)
 
 
 def _function_classes(program: Program, qualifiers: bool = False) -> dict[int, str]:
