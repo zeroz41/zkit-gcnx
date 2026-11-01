@@ -1446,6 +1446,13 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
     tail_rows = set(tails)
     languages = [r for r in sorted(set(ev.languages), key=lambda r: (r[1] - r[0], r[0])) if r not in apart_rows]
     owner = _function_classes(program, qualifiers=True) if apart_rows else {}
+    near: dict[int, list[int]] = collections.defaultdict(list)   # calls either way, for `_call_affinity`
+    if program.platform.name == "switch" and ev.borrowed:
+        for caller, callees in program.calls.items():
+            for callee in callees:
+                if callee != caller:
+                    near[caller].append(callee)
+                    near[callee].append(caller)
     for row in [r for r in stated if r not in ev.edges] + [r for r in stated if r in ev.edges] + rest + tails + apart \
             + languages + beyond:
         lo, hi, because = row
@@ -1472,9 +1479,27 @@ def boundaries(program: Program, ev: Evidence | None = None) -> list[Boundary]:
             if not whole:
                 continue
             candidates = whole
-        best = min(candidates, key=lambda p: (*cost(p), abs(p - toward)))
+        affinity = _call_affinity(program, ev, row, candidates, near)
+        best = min(candidates, key=lambda p: (*cost(p), affinity.get(p, 0), abs(p - toward)))
         chosen.append(Boundary(best, (candidates[0], candidates[-1]), crossings[best], because))
     return sorted(chosen, key=lambda c: c.position)
+
+
+def _call_affinity(program: Program, ev: Evidence, row: tuple[int, int, str], candidates: list[int],
+                   near: dict[int, list[int]]) -> dict[int, int]:
+    """Switch: among places that cost the same, a boundary only another build's units give (`borrowed`) puts the
+    functions between, which that build does not place (code a later build added), with the file whose code they
+    call or are called by: per place, the calls (either way) of a function it leaves on one side with code of the
+    other side's file, wherever that code is."""
+    pair = ev.pairs.get(row)
+    if program.platform.name != "switch" or row not in ev.borrowed or pair is None or len(candidates) < 2 \
+            or pair[0] == pair[1]:
+        return {}
+    lo, hi = candidates[0], candidates[-1]
+    calls = {k: [sum(1 for j in near.get(k, ()) if ev.files.get(j) == f) for f in pair] for k in range(lo, hi)}
+    if not any(a or b for a, b in calls.values()):
+        return {}
+    return {p: sum(calls[k][1] for k in range(lo, p)) + sum(calls[k][0] for k in range(p, hi)) for p in candidates}
 
 
 def _stated(ev: Evidence) -> list[tuple[int, int, str]]:
