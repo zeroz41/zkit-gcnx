@@ -119,6 +119,22 @@ class ObjectTests(unittest.TestCase):
         self.assertTrue(objects.function_diff(folded("a", "1.5f"), folded("b", "1.5f"), "scale")["exact"])
         self.assertFalse(objects.function_diff(folded("a", "1.5f"), folded("c", "2.5f"), "scale")["exact"])
 
+    def test_a_variable_in_its_own_section_is_the_split_lbl_at_the_same_offset(self):
+        """The split object's sized lbl_ in .bss and the compiled object's variable in a section of its own (data
+        sections, clang's merged globals) at the same offset into each are one variable; another offset or a
+        variable of another size is not."""
+        triple = TARGETS["aarch64"]
+        original = build(self.root, "own-o", "int lbl_80001000[2];\nint get(void) { return lbl_80001000[1]; }\n",
+                         triple)
+        own = 'static int t[{0}] __attribute__((section(".bss.t"), used));\nint get(void) {{ return t[{1}]; }}\n'
+        built = lambda tag, count, index: build(self.root, f"own-{tag}", own.format(count, index), triple)
+        self.assertTrue(objects.function_diff(original, built("s", 2, 1), "get")["exact"])
+        self.assertFalse(objects.function_diff(original, built("x", 2, 0), "get")["exact"])
+        self.assertFalse(objects.function_diff(original, built("z", 3, 1), "get")["exact"])
+        padded = build(self.root, "own-p", "int lbl_80001000[4];\nint get(void) { return lbl_80001000[1]; }\n", triple)
+        self.assertTrue(objects.function_diff(padded, built("s", 2, 1), "get")["exact"])   # label holds the padding
+        self.assertFalse(objects.function_diff(padded, built("y", 1, 0), "get")["exact"])
+
 
 
 class CandidateCommandTests(unittest.TestCase):

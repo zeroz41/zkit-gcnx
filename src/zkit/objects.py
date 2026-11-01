@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .elf import Elf, Relocation, Section
+from .elf import Elf, Relocation, Section, Symbol
 from .project import Project
 
 # Sections that never carry the program: compiler notes, debug info, line tables, address-significance tables.
@@ -149,13 +149,26 @@ def _same_place(a: Elf, xa: tuple, b: Elf, xb: tuple) -> bool:
                 or not (_unnamed(left) or _unnamed(right) or _plain(left.name) == _plain(right.name)):
             return False
         section = a.sections[left.section]
-        if section.name != b.sections[right.section].name or left.value + aa != right.value + ab \
-                or section.flags & SHF_EXECINSTR or not section.flags & SHF_WRITE or section.name.startswith(CONSTANT_SECTIONS):
+        if section.flags & SHF_EXECINSTR or not section.flags & SHF_WRITE or section.name.startswith(CONSTANT_SECTIONS):
             return False
+        if section.name != b.sections[right.section].name or left.value + aa != right.value + ab:
+            if not (_own_section_place(a, left, aa, b, right, ab) or _own_section_place(b, right, ab, a, left, aa)):
+                return False
+            continue
         length = left.size - aa if left.kind != "section" else 0
         if _code_targets(a, ia, aa, length) != _code_targets(b, ib, ab, length):
             return False  # a jump table at the same place with other case targets
     return True
+
+
+def _own_section_place(split: Elf, held: Symbol, at: int, built: Elf, own: Symbol, offset: int) -> bool:
+    """A split object's sized lbl_ in one .bss/.data and a compiled object's variable in a section of its own
+    (`-fdata-sections`: `.bss._ZL5table`, or clang's merged-globals block `.bss..L_MergedGlobals` named only by
+    its section symbol) of the same size, at the same offset into each: one variable, as objdiff judges it. The
+    splitter sizes a label up to the next object, so it may also hold the padding before a 16-byte-aligned one."""
+    home, alone = split.sections[held.section], built.sections[own.section]
+    return _unnamed(held) and held.kind != "section" and alone.name.startswith(home.name + ".") \
+        and 0 < alone.size <= held.size < alone.size + 16 and 0 <= at < alone.size and own.value + offset == at
 
 
 def _names_at(elf: Elf, index: int, addend: int) -> set[str]:
