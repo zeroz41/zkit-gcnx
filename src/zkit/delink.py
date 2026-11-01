@@ -418,6 +418,7 @@ class Image:
     section_of: Callable[[int], str | None] = lambda address: None   # the section holding an address
     place: Callable[[str, int], int | None] | None = None   # section-relative splits and symbols (a REL)
     virtual: Callable[[int], int] | None = None             # the address objdiff shows, when not base + address
+    imports: dict[int, str] = field(default_factory=dict)   # GOT slot -> the symbol another module defines there
 
     def original(self, address: int) -> int:
         return self.virtual(address) if self.virtual else self.base + address
@@ -476,16 +477,21 @@ def _switch(project: Project, target: str, platform) -> Image:
     text = lambda address: platform.text(address)[2:]
     symbols = Symbols(functions, data, text)
     in_image = lambda address: module.segment_at(address) is not None
+    got = module.tables.get(".got")
+    # a GOT slot the dynamic linker fills with another module's symbol (SDK or libc data): code loading it names
+    # the import, as the compiler's GOT relocation does
+    imports = {slot: name for slot, name in module.imports.items()
+               if got and got[0] <= slot < got[1] and "+" not in name}
 
     def code(start: int, size: int, resolved) -> tuple[list, dict[int, int]]:
         found, cleared = aarch64.code_relocations(module.words(start, size), start, module.pointers, resolved,
-                                                 module.tables.get(".got"))
+                                                 got, imports)
         return [(r.offset, r.kind, r.target, r.got) for r in found], cleared
 
     def pointers(start: int, end: int) -> list[tuple[int, int]]:
         return [(slot, pointee, "dynamic relocation") for slot, pointee in module.pointers.items()
                 if start <= slot and slot + 8 <= end]
-    return Image(AARCH64, platform.base, module.read, symbols, in_image, code, pointers, text)
+    return Image(AARCH64, platform.base, module.read, symbols, in_image, code, pointers, text, imports=imports)
 
 
 def _image(project: Project, target: str) -> Image:
@@ -659,7 +665,9 @@ def write_unit(image: Image, cut: Cut, path: Path, plan: Plan | None = None) -> 
     blobs = {n: bytearray(b) for n, _, b, _ in cut.sections if not isinstance(b, int)}
     for section_name, found in cut.found.items():
         for offset, kind, target, got in found:
-            if target in landing:
+            if got and target in image.imports:
+                name, addend = image.imports[target], 0
+            elif target in landing:
                 name, addend = landing[target], 0
             else:
                 name, addend = symbols.resolve(target, kind)

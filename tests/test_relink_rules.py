@@ -838,6 +838,41 @@ class AnotherBuildNameTests(unittest.TestCase):
         self.assertEqual(units._in_neighbours_folder(named, {})[5][2], "app/game/AssetUtil.cpp")
 
 
+class GotImportTests(unittest.TestCase):
+    def test_a_load_through_a_got_slot_of_imported_data_names_the_import(self):
+        """A `.got` slot the dynamic linker fills with another module's data symbol has no pointee in the image:
+        the load through it is still a GOT load, and the cut object names the import as the compiler's
+        R_AARCH64_ADR_GOT_PAGE/LD64_GOT_LO12_NC do, not a label at the slot."""
+        from zkit import aarch64
+        # at 0x100: adrp x8, page 0x5000; ldr x8, [x8, #0x20]; ret
+        words = [0xB0000028, 0xF9401108, 0xD65F03C0]
+        found, _ = aarch64.code_relocations(words, 0x100, {}, got=(0x5000, 0x5100), imports={0x5020})
+        self.assertEqual(sorted((r.offset, r.kind, r.target, r.got) for r in found), [
+            (0x100, aarch64.ADR_GOT_PAGE, 0x5020, True), (0x104, aarch64.LD64_GOT_LO12_NC, 0x5020, True)])
+        found, _ = aarch64.code_relocations(words, 0x100, {}, got=(0x5000, 0x5100))
+        self.assertEqual([r.kind for r in found], [aarch64.ADR_PREL_PG_HI21, aarch64.LDST64])
+
+        blob = struct.pack("<3I", *words)
+        read = lambda address, size: blob[address - 0x100:address - 0x100 + size]
+        symbols = delink.Symbols([delink.Entry(0x100, 0xC, "_Z4readv")], [], lambda a: f"{a:X}")
+
+        def code_of(start, size, resolved):
+            relocs, cleared = aarch64.code_relocations(list(struct.unpack(f"<{size // 4}I", read(start, size))),
+                                                       start, {}, resolved, (0x5000, 0x5100), {0x5020})
+            return [(r.offset, r.kind, r.target, r.got) for r in relocs], cleared
+        image = delink.Image(delink.AARCH64, 0, read, symbols, lambda a: True, code_of, lambda a, b: [],
+                             lambda a: f"{a:X}", imports={0x5020: "_ZN2ns4Data8intervalE"})
+        unit = delink.Unit("a.cpp")
+        unit.ranges[".text"].append((0x100, 0x10C))
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "a.o"
+            row = delink.write_unit(image, delink.cut_unit(image, unit), path)
+            data = path.read_bytes()
+        self.assertEqual((row["labels"], row["undefined"]), (0, 1))
+        self.assertIn(b"_ZN2ns4Data8intervalE\0", data)
+        self.assertNotIn(b"lbl_", data)
+
+
 class RecursionTests(unittest.TestCase):
     def test_a_recursive_call_is_cut_resolved_as_clang_leaves_it(self):
         """clang 3.9 resolves a function's call to its own start in its object (no relocation, the offset encoded):
