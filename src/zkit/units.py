@@ -171,6 +171,9 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     out_of_order = _tables_out_of_order(program)       # as sure as one file's citations around another's
     ev.joins += out_of_order
     ev.cited += out_of_order
+    tails = _key_function_tails(program, ev)          # as sure as a citation: the link order states it
+    ev.joins += tails
+    ev.cited += tails
     ev.joins += _held_statics(program, ev)
     _out_of_line_calls(program, ev)
     _language_runs(program, ev)
@@ -246,34 +249,16 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
     A table with a key function is emitted with it, and the code forming its address (the class's constructors and
     destructors, or the enclosing class's code they are inlined in) is there too: with the functions only that
     table holds, inlines included, it is one unit's, as far as a tight run reaches where no file the code cites or
-    another build places changes within it (a nested class's one virtual after its owner's code). The unit
-    emitting a table emits the inline virtuals only it holds, and the link keeps the first copy, so none of them
-    is in a later unit than its key function, one of the class's own methods in the table: from the last of
-    those to the last of the inline ones is one unit's, whatever another build places between (another build moving
-    code between files), unless the code there cites two files. Another class's constructor forming the address (not
+    another build places changes within it (a nested class's one virtual after its owner's code); its inline
+    virtuals after its key function: `_key_function_tails`. Another class's constructor forming the address (not
     the table's class's, nor one enclosing it or nested in it: a member's constructor its header may define, inlined)
     says little of the table's unit: the order clang creates a unit's functions in (a deferred tail) parts it."""
     if program.platform.name != "switch":
         return []
-    from .itanium import _groups
     from .platform import demangle_itanium
     from .score import placeholder
     weak = _weak(program)
-    formed = {address for rows in program.refs.values() for _, address, kind in rows if kind == "addr"}
-    holders: dict[int, list[int]] = {}
-    for o in program.objects:                          # a table's start: its name, or code forming its address
-        if o.section != ".data":                       # point, 16 bytes in (one object, or two at that point)
-            continue
-        if o.name.startswith("_ZTV") or o.size >= 24 and o.address + 16 in formed:
-            start, size = o.address, o.size
-        elif o.address in formed and o.address - 16 not in holders and \
-                (head := program.object_at(o.address - 16)) is not None and head.address == o.address - 16:
-            start, size = head.address, 16 + o.size
-        else:
-            continue
-        groups = _groups(program, start, size)
-        if groups:
-            holders[start] = [s for g in groups for s in g.slots if isinstance(s, int)]
+    holders = _class_tables(program)
     count = collections.Counter(s for slots in holders.values() for s in set(slots))
     index = program.function_index
     own_files = {i: f for i, f in ev.files.items() if i not in ev.placed}
@@ -335,14 +320,6 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
                     out.append((min(own), max(own), f"the table at {text(address)}, its class's code forming its "
                                                     "address and the functions only it holds"))
             continue
-        if table.scope != "weak" and table.address not in weak:
-            own = [index[s] for s in set(slots) if count[s] == 1 and s in index]
-            strong = [i for i in own if program.functions[i].address not in weak]
-            inline = [i for i in own if program.functions[i].address in weak]
-            if strong and inline and max(strong) < max(inline) and max(inline) - max(strong) <= CLASS_SPAN and \
-                    len({own_files[i] for i in range(max(strong), max(inline) + 1) if i in own_files}) <= 1:
-                out.append((max(strong), max(inline), f"the inline virtuals only the table at {text(address)} "
-                                                      "holds, emitted with its key function"))
         if not placeholder(table.name) or \
                 not placeholder(getattr(program.object_at(address + 16), "name", "lbl_")):
             continue                                   # a named class: its functions go by their class
@@ -352,6 +329,57 @@ def _table_joins(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
         if len({own_files[i] for i in range(own[0], own[-1] + 1) if i in own_files}) > 1:
             continue
         out.append((own[0], own[-1], f"the functions only the table at {text(address)} holds"))
+    return out
+
+
+def _class_tables(program: Program) -> dict[int, list[int]]:
+    """Itanium: each class table in .data (its start) -> the function addresses its slots hold."""
+    from .itanium import _groups
+    formed = {address for rows in program.refs.values() for _, address, kind in rows if kind == "addr"}
+    holders: dict[int, list[int]] = {}
+    for o in program.objects:                          # a table's start: its name, or code forming its address
+        if o.section != ".data":                       # point, 16 bytes in (one object, or two at that point)
+            continue
+        if o.name.startswith("_ZTV") or o.size >= 24 and o.address + 16 in formed:
+            start, size = o.address, o.size
+        elif o.address in formed and o.address - 16 not in holders and \
+                (head := program.object_at(o.address - 16)) is not None and head.address == o.address - 16:
+            start, size = head.address, 16 + o.size
+        else:
+            continue
+        groups = _groups(program, start, size)
+        if groups:
+            holders[start] = [s for g in groups for s in g.slots if isinstance(s, int)]
+    return holders
+
+
+def _key_function_tails(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:
+    """Itanium (Switch): a table with a key function (a strong table) is emitted in that function's unit alone,
+    with the inline virtuals only it holds, and the link keeps the first copy of each: one of them after the last
+    of the class's own strong methods in the table is that unit's code, so the run from that method to it is one
+    unit's, however long (another class's code between is that unit's too: a file defining several classes, whose
+    inlines clang emits at the unit's end), unless the code between cites two files. As sure as the code's
+    citations: where a file's evidence ends (`_untied`) before such an inline is no boundary."""
+    if program.platform.name != "switch":
+        return []
+    weak = _weak(program)
+    holders = _class_tables(program)
+    count = collections.Counter(s for slots in holders.values() for s in set(slots))
+    index = program.function_index
+    own_files = {i: f for i, f in ev.files.items() if i not in ev.placed}
+    text = program.platform.text
+    out = []
+    for address, slots in holders.items():
+        table = program.object_at(address)
+        if table.scope == "weak" or table.address in weak:
+            continue
+        own = [index[s] for s in set(slots) if count[s] == 1 and s in index]
+        strong = [i for i in own if program.functions[i].address not in weak]
+        inline = [i for i in own if program.functions[i].address in weak]
+        if strong and inline and max(strong) < max(inline) and \
+                len({own_files[i] for i in range(max(strong), max(inline) + 1) if i in own_files}) <= 1:
+            out.append((max(strong), max(inline), f"the inline virtuals only the table at {text(address)} "
+                                                  "holds, emitted with its key function"))
     return out
 
 
