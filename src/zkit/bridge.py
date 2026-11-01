@@ -1686,7 +1686,7 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
                 label = next(p.label for p in catalog if p.key == "extern_c")
                 for number, name in quality.extern_c_debt(texts[rel]):
                     externs[number].append({"key": "extern_c", "label": label, "text": f'extern "C" {name}'})
-            for number, line in enumerate(text_lines, 1):
+            for number, line in enumerate(quality.blank_comments(texts[rel]).splitlines(), 1):
                 if added is not None and number not in added:
                     continue
                 found_here = quality.findings(line, catalog, header=header, skip=("extern_c",)) + externs[number]

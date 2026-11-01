@@ -119,6 +119,14 @@ class AuditRegressions(unittest.TestCase):
         self.assertEqual(found[("decomp-placeholder", "TPlayer__sub_80003010")], "info")
         self.assertIn(("decomp-debt-added", "fn_80003030"), found)   # no function of the symbols is named so
 
+    def test_check_reads_a_line_inside_a_block_comment_as_comment(self):
+        from zkit.bridge import check
+        (self.decomp / "src/Doc.cpp").write_text("/*\n  the results are undefined.\n*/\nundefined4 g;\n",
+                                                 encoding="utf-8")
+        found = [(f["rule"], f["ref"]) for f in check(self.project, "decomp", paths=["src/Doc.cpp"])["findings"]
+                 if f["rule"].startswith("decomp-debt")]
+        self.assertEqual(found, [("decomp-debt-added", "src/Doc.cpp:4")])
+
     def test_git_worktree_is_its_own_working_tree(self):
         from zkit.bridge import check
         tree = self.native.parent / "native-wt"

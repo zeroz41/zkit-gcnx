@@ -121,6 +121,13 @@ def _strip_comments(text: str) -> str:
     return re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"', lambda m: "" if m[0][0] == "/" else '""', text, flags=re.S)
 
 
+def blank_comments(text: str) -> str:
+    """`text` with comments and string literals dropped as `_strip_comments` drops them, but every line kept in
+    place, so a line read on its own inside a block comment is not taken for code."""
+    return re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"',
+                  lambda m: "\n" * m[0].count("\n") if m[0][0] == "/" else '""', text, flags=re.S)
+
+
 _EXTERN_C = re.compile(_EXTERN_PATTERN + r"\s*")
 _ATTRIBUTE = re.compile(r"\b(?:__declspec|__attribute__|alignas)\s*\(")
 _NOT_DECLARED = re.compile(r"\s*(?:typedef|using|template|static_assert|namespace|extern\s*$)\b|"
