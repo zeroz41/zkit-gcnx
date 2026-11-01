@@ -59,7 +59,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
 # What `zkit new` writes for a game's own choices, to confirm or change with its first matched functions: a release
 # build, without exceptions or RTTI.
 STARTING_CFLAGS = {"gamecube": [], "switch": ["-O3", "-fno-exceptions", "-fno-rtti", "-std=gnu++17"]}
-UNIT_KEYS = {"compiler", "cflags", "extra_cflags", "includes", "compiler_version", "source_root", "clang_plugins"}
+UNIT_KEYS = {"compiler", "cflags", "extra_cflags", "includes", "compiler_version", "source_root", "clang_plugins",
+             "compiler_download"}
 PLUGINS = Path(__file__).parent / "clang_plugins"   # zkit's clang pass plugins (build.clang_plugins)
 
 

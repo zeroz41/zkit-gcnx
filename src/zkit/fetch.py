@@ -372,8 +372,8 @@ def _same(found: Any, mine: Path) -> bool:
 
 
 def ensure(project, names: list[str]) -> list[dict[str, Any]]:
-    """--download: each target's own pinned compiler archive when its compiler is missing, then every missing tool,
-    once per repository."""
+    """--download: each target's own pinned compiler archive (and each `build.units` override's) when its compiler
+    is missing, then every missing tool, once per repository."""
     from .build import settings
     fetched, done = [], set()
     for name in names:
@@ -381,8 +381,9 @@ def ensure(project, names: list[str]) -> list[dict[str, Any]]:
         root = project.root(target["repository"])
         config = settings(target)
         if config is not None and config["platform"] == "switch":
-            result = compiler_archive(root, config)
-            fetched += [result] if result else []
+            for own in [config, *({**config, **o} for o in config.get("units", {}).values() if "compiler_download" in o)]:
+                result = compiler_archive(root, own)
+                fetched += [result] if result else []
         for tool in needed(project, name):
             if (root, tool) in done:
                 continue

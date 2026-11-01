@@ -126,6 +126,22 @@ class FetchTests(unittest.TestCase):
             self.assertTrue((root / "repo/build/compilers/clang-4.0.1/bin/clang++").is_file())
             self.assertIsNone(fetch.compiler_archive(root / "repo", config))  # present: nothing to fetch
 
+    def test_a_unit_override_with_its_own_compiler_archive_is_fetched_too(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "repo/build/compilers/main/bin").mkdir(parents=True)
+            (root / "repo/build/compilers/main/bin/clang++").write_bytes(b"cc")
+            sha = _tarball(root / "clang-4.0.1.tar.xz", {"clang+llvm-4.0.1/bin/clang++": b"cc"})
+            project = _Project(root / "repo", "switch")
+            project._target["build"] = {"compiler": "build/compilers/main/bin/clang++", "units": {"lib/*": {
+                "compiler": "build/compilers/clang-4.0.1/bin/clang++",
+                "compiler_download": {"url": (root / "clang-4.0.1.tar.xz").as_uri(), "sha256": sha}}}}
+            with mock.patch.object(fetch, "needed", return_value=[]):
+                fetched = fetch.ensure(project, ["t"])
+                self.assertEqual([r["tool"] for r in fetched], ["compiler"])
+                self.assertTrue((root / "repo/build/compilers/clang-4.0.1/bin/clang++").is_file())
+                self.assertEqual(fetch.ensure(project, ["t"]), [])  # both present: nothing to fetch
+
 
 class _Project:
     """Just enough of a project for `needed`: one decomp repository and one target."""
