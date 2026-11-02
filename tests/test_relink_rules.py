@@ -164,6 +164,64 @@ class UnitEvidenceTests(unittest.TestCase):
         code.platform = GameCube()
         self.assertEqual(units._first_users(code), [])
 
+    def test_a_weak_marked_table_holding_its_class_s_own_definition_is_its_key_function_s(self):
+        """W's table is marked weak and 2 forms its address, but it holds W's unmarked 5, defined among the code
+        (6 is no slot of it) before its inline virtuals 8 and 9: W has a key function, so 8 and 9 are not 2's.
+        Base B's inline virtual 1, held too, is emitted earlier for another table and does not count. Held right
+        before them (7, a run with them), by another table too (a folded or inherited body) or by a class
+        template's table, the mark stands."""
+        from types import SimpleNamespace
+        from unittest import mock
+        code = _Code(12, weak=[1, 8, 9])
+        address = lambda i: code.functions[i].address
+        code.function_index = {f.address: i for i, f in enumerate(code.functions)}
+        code.refs = {2: [(0, 0x9010, "addr")]}
+
+        def first_users(own: int, symbol: str = "_ZTV1W", name: str = "W",
+                        shared: bool = False) -> list[tuple[int, int]]:
+            table = DataObject(0x9000, 0x40, symbol, ".data", "weak")
+            other = DataObject(0xA000, 0x40, "_ZTV1V", ".data", "global")
+            code.object_at = lambda a: table if 0x9000 <= a < 0x9040 else other if 0xA000 <= a < 0xA040 else None
+            code.users = lambda: {table: {2}}
+            code.pointers = [(0x9010 + 8 * k, address(i)) for k, i in enumerate((own, 8, 9, 1))]
+            code.pointers += [(0xA010, address(own))] if shared else []
+            named = {address(i): SimpleNamespace(thunk=False, owner=name) for i in (own, 8, 9)}
+            named[address(1)] = SimpleNamespace(thunk=False, owner="B")
+            code.cache = {}
+            with mock.patch("zkit.itanium.methods", return_value=named):
+                return [(lo, hi) for lo, hi, _ in units._first_users(code)]
+        self.assertEqual(first_users(5), [])
+        self.assertEqual(first_users(7), [(2, 8), (2, 9)])
+        self.assertEqual(first_users(5, shared=True), [(2, 8), (2, 9)])
+        self.assertEqual(first_users(5, "_ZTV1WIiE", "W<int>"), [(2, 8), (2, 9)])
+
+    def test_a_weak_marked_table_with_a_key_function_is_its_key_function_s_unit_s(self):
+        """W's table is marked weak and a.cpp's 2 forms its address, but it holds W's unmarked 5, among b.cpp's code
+        apart from W's inline virtuals 8 and 9: W has a key function in b.cpp, and the table is b.cpp's data, not
+        its first user's. Held right before them (7, a run with them), the mark stands: the table goes by its users."""
+        from types import SimpleNamespace
+        from unittest import mock
+        code = _Code(12, weak=[8, 9])
+        address = lambda i: code.functions[i].address
+        owner = {i: "a.cpp" if i < 4 else "b.cpp" for i in range(12)}
+        table = DataObject(0x9000, 0x40, "_ZTV1W", ".data", "weak")
+        code.objects = [table]
+        code.object_at = lambda a: table if 0x9000 <= a < 0x9040 else None
+        code.refs = {2: [(0, 0x9010, "addr")]}
+        code.users = lambda: {table: {2}}
+
+        def rows(own: int) -> list[tuple[int, int, str, str]]:
+            code.pointers = [(0x9010 + 8 * k, address(i)) for k, i in enumerate((own, 8, 9))]
+            named = {address(i): SimpleNamespace(thunk=False, owner="W") for i in (own, 8, 9)}
+            classes = {"W": SimpleNamespace(name="W", table=0x9000, groups=[SimpleNamespace(
+                slots=[address(i) for i in (own, 8, 9)])])}
+            code.cache = {}
+            with mock.patch("zkit.itanium.recover", return_value=classes), \
+                    mock.patch("zkit.itanium.methods", return_value=named):
+                return units._key_function_tables(code, owner, set(code.image.weak))
+        self.assertEqual(rows(5), [(0x9000, 0x9040, "b.cpp", ".data")])
+        self.assertEqual(rows(7), [])
+
     def test_two_files_own_citations_part_whatever_data_joins_them(self):
         """3 cites a.cpp and 9 cites b.cpp themselves, with another build's units for 5 and 6 between and a global
         (2-12) holding everything together: a boundary still falls between 3 and 9, though not inside 5-7, where a

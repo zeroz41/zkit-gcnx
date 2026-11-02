@@ -790,13 +790,8 @@ def _first_users(program: Program) -> list[tuple[int, int, str]]:
             target = index.get(address)
             if target is not None:
                 use(target, user)
-    held: dict[DataObject, set[int]] = collections.defaultdict(set)    # weak table -> the weak functions in it
-    for holder, pointee in program.pointers:
-        target = index.get(pointee)
-        if target is not None and functions[target].address in weak:
-            table = program.object_at(holder)
-            if table is not None and (table.scope == "weak" or table.address in weak):
-                held[table].add(target)
+    keyed = _keyed_weak_tables(program)
+    held = {t: fs for t, fs in _weak_tables(program).items() if t.address not in keyed}
     if held:
         for table, users in program.users().items():
             for target in held.get(table, ()):
@@ -805,6 +800,74 @@ def _first_users(program: Program) -> list[tuple[int, int, str]]:
     text = program.platform.text
     return [(user, target, f"{functions[target].name} is first used by {functions[user].name} "
                            f"({text(functions[user].address)})") for target, user in sorted(first.items())]
+
+
+def _weak_tables(program: Program) -> dict[DataObject, set[int]]:
+    """Each table marked weak -> the weak functions it holds."""
+    if "weak tables" not in program.cache:
+        functions, index, weak = program.functions, program.function_index, _weak(program)
+        held: dict[DataObject, set[int]] = collections.defaultdict(set)
+        for holder, pointee in program.pointers:
+            target = index.get(pointee)
+            if target is not None and functions[target].address in weak:
+                table = program.object_at(holder)
+                if table is not None and (table.scope == "weak" or table.address in weak):
+                    held[table].add(target)
+        program.cache["weak tables"] = dict(held)
+    return program.cache["weak tables"]
+
+
+def _keyed_weak_tables(program: Program) -> set[int]:
+    """The tables marked weak that have a key function all the same (`_keyed_tables`)."""
+    if "keyed tables" not in program.cache:
+        program.cache["keyed tables"] = _keyed_tables(program, _weak(program), _weak_tables(program))
+    return program.cache["keyed tables"]
+
+
+def _keyed_tables(program: Program, weak: set[int], held: dict[DataObject, set[int]]) -> set[int]:
+    """Itanium: a class with a virtual of its own defined out of line has a key function, so a table marked weak
+    holds no such definition. Where one holds a method of its own class that carries no weak mark and lies among
+    the code before the class's own inline virtuals in it, apart from their run (another function between), the
+    class gained its key function and the mark is another build's: the table and what it holds are emitted with
+    that function, not with the code first using the table. A base's inline virtual it holds may come earlier,
+    emitted for another class's table. A body other tables hold too says nothing of the class: the linker folds
+    identical inline bodies of unrelated classes into one, and a derived class inherits its base's. A class
+    template's tables are weak whatever their
+    methods (an explicit specialization of a member is strong)."""
+    from .itanium import methods
+    from .platform import demangle_itanium
+    tables = [t for t in held if t.name.startswith("_ZTV")]
+    if not tables:
+        return set()
+    index = program.function_index
+    holders: dict[int, set[int]] = collections.defaultdict(set)     # function -> the tables holding it
+    slots: dict[int, set[int]] = collections.defaultdict(set)       # table -> the functions it holds
+    for holder, pointee in program.pointers:
+        found = program.object_at(holder) if pointee in index else None
+        if found is not None:
+            holders[index[pointee]].add(found.address)
+            slots[found.address].add(index[pointee])
+    classes = {t: (text or "").removeprefix("vtable for ") for t, text in
+               zip(tables, demangle_itanium([t.name for t in tables]))}
+    named = methods(program)
+    out = set()
+    for table in tables:
+        name = classes[table]
+        if not name or "<" in name:
+            continue
+        own = [k for k in held[table] if getattr(named.get(program.functions[k].address), "owner", None) == name]
+        if not own:
+            continue
+        first = min(own)
+        for i in sorted(k for k in slots[table.address] if k < first):
+            method, slot = named.get(program.functions[i].address), program.functions[i].address
+            if method is None or method.thunk or method.owner != name or slot in weak or \
+                    program.functions[i].scope == "weak" or holders[i] != {table.address}:
+                continue
+            if any(table.address not in holders[k] for k in range(i + 1, first)):
+                out.add(table.address)
+                break
+    return out
 
 
 SDK_MARKER = "__nnDetailNintendoSdk"   # NintendoSDK's own objects: `__nnDetailNintendoSdkRuntimeObjectFile`, ...
@@ -2329,13 +2392,16 @@ def _key_function_tables(program: Program, owner: dict[int, str], weak: set[int]
     """Itanium class tables with a key function (the class's first virtual defined out of line): clang emits such
     a table in that function's unit alone, whatever other code refers to it (a template instance in another file
     that builds the class). So a strong table whose class's own strong methods in its slots are all in one unit
-    is that unit's. A weak table (no key function) goes by its users."""
+    is that unit's. A weak table (no key function) goes by its users, unless its class has a key function all
+    the same, the mark being another build's (`_keyed_tables`)."""
     from .itanium import methods, recover
     named = methods(program)
+    keyed = _keyed_weak_tables(program)
     out = []
     for cls in recover(program).values():
         table = program.object_at(cls.table) if cls.table is not None else None
-        if table is None or table.address != cls.table or table.scope == "weak" or table.address in weak:
+        if table is None or table.address != cls.table or \
+                (table.scope == "weak" or table.address in weak) and table.address not in keyed:
             continue
         homes = set()
         for group in cls.groups:
