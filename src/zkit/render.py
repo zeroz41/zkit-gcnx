@@ -1138,6 +1138,14 @@ def misses_retry(data: dict) -> str:
                      f"{e['headers']} headers; zkit misses {e['candidate']} --restore DIR)")
     for e in data["improved"]:
         lines.append(f"  closer {e['address']} {e['function']}: {e['kept_as']} -> {e['now']} ({e['candidate']})")
+    whole = [c for c in data.get("candidates", []) if not c["lost"] and not c["dropped"]]
+    if data.get("candidates"):
+        lines.append(f"  candidates gaining against the tree's build: {len(data['candidates'])}, "
+                     f"{len(whole)} with nothing lost or left out (the file can replace the unit's)")
+    for c in data.get("candidates", [])[:40]:
+        lines.append(f"  +{len(c['gained'])} LOST {len(c['lost'])} left out {c['dropped']} {c['unit']} "
+                     f"({c['headers']} headers{'; debt ' + ', '.join(c['debt']) if c['debt'] else ''}) "
+                     f"{c['candidate']} {c.get('source') or ''}")
     return "\n".join(lines)
 
 

@@ -315,7 +315,7 @@ def _check(manifest: str, target: str, unit: str, text: bytes, headers: list[dic
         except Exception as error:  # noqa: BLE001 - one unusable candidate must not stop the rest
             return {"compiled": False, "errors": str(error)}
     return {"compiled": data.get("compiled", False), "functions": data.get("functions", []),
-            "errors": (data.get("errors") or "")[-400:]}
+            "tree": data.get("tree"), "debt": data.get("debt", []), "errors": (data.get("errors") or "")[-400:]}
 
 
 def _jobs(jobs: int | None) -> int:
@@ -357,6 +357,7 @@ def retry(project: Project, target: str, query: str | None = None, unit: str | N
     findings: dict[str, dict] = {}
     compiled = failed = 0
     new_rows: list[dict] = []
+    candidates: list[dict] = []
     names: dict[str, str] = {}
     with concurrent.futures.ProcessPoolExecutor(max_workers=_jobs(jobs)) as pool:
         futures = {}
@@ -379,6 +380,15 @@ def retry(project: Project, target: str, query: str | None = None, unit: str | N
                 failed += 1
                 continue
             compiled += 1
+            tree = data.get("tree") or {}
+            written = written_in_tree(project, target, row.get("unit") or "")
+            dropped = sorted(f["function"] for f in data["functions"] if f.get("missing") and f["function"] in written)
+            if tree.get("gained"):
+                candidates.append({"candidate": row["candidate"], "unit": row.get("unit"), "source": row.get("source"),
+                                   "headers": "kept copies" if with_headers else "tree's",
+                                   "gained": [g["function"] for g in tree["gained"]],
+                                   "lost": [g["function"] for g in tree.get("lost", [])],
+                                   "dropped": len(dropped), "debt": data.get("debt", [])})
             functions = [f for f in data["functions"] if not f.get("missing")]
             names.update(addresses_by_name(project, target, (f["function"] for f in functions
                                                              if f["function"] not in names)))
@@ -414,8 +424,25 @@ def retry(project: Project, target: str, query: str | None = None, unit: str | N
             improved.append(entry)
     identical.sort(key=lambda e: e["address"])
     improved.sort(key=lambda e: e["address"])
+    # whole candidates worth merging: what each gains against the tree's build, loses, and leaves out of what the
+    # tree has written (a fragment leaves out most of its unit: its functions are spliced in, not the file)
+    candidates.sort(key=lambda c: (bool(c["lost"]), c["dropped"] > 0, -len(c["gained"]), c["headers"] != "tree's"))
     return {"functions": len(groups), "compiles": len(work), "compiled": compiled, "failed": failed,
-            "identical": identical, "improved": improved, "seconds": round(time.monotonic() - started, 1)}
+            "identical": identical, "improved": improved, "candidates": candidates,
+            "seconds": round(time.monotonic() - started, 1)}
+
+
+_WRITTEN: dict[tuple[str, str], set[str]] = {}
+
+
+def written_in_tree(project: Project, target: str, unit: str) -> set[str]:
+    """The functions of a unit the tree's report measures (written in the tree's source, matched or not)."""
+    key = (target, unit)
+    if key not in _WRITTEN:
+        from .index import connect
+        _WRITTEN[key] = {r["name"] for r in connect(project).execute(
+            "SELECT name FROM functions WHERE target = ? AND unit = ? AND match IS NOT NULL", (target, unit))}
+    return _WRITTEN[key]
 
 
 def _unit_of_file(project: Project, target: str, text: str) -> str | None:

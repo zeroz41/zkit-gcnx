@@ -90,6 +90,9 @@ class MissesTests(unittest.TestCase):
             second = misses.retry(project, "test", unit="a", jobs=1)
             found = next(e for e in second["identical"] if e["function"] == "_Z6scaledi")
             self.assertEqual(found["headers"], "tree's")
+            whole = next(c for c in second["candidates"] if c["headers"] == "tree's")
+            self.assertIn("_Z6scaledi", whole["gained"])                 # and both, which inlines it
+            self.assertEqual((whole["lost"], whole["dropped"]), ([], 0))
             self.assertEqual(misses.best(project, "test", found["address"])["origin"], "retry")
 
     def test_import_keeps_a_work_file_with_the_headers_beside_it(self):
