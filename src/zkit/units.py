@@ -770,7 +770,10 @@ def _first_users(program: Program) -> list[tuple[int, int, str]]:
     first refers to it there, and the linker keeps the copy of the unit it links first. So a weak function is in
     the unit of the earliest code referring to it: no boundary falls between the two. A table with a key function
     is emitted in that function's unit alone, and so are the inline virtuals only it holds: only weak tables
-    count. Code after the function (a global's constructor run by its unit's static initializer) says nothing."""
+    count. Code after the function (a global's constructor run by its unit's static initializer) says nothing,
+    unless that unit's own static initializer is all that refers to it and no data holds it: a namespace-scope
+    global's initializer (registering its destructor with `__cxa_atexit`) creates the function where the global
+    is defined, ahead of the code after it, and no other unit kept a copy; the initializer ends that unit."""
     if program.platform.name != "switch":
         return []
     functions, index = program.functions, program.function_index
@@ -778,6 +781,7 @@ def _first_users(program: Program) -> list[tuple[int, int, str]]:
     if not weak:
         return []
     first: dict[int, int] = {}
+    coded: dict[int, set[int]] = collections.defaultdict(set)     # weak function -> the code referring to it
 
     def use(target: int, user: int) -> None:
         if user < first.get(target, target) and functions[target].address in weak:
@@ -785,11 +789,13 @@ def _first_users(program: Program) -> list[tuple[int, int, str]]:
     for user, callees in program.calls.items():
         for target in callees:
             use(target, user)
+            coded[target].add(user)
     for user, rows in program.refs.items():
         for _, address, _ in rows:
             target = index.get(address)
             if target is not None:
                 use(target, user)
+                coded[target].add(user)
     keyed = _keyed_weak_tables(program)
     held = {t: fs for t, fs in _weak_tables(program).items() if t.address not in keyed}
     if held:
@@ -798,8 +804,23 @@ def _first_users(program: Program) -> list[tuple[int, int, str]]:
                 for user in users:
                     use(target, user)
     text = program.platform.text
-    return [(user, target, f"{functions[target].name} is first used by {functions[user].name} "
+    rows = [(user, target, f"{functions[target].name} is first used by {functions[user].name} "
                            f"({text(functions[user].address)})") for target, user in sorted(first.items())]
+    own = _initializers(program)
+    later: dict[int, int] = {}          # weak function -> the one initializer after it referring to it, with no
+    for target, users in coded.items():     # other unit's initializer (its end) between the two
+        users = users - {target}
+        if len(users) == 1 and target not in first and functions[target].address in weak:
+            user = next(iter(users))
+            k = bisect.bisect_right(own, target)
+            if k < len(own) and own[k] == user:
+                later[target] = user
+    if later:
+        pointed = {pointee for _, pointee in program.pointers}
+        rows += [(target, user, f"{functions[target].name} is used only by {functions[user].name} "
+                                f"({text(functions[user].address)}), its unit's static initializer")
+                 for target, user in sorted(later.items()) if functions[target].address not in pointed]
+    return rows
 
 
 def _weak_tables(program: Program) -> dict[DataObject, set[int]]:

@@ -164,6 +164,22 @@ class UnitEvidenceTests(unittest.TestCase):
         code.platform = GameCube()
         self.assertEqual(units._first_users(code), [])
 
+    def test_a_weak_function_only_a_later_static_initializer_uses_is_that_unit_s(self):
+        """Weak 2's address is taken only by 4, its unit's static initializer (a global's destructor registered at
+        exit), and 7's only by the initializer 8: each is that unit's, created where the global is defined. 3 is
+        used only by 8 too, but 4 ends a unit between them; 5 is called by 6 as well; data holds 6."""
+        code = _Code(10, weak=[2, 3, 5, 6, 7])
+        address = lambda i: code.functions[i].address
+        code.calls = {6: [5], 8: [5]}
+        code.refs = {4: [(0, address(2), "addr")], 8: [(0, address(i), "addr") for i in (3, 6, 7)]}
+        code.pointers = [(0x9000, address(6))]
+        code.object_at = lambda a: None
+        with unittest.mock.patch.object(units, "_initializers", return_value=[4, 8]):
+            self.assertEqual([(lo, hi) for lo, hi, _ in units._first_users(code)], [(2, 4), (7, 8)])
+            from zkit.platform import GameCube
+            code.platform = GameCube()
+            self.assertEqual(units._first_users(code), [])
+
     def test_a_weak_marked_table_holding_its_class_s_own_definition_is_its_key_function_s(self):
         """W's table is marked weak and 2 forms its address, but it holds W's unmarked 5, defined among the code
         (6 is no slot of it) before its inline virtuals 8 and 9: W has a key function, so 8 and 9 are not 2's.
