@@ -206,8 +206,9 @@ def test_sweep_parses_and_compiles_with_the_header_copies(tmp_path):
 
     def compile_(project, target, unit, text, work, includes=None):
         seen.append(includes)
-        return None, "", ""
+        return (Path(work) / "a.o" if len(seen) == 1 else None), "", ""
     with mock.patch("zkit.index.refresh"), mock.patch("zkit.index.connect"), \
+            mock.patch("zkit.elf.Elf.load"), mock.patch("zkit.objects._find", return_value=object()), \
             mock.patch("zkit.index.containing", return_value=row), \
             mock.patch("zkit.bridge.resolve", return_value=[0x10]), \
             mock.patch("zkit.objects.objdiff_units", return_value={"a": unit}), \
@@ -263,11 +264,59 @@ def test_a_placeholder_is_swept_under_the_name_the_candidate_defines(tmp_path):
                                      root, "src/a.cpp")), \
             mock.patch("zkit.candidate._scratch", return_value=tmp_path), \
             mock.patch("zkit.candidate._compile", side_effect=compile_), \
+            mock.patch("zkit.elf.Elf.load"), \
+            mock.patch("zkit.objects._find", side_effect=lambda elf, name: name == "_ZN6Holder3runEi" or None), \
             mock.patch("zkit.sweep.score", side_effect=score_):
         result = sweep.sweep(project, "main", "0x10", candidate, out=tmp_path / "best.cpp", jobs=1, rounds=1,
                              symbol="_ZN6Holder3runEi")
     assert scored and all(pair == ("fn_10", "_ZN6Holder3runEi") for pair in scored)
     assert result["symbol"] == "_ZN6Holder3runEi"
+
+
+def _refusal(tmp_path, source, compiled=True, defines=True):
+    """What the sweep refuses `source` with, its compile and the built object's symbols faked."""
+    from types import SimpleNamespace
+    from unittest import mock
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True, exist_ok=True)
+    candidate = tmp_path / "candidate.cpp"
+    candidate.write_text(source, encoding="utf-8")
+    project = SimpleNamespace(target=lambda name: {"repository": "decomp"}, root=lambda repo: root)
+    unit = {"name": "a", "target_path": "orig/a.o", "metadata": {"source_path": "src/a.cpp"}}
+    row = {"address": 0x10, "name": "_ZN6Holder3runEi", "demangled": "Holder::run(int)", "unit": "a"}
+
+    def compile_(project, target, unit, text, work, includes=None):
+        return (Path(work) / "a.o", "", "") if compiled else (None, "", "a.cpp:2:1: error: expected ';'")
+    with mock.patch("zkit.index.refresh"), mock.patch("zkit.index.connect"), \
+            mock.patch("zkit.index.containing", return_value=row), \
+            mock.patch("zkit.bridge.resolve", return_value=[0x10]), \
+            mock.patch("zkit.objects.objdiff_units", return_value={"a": unit}), \
+            mock.patch("zkit.objects.label_reader"), \
+            mock.patch("zkit.candidate.compile_command",
+                       return_value=(["cc", "--target=aarch64-none-elf", "-std=gnu++14", "-c", "src/a.cpp"],
+                                     root, "src/a.cpp")), \
+            mock.patch("zkit.candidate._scratch", return_value=tmp_path), \
+            mock.patch("zkit.candidate._compile", side_effect=compile_), \
+            mock.patch("zkit.elf.Elf.load"), \
+            mock.patch("zkit.objects._find", return_value=object() if defines else None):
+        try:
+            sweep.sweep(project, "main", "0x10", candidate, out=tmp_path / "best.cpp", jobs=1, rounds=1)
+        except ValueError as error:
+            return str(error)
+    return None
+
+
+HOLDER = "struct Holder { int a; int b; void run(int n); };\n"
+
+
+@unittest.skipUnless(CLANG, "needs a host clang that writes JSON ASTs")
+def test_the_sweep_says_why_it_cannot_start(tmp_path):
+    """A parse error, a body with nothing to rewrite, a compile error and a missing symbol are told apart."""
+    assert "parse failed" in _refusal(tmp_path, HOLDER + "void Holder::run(int n) { a = n + }\n")
+    assert "no rewrite applies" in _refusal(tmp_path, HOLDER + "void Holder::run(int n) {}\n")
+    swept = HOLDER + "void Holder::run(int n) { a = n + b; b += n; }\n"
+    assert "does not compile" in _refusal(tmp_path, swept, compiled=False)
+    assert "--symbol" in _refusal(tmp_path, swept, defines=False)
 
 
 VALUES_SOURCE = """struct Vec3 {

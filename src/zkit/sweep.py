@@ -1618,6 +1618,7 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
     `symbol` is the function's name in the candidate when it differs from the original's (a placeholder the
     candidate already defines under its mangled name, ahead of the rename)."""
     from . import bridge, objects
+    from .elf import Elf
     from .candidate import _compile, _planned_source, _scratch, compile_command
     from .index import connect, containing, refresh
     clang = host_clang()
@@ -1650,12 +1651,15 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
     text = candidate.read_text(encoding="utf-8", errors="replace")
     work_root = Path(tempfile.mkdtemp(prefix="zkit-sweep-", dir=_scratch(project, target)))
 
+    parsed: dict[str, Any] = {}
+
     def propose(source: str) -> list[Rewrite]:
         path = work_root / f"parse{candidate.suffix or '.cpp'}"
         path.write_text(source, encoding="utf-8")
         dump = subprocess.run(parse_command(argv, clang, path, simple, searched), capture_output=True,
                               text=True, encoding="utf-8", errors="replace", timeout=120)
         body = body_of(definitions(dump.stdout), source, simple, built_name)
+        parsed.update(body=body, errors=_errors(dump.stderr) if dump.returncode else [])
         return rewrites(source, body, components) if body else []
 
     records: dict[str, tuple[str, ...] | None] = {}
@@ -1676,7 +1680,19 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
 
     try:
         if not propose(text):
-            raise ValueError(f"no definition of {simple} with a body found in {candidate} (or nothing to rewrite)")
+            reason = (f"; the host clang's parse failed: {'; '.join(parsed['errors'])}" if parsed.get("errors")
+                      else "")
+            if parsed.get("body") is not None:
+                raise ValueError(f"no rewrite applies to {simple} in {candidate}{reason}")
+            raise ValueError(f"no definition of {simple} with a body found in {candidate}{reason}")
+        with tempfile.TemporaryDirectory(dir=work_root) as work:
+            built, _, messages = _compile(project, target, unit, text, Path(work), includes)
+            if built is None:
+                raise ValueError(f"{candidate} does not compile with its unit's command: "
+                                 f"{'; '.join(_errors(messages)) or 'no messages'}")
+            if objects._find(Elf.load(built), built_name) is None:
+                raise ValueError(f"{candidate} compiles but defines no {built_name}"
+                                 + ("" if symbol else "; name the candidate's symbol with --symbol"))
         result = climb(text, propose, evaluate, jobs or max(1, (os.cpu_count() or 2) // 2), rounds, seconds)
     finally:
         shutil.rmtree(work_root, ignore_errors=True)
@@ -1688,6 +1704,11 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
             **({"symbol": symbol} if symbol else {}),
             "candidate": str(candidate), **({"includes": [str(f) for f in includes]} if includes else {}),
             "written": str(destination), **result}
+
+
+def _errors(messages: str, limit: int = 3) -> list[str]:
+    """The first `limit` error lines of a compiler's messages."""
+    return [line.strip() for line in (messages or "").splitlines() if "error" in line.lower()][:limit]
 
 
 def _simple_name(demangled: str) -> str:
