@@ -223,6 +223,53 @@ def test_sweep_parses_and_compiles_with_the_header_copies(tmp_path):
     assert result["includes"] == [str(copies)] and (tmp_path / "best.cpp").is_file()
 
 
+def test_sweep_takes_the_candidates_symbol():
+    from zkit.cli import build_parser
+    args = build_parser().parse_args(["sweep", "0x10", "a.cpp", "--symbol", "_ZN6Holder3runEi"])
+    assert args.symbol == "_ZN6Holder3runEi"
+
+
+@unittest.skipUnless(CLANG, "needs a host clang that writes JSON ASTs")
+def test_a_placeholder_is_swept_under_the_name_the_candidate_defines(tmp_path):
+    """The original still names the function by its placeholder; the candidate defines it as a method ahead of
+    the rename: the parse finds that method and every score reads the built object under its mangled name."""
+    from types import SimpleNamespace
+    from unittest import mock
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    candidate = tmp_path / "candidate.cpp"
+    candidate.write_text("struct Holder { int a; int b; void run(int n); };\n"
+                         "void Holder::run(int n) { a = n + b; b += n; }\n", encoding="utf-8")
+    project = SimpleNamespace(target=lambda name: {"repository": "decomp"}, root=lambda repo: root)
+    unit = {"name": "a", "target_path": "orig/a.o", "metadata": {"source_path": "src/a.cpp"}}
+    row = {"address": 0x10, "name": "fn_10", "demangled": "fn_10", "unit": "a"}
+    scored = []
+
+    def compile_(project, target, unit, text, work, includes=None):
+        built = Path(work) / "a.o"
+        built.write_bytes(b"")
+        return built, "", ""
+
+    def score_(original, built, name, labels=None, built_name=None):
+        scored.append((name, built_name))
+        return sweep.FAILED
+    with mock.patch("zkit.index.refresh"), mock.patch("zkit.index.connect"), \
+            mock.patch("zkit.index.containing", return_value=row), \
+            mock.patch("zkit.bridge.resolve", return_value=[0x10]), \
+            mock.patch("zkit.objects.objdiff_units", return_value={"a": unit}), \
+            mock.patch("zkit.objects.label_reader"), \
+            mock.patch("zkit.candidate.compile_command",
+                       return_value=(["cc", "--target=aarch64-none-elf", "-std=gnu++14", "-c", "src/a.cpp"],
+                                     root, "src/a.cpp")), \
+            mock.patch("zkit.candidate._scratch", return_value=tmp_path), \
+            mock.patch("zkit.candidate._compile", side_effect=compile_), \
+            mock.patch("zkit.sweep.score", side_effect=score_):
+        result = sweep.sweep(project, "main", "0x10", candidate, out=tmp_path / "best.cpp", jobs=1, rounds=1,
+                             symbol="_ZN6Holder3runEi")
+    assert scored and all(pair == ("fn_10", "_ZN6Holder3runEi") for pair in scored)
+    assert result["symbol"] == "_ZN6Holder3runEi"
+
+
 VALUES_SOURCE = """struct Vec3 {
     float x, y, z;
     Vec3() {}

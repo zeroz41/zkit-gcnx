@@ -196,6 +196,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--seconds", type=float, default=600.0)
     c.add_argument("--include", type=Path, action="append", default=[], metavar="DIR",
                    help="header copies searched before the tree's (repeatable), as for try")
+    c.add_argument("--symbol", help="the function's mangled name in the candidate when it differs from the "
+                                    "original's (a placeholder defined under its real name ahead of the rename)")
     c = add("objects", help="Prove a change kept the code: --save copies every built object, --compare (after the "
                             "build) checks each against its copy modulo intended renames")
     c.add_argument("--save", action="store_true")
@@ -752,7 +754,7 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
     if command == "sweep":
         from .sweep import sweep
         data = sweep(project, target, args.query, args.candidate, args.out, args.jobs, args.rounds, args.seconds,
-                     _folders(args.include))
+                     _folders(args.include), args.symbol)
         lines = [f"{data['address']} {data['function']}: {data['score']} after {len(data['history']) - 1} "
                  f"rewrite(s); {data['variants_compiled']} variants compiled in {data['seconds']} s"]
         lines += [f"  {step['score']:<36} {step['step']}" for step in data["history"]]

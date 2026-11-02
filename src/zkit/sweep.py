@@ -1438,24 +1438,25 @@ def _aligned(a: list[int], b: list[int]) -> tuple[int, frozenset]:
     return len(a) + len(b) - 2 * len(paired), frozenset(range(len(a))) - paired
 
 
-def score(original_path: Path, built_path: Path, name: str, labels=None) -> Score:
-    """The `Score` of `name` compiled (built_path) against the original's object; relocated words compare by
-    their opcode byte (what they reach is the link's to prove), and `objects.function_diff` decides identity."""
+def score(original_path: Path, built_path: Path, name: str, labels=None, built_name: str | None = None) -> Score:
+    """The `Score` of `name` compiled (built_path, as `built_name` when it is named differently there) against the
+    original's object; relocated words compare by their opcode byte (what they reach is the link's to prove), and
+    `objects.function_diff` decides identity."""
     import struct
     from . import objects
     from .elf import Elf
-    diff = objects.function_diff(original_path, built_path, name, labels=labels, limit=0)
+    diff = objects.function_diff(original_path, built_path, name, built_name, labels=labels, limit=0)
     if diff.get("missing"):
         return FAILED
     if diff.get("exact"):
         return Score(True, 0, 0, 0)
     streams = []
     mask = REGISTERS
-    for path in (original_path, built_path):
+    for path, wanted in ((original_path, name), (built_path, built_name or name)):
         elf = Elf.load(path)
         if elf.endian == ">":
             mask = PPC_REGISTERS
-        symbol = objects._find(elf, name)
+        symbol = objects._find(elf, wanted)
         section = elf.sections[symbol.section]
         raw = elf.data(section)[symbol.value:symbol.value + symbol.size]
         relocated = objects._relocs(elf, section, symbol.value, symbol.value + symbol.size, {})
@@ -1610,9 +1611,12 @@ def parse_command(argv: list[str], clang: str, source: Path, name: str,
 
 
 def sweep(project, target: str, query: str, candidate: Path, out: Path | None = None, jobs: int | None = None,
-          rounds: int = 12, seconds: float = 600.0, includes: list[Path] | None = None) -> dict[str, Any]:
+          rounds: int = 12, seconds: float = 600.0, includes: list[Path] | None = None,
+          symbol: str | None = None) -> dict[str, Any]:
     """Sweep the rewrites of one function in `candidate` (a file `zkit try` takes) and write the best text;
-    `includes` are header copies searched before the tree's headers, in the parse and in every compile."""
+    `includes` are header copies searched before the tree's headers, in the parse and in every compile.
+    `symbol` is the function's name in the candidate when it differs from the original's (a placeholder the
+    candidate already defines under its mangled name, ahead of the rename)."""
     from . import bridge, objects
     from .candidate import _compile, _planned_source, _scratch, compile_command
     from .index import connect, containing, refresh
@@ -1633,7 +1637,12 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
     root = project.root(project.target(target)["repository"])
     original = root / unit["target_path"]
     labels = objects.label_reader(project, target)
-    simple = _simple_name(row["demangled"] or row["name"])
+    built_name = symbol or row["name"]
+    if symbol:
+        from .platform import demangle_itanium
+        simple = _simple_name(demangle_itanium([symbol])[0] or symbol)
+    else:
+        simple = _simple_name(row["demangled"] or row["name"])
     argv, _, _ = compile_command(project, target, unit)
     unit_source = (unit.get("metadata") or {}).get("source_path") or _planned_source(project, target, unit)
     # the compile's search order: header copies, then the unit's folder (its quoted includes)
@@ -1646,7 +1655,7 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
         path.write_text(source, encoding="utf-8")
         dump = subprocess.run(parse_command(argv, clang, path, simple, searched), capture_output=True,
                               text=True, encoding="utf-8", errors="replace", timeout=120)
-        body = body_of(definitions(dump.stdout), source, simple, row["name"])
+        body = body_of(definitions(dump.stdout), source, simple, built_name)
         return rewrites(source, body, components) if body else []
 
     records: dict[str, tuple[str, ...] | None] = {}
@@ -1663,7 +1672,7 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
     def evaluate(source: str) -> Score:
         with tempfile.TemporaryDirectory(dir=work_root) as work:
             built, _, _ = _compile(project, target, unit, source, Path(work), includes)
-            return FAILED if built is None else score(original, built, row["name"], labels)
+            return FAILED if built is None else score(original, built, row["name"], labels, built_name)
 
     try:
         if not propose(text):
@@ -1676,6 +1685,7 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
     destination.write_text(result.pop("text"), encoding="utf-8")
     from .index import address_text
     return {"address": address_text(row["address"]), "function": row["name"], "unit": row["unit"],
+            **({"symbol": symbol} if symbol else {}),
             "candidate": str(candidate), **({"includes": [str(f) for f in includes]} if includes else {}),
             "written": str(destination), **result}
 
