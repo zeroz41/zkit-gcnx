@@ -198,6 +198,24 @@ def build_parser() -> argparse.ArgumentParser:
                    help="header copies searched before the tree's (repeatable), as for try")
     c.add_argument("--symbol", help="the function's mangled name in the candidate when it differs from the "
                                     "original's (a placeholder defined under its real name ahead of the rename)")
+    c = add("misses", help="Candidates kept from every try, try --unit and sweep (with their header copies): "
+                           "the closest per function the tree has not matched; --restore writes one out to start "
+                           "from, --retry compiles them again against today's tree, --import keeps old work files")
+    c.add_argument("query", nargs="?", help="a function's address or name (or a candidate id for --restore)")
+    c.add_argument("--unit", help="only this unit's functions (its name or an address in it)")
+    c.add_argument("--all", action="store_true", help="also functions the tree matches now")
+    c.add_argument("--limit", type=int, default=40, help="rows listed (0: all)")
+    c.add_argument("--restore", type=Path, metavar="DIR", help="write the query's closest candidate and its "
+                   "header copies to DIR")
+    c.add_argument("--retry", action="store_true", help="compile the closest kept candidates (two per function) "
+                   "against today's tree, with their header copies and with the tree's own; lists what became "
+                   "identical or closer")
+    c.add_argument("--max-words", type=int, help="--retry: only functions kept within this many words")
+    c.add_argument("--seconds", type=float, help="--retry: stop starting compiles after this long")
+    c.add_argument("--import", dest="imports", type=Path, nargs="+", metavar="PATH",
+                   help="keep candidates left as files (.c/.cpp/.cc, folders searched): each compiled with the "
+                        "include/ folder beside it or in a parent")
+    c.add_argument("--jobs", type=int, help="--retry/--import: compiles at once (default: half the CPUs)")
     c = add("objects", help="Prove a change kept the code: --save copies every built object, --compare (after the "
                             "build) checks each against its copy modulo intended renames")
     c.add_argument("--save", action="store_true")
@@ -747,6 +765,21 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from .candidate import check
         data = check(project, target, args.query, args.candidate, args.force, args.keep, _folders(args.include))
         return data, render.candidate(data)
+    if command == "misses":
+        from . import misses
+        if args.imports:
+            data = misses.import_files(project, target, args.imports, args.jobs)
+            return data, render.misses_import(data)
+        if args.retry:
+            data = misses.retry(project, target, args.query, args.unit, args.jobs, args.max_words, args.seconds)
+            return data, render.misses_retry(data)
+        if args.restore:
+            if not args.query:
+                raise ValueError("--restore needs a function's address or name, or a candidate id")
+            data = misses.restore(project, target, args.query, args.restore)
+            return data, render.misses_restore(data)
+        data = misses.listing(project, target, args.query, args.unit, args.all, args.limit)
+        return data, render.misses(data)
     if command == "probe":
         from .candidate import probe
         data = probe(project, target, args.query, args.source, args.names, _folders(args.include))

@@ -1703,8 +1703,22 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
         shutil.rmtree(work_root, ignore_errors=True)
     destination = out or root / "build" / "sweep" / f"{row['address']}{candidate.suffix or '.cpp'}"
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(result.pop("text"), encoding="utf-8")
+    best_text = result.pop("text")
+    destination.write_text(best_text, encoding="utf-8")
     from .index import address_text
+    if best_text != text:                            # kept with what `zkit try` measures, for a later retry
+        from . import misses
+        from .candidate import compare
+        try:
+            measured = compare(project, target, unit, row["name"], best_text, None, includes)
+        except Exception:  # noqa: BLE001 - keeping the result is a side effect
+            measured = {}
+        if measured.get("compiled"):
+            misses.record_quietly(project, target, best_text, includes,
+                                  [{"address": address_text(row["address"]), "function": row["name"],
+                                    "unit": row["unit"], "exact": measured.get("exact"),
+                                    "differences": measured.get("differences"),
+                                    "reloc_only": measured.get("reloc_only")}], "sweep", str(destination))
     return {"address": address_text(row["address"]), "function": row["name"], "unit": row["unit"],
             **({"symbol": symbol} if symbol else {}),
             "candidate": str(candidate), **({"includes": [str(f) for f in includes]} if includes else {}),

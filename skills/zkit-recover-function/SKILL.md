@@ -18,8 +18,10 @@ The rules are `zkit contract decomp`; this is the loop. objdiff's report decides
 3. **Write a real member.** Use the class header's fields and the shared declarations of the callees. No
    `extern "C"` on `void *`, raw offsets, hand-mangled names, private prototypes, re-typing macros, fake classes
    for virtual calls. Unknown fields get `m_<offset>` members in the header, at the offset the code compiles to.
-4. **Check it outside the tree.** `zkit try <addr> <candidate>` compiles with the unit's exact command and shows
-   the differing words, both disassemblies and any decompiler debt. Four attempts per function, enforced.
+4. **Check it outside the tree.** Start from `zkit misses <addr>`: the closest candidate anyone kept
+   (`--restore DIR` writes it out with its header copies), not from scratch. `zkit try <addr> <candidate>`
+   compiles with the unit's exact command and shows the differing words, both disassemblies and any decompiler
+   debt. Four attempts per function, enforced.
    `zkit try --unit` judges a whole unit file and lists what it gained and lost against the tree's build;
    `--include <dir>` puts edited header copies ahead of the tree's; `zkit probe <unit> <file>` compiles any
    experiment with the unit's command and prints its code (never hand-copied flags).

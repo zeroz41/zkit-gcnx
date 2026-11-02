@@ -34,6 +34,9 @@ evidence for it, the files to merge, every name you inferred. Everything else go
 (Switch, Ghidra) or `zkit m2c` (GameCube), `zkit data`, `zkit xrefs`, `zkit refs` (where the source defines and
 uses a name), `zkit classes`, `zkit names`. No greps of symbol or split files.
 - `zkit try <addr> <file>`: one function against the original (counts an attempt).
+- `zkit misses --unit <unit>` before you start: candidates kept from earlier tries, sweeps and work files, the
+  closest per unmatched function. `zkit misses <addr> --restore $W/prev` writes one out with its header copies;
+  start from it rather than from the tree's source. Every try is kept, so nothing you hand back is lost.
 - `zkit try --unit <unit> <file>`: every function of the unit, what became identical or was LOST against the
   tree's build, debt and (Switch) the link. Records no attempts; use it for status.
 - `--include $W/include` (on `try` and `probe`): your header copies, laid out like the tree's include paths, are

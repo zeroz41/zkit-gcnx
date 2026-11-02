@@ -1102,7 +1102,48 @@ def candidate(data: dict) -> str:
                    + ", ".join(data["placeholders"]))
     if data.get("bank_note"):
         out.append(f"  {data['bank_note']}")
+    if data.get("kept"):
+        k = data["kept"]
+        out.append(f"  kept before this: {k['candidates']} candidate(s), best {k['best']} (tree {k.get('base') or '?'})"
+                   f" — `{k['restore']}` writes it out")
     return "\n".join(out)
+
+
+def misses(data: dict) -> str:
+    """`zkit misses`: the closest kept candidate of each function."""
+    lines = [f"{data['functions']} function(s) with kept candidates ({data['candidates']} distinct)"]
+    for e in data["entries"]:
+        lines.append(f"  {e['address']} {e['function']} [{e.get('unit') or '?'}]: {e['best']}, {e['kept']} kept, "
+                     f"{e.get('origin')} at {e.get('base') or '?'} ({e['candidate']})"
+                     + (" — tree matches it now" if e.get("tree_matched") else ""))
+    if data["functions"] > len(data["entries"]):
+        lines.append(f"  ... {data['functions'] - len(data['entries'])} more (--limit 0 lists all)")
+    return "\n".join(lines)
+
+
+def misses_restore(data: dict) -> str:
+    lines = [f"{data['address']} {data['function']}: {data['state']} at tree {data.get('base') or '?'}",
+             f"  written: {data['written']}"]
+    lines += [f"  headers: {f}" for f in data["includes"]]
+    lines += [f"  try it: {data['try']}", f"  or the unit: {data['try_unit']}"]
+    return "\n".join(lines)
+
+
+def misses_retry(data: dict) -> str:
+    lines = [f"retried {data['functions']} function(s): {data['compiles']} compile(s), {data['compiled']} compiled, "
+             f"{data['failed']} failed, {data['seconds']}s",
+             f"  identical now: {len(data['identical'])}, closer: {len(data['improved'])}"]
+    for e in data["identical"]:
+        lines.append(f"  IDENTICAL {e['address']} {e['function']} [{e['unit']}] (kept as {e['kept_as']}; "
+                     f"{e['headers']} headers; zkit misses {e['candidate']} --restore DIR)")
+    for e in data["improved"]:
+        lines.append(f"  closer {e['address']} {e['function']}: {e['kept_as']} -> {e['now']} ({e['candidate']})")
+    return "\n".join(lines)
+
+
+def misses_import(data: dict) -> str:
+    return (f"{data['files']} file(s): {data['compiled']} compiled, {data['failed']} failed, {data['skipped']} "
+            f"skipped (already kept or no unit found); {data['rows']} candidate row(s) kept, {data['seconds']}s")
 
 
 def objects_compare(data: dict) -> str:

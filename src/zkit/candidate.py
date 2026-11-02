@@ -254,7 +254,7 @@ def _state(row: dict) -> str:
 
 
 def check_unit(project: Project, target: str, query: str, candidate: Path,
-               includes: list[Path] | None = None) -> dict[str, Any]:
+               includes: list[Path] | None = None, link: bool = True, keep_misses: bool = True) -> dict[str, Any]:
     """A whole unit's candidate, outside the tree: compiled with the unit's command, every function of the unit
     compared with the original's, and (Switch) the object linked into the original, which proves the unit's data,
     strings and tables too. Each function's state is set beside its state in the tree's last build of the unit, so
@@ -293,7 +293,7 @@ def check_unit(project: Project, target: str, query: str, candidate: Path,
         debt = quality.findings(text, quality.patterns(project, project.target(target)["repository"]))
         debt, out["placeholders"] = symbol_placeholders(connect(project), target, debt)
         out["debt"] = sorted({item["label"] for item in debt})
-        if platform_name(project.target(target)) == "switch":
+        if link and platform_name(project.target(target)) == "switch":
             from .delink import read_units
             from .nxlink import link_unit
             config = project.target(target)
@@ -308,6 +308,9 @@ def check_unit(project: Project, target: str, query: str, candidate: Path,
             out["exact"] = sum(r["exact"] for r in rows)
         out["done"] = out["exact"] == len(rows) and not out["debt"] and out.get("link", {}).get("linked", True)
     out["tree"] = _tree_delta(root, unit, rows, labels)
+    if keep_misses:
+        from . import misses
+        misses.record_unit_quietly(project, target, unit["name"], text, includes, rows, "unit", str(candidate))
     return out
 
 
@@ -392,7 +395,8 @@ def check(project: Project, target: str, query: str, candidate: Path, force: boo
         best = max((r.get("differences") is not None and -r["differences"] or -10**9 for r in history), default=None)
         raise ValueError(f"{address} already has {len(tried)} attempts (cap {ATTEMPT_CAP}); stop and record the "
                          "blocker, or hand it to the permuter/variant sweep if the gap is register allocation. "
-                         f"Best so far: {-best if best is not None and best > -10**9 else '?'} differing words. "
+                         f"Best so far: {-best if best is not None and best > -10**9 else '?'} differing words "
+                         f"(`zkit misses {address} --restore DIR` writes it out). "
                          "--force overrides with a reason.")
     units = objects.objdiff_units(project, target)
     unit = units.get(row["unit"] or "")
@@ -401,8 +405,17 @@ def check(project: Project, target: str, query: str, candidate: Path, force: boo
     out: dict[str, Any] = {"address": address, "function": row["name"], "unit": row["unit"],
                            "candidate": str(candidate), "attempt": len(tried | {fingerprint}),
                            "attempts_so_far": len(tried), "cap": ATTEMPT_CAP}
+    from . import misses
+    earlier = misses.kept_summary(project, target, address)
     out.update(compare(project, target, unit, row["name"], text, keep, includes))
     exact, differences = out.get("exact", False), out.get("differences")
+    if out.get("compiled"):
+        misses.record_quietly(project, target, text, includes,
+                              [{"address": address, "function": row["name"], "unit": row["unit"], "exact": exact,
+                                "differences": differences, "reloc_only": out.get("reloc_only")}],
+                              "try", str(candidate))
+    if earlier:
+        out["kept"] = earlier
     repo = project.target(target)["repository"]
     catalog = quality.patterns(project, repo)
     lines = text.splitlines()

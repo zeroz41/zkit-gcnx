@@ -104,6 +104,10 @@ Clean up the decomp source in large proven steps. Use zkit-clean-source. Finish 
 | `zkit m2c 0x80012345` | a C starting point for a GameCube function |
 | `zkit try 0x80012345 f.cpp` | compile a candidate and compare it with the original |
 | `zkit try --unit <unit> f.cpp` | a whole unit file: every function, what it gained or lost against the tree |
+| `zkit misses [addr] [--unit U]` | the closest kept candidate per unmatched function (every try, try --unit and sweep is kept with its header copies) |
+| `zkit misses addr --restore DIR` | write a kept candidate and its headers out to start from |
+| `zkit misses --retry` | compile the kept candidates again against today's tree: what became identical |
+| `zkit misses --import DIR...` | keep candidates left as files by earlier work |
 | `zkit probe <unit> test.cpp` | compile an experiment with the unit's exact command and read its code |
 | `zkit compiled 0x80012345` | your built function against the original |
 | `zkit progress` | how much is matched and linked |
