@@ -1214,8 +1214,8 @@ PLAN_LEGEND = {
     "clean-first": "exact, but the decomp is not ready (reasons shown): clean and name it in the decomp, then port",
     "shared-port": f"ready, with {SHARED_CALLERS}+ original callers: port once into a shared owner, not per feature",
     "port": "ready in the decomp and not cited natively yet",
-    "platform": "SDK/runtime library code (the target's library_categories): the port uses its own platform "
-                "code, not a port of this",
+    "platform": "SDK/runtime library code (the target's library_categories): a source port links its native "
+                "library in place of the console SDK; a rewrite uses its own platform code, not a port of this",
 }
 
 

@@ -120,7 +120,7 @@ def brief(data: dict, compact: bool = False) -> str:
             for inventory in audits['coverage_inventories']:
                 out.append(f"- inventory audit: `zkit coverage {name} {inventory['name']}` — {inventory['boundary']}")
         if repo.get("port_guidance"):
-            out.append('- native-port architecture and completion: ' + repo['port_guidance'])
+            out.append('- native port: ' + repo['port_guidance'])
         if repo.get("rules"):
             out.append("- rules:")
             out.extend(f"  {i}. {rule}" for i, rule in enumerate(repo["rules"], 1))
@@ -183,9 +183,10 @@ def _brief_compact(data: dict) -> str:
             out.append("- required reading: " + "; ".join(
                 d['reference'] + (" [MISSING]" if not d['exists'] else "") for d in repo['required_reading']))
         if repo.get('port_guidance'):
-            out.append('- native port: shared owners and interfaces; composed behavior; automated import/dependency '
-                       'discovery; authored data rather than identity/shape guesses. Complete the requested live '
-                       'system and verify its boundary. Matching decomp keeps original layout/compiler constraints.')
+            out.append('- native port: a source port by default (`zkit contract source-port`): decomp game code '
+                       'compiled unchanged except at declared edits; seams at shared middleware owners; original '
+                       'formats only in the importer; the matching build still builds and matches. A native '
+                       'rewrite follows `zkit contract port`.')
         out.append(f"- rules, finish gate, status, lessons: `zkit_brief {name}` (MCP) or `zkit brief {name}`")
     demand = data.get("port_demand")
     if demand:

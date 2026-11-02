@@ -1,5 +1,10 @@
 # Port contract
 
+This contract is for a native rewrite. A source port, whose game code is the decomp's own code compiled natively
+against a native library instead of the console SDK, follows `zkit contract source-port`, which overrides this
+contract wherever they differ: shims are not confined to test oracles and importers (rule 6), and game code keeps
+the original's structure (section 2).
+
 Rules for a native port written from a matching decompilation. The port reproduces what the original does,
 in an architecture of its own. Libraries, languages, file formats, frame caps and presentation targets are
 per-project decisions, kept in the project's own decisions file and never written here as rules.

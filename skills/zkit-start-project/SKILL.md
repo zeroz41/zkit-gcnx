@@ -26,7 +26,17 @@ Most later repair work came from early shortcuts. Get these right before matchin
 7. `zkit init <repo>` writes the project file with strict hygiene and quality gates; `zkit install git-hook
    --write <repo>` enforces commit rules and the slop gate locally.
 
-**A port** (`zkit contract port`):
+**A source port** (`zkit contract source-port`: the decomp's code compiled natively against a native library
+such as sonarlib):
+1. Make the port a branch of the decomp, or of a fork of it, with one added top-level directory (native build,
+   seam files, adapter, importer, tests, seam policy). The matching build keeps working from the same tree.
+2. Measure the seam before any work starts: every console API the game uses, by category and file, and the
+   readiness of what the port rests on (`zkit port-plan`). An assembly-only function is an unsupported boundary
+   until it is matched.
+3. Run the seam audit on every build, and set up the comparison path (port goldens and traces against the
+   original replaying the same input movie in an emulator, the frame-rate sweep) early.
+
+**A native rewrite** (`zkit contract port`):
 1. Write the architecture document first: owners, interfaces, dependency direction, the import pipeline, the
    fidelity tiers and the per-project decisions (libraries, formats, frame caps) kept separate from the rules.
 2. Behavior comes only from a clean decomp. List the systems to port and their readiness (`zkit port-plan`);
@@ -34,6 +44,6 @@ Most later repair work came from early shortcuts. Get these right before matchin
 3. Set up the original-vs-port comparison path (captures from the original running in an emulator) and the
    test labels and budgets before the first gameplay feature.
 
-**Both:** the repository holds README (what, build, use), contributor guide and architecture docs. Agent
+**All of them:** the repository holds README (what, build, use), contributor guide and architecture docs. Agent
 instructions stay local (`.git/info/exclude`), as do session notes and scratch scripts. Commits are one short
 line under the developer's identity, never with an AI co-author.

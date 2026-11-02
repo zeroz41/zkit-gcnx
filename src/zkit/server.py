@@ -760,9 +760,11 @@ def create_server(project: Project) -> FastMCP:
         return json.dumps(check_recipe(current(), reference, catalog_reference), ensure_ascii=False)
 
     @tool()
-    def zkit_contract(kind: Literal["decomp", "port"]) -> str:
+    def zkit_contract(kind: Literal["decomp", "port", "source-port"]) -> str:
         """The toolkit's rules for a decomp or for a port built from one: what done means, what to set up before
-        the first match or feature, how candidates and ports are written and proven, names, commits."""
+        the first match or feature, how candidates and ports are written and proven, names, commits. source-port
+        (the default for ports): the decomp's code compiled natively against a native library; port: a native
+        rewrite that uses the decomp as its behavioral reference."""
         from importlib import resources
         return resources.files("zkit").joinpath(f"contracts/{kind}.md").read_text(encoding="utf-8")
 

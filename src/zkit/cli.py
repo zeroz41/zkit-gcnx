@@ -439,8 +439,9 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--since", help="judge the commits in SINCE..HEAD (default: the last --limit commits)")
     c.add_argument("--limit", type=int, default=30)
     c.add_argument("--only", choices=["commits", "files", "tree"], action="append", help="run only these parts")
-    c = add("contract", help="Print the toolkit's rules for a decomp or a port (no project needed)")
-    c.add_argument("kind", choices=["decomp", "port"])
+    c = add("contract", help="Print the toolkit's rules for a decomp, a source port (the decomp's code compiled "
+                              "natively against a native library) or a native rewrite (port); no project needed")
+    c.add_argument("kind", choices=["decomp", "source-port", "port"])
     c = add("commit-msg", help="Check a commit message file against the repo's commit rules (the commit-msg hook)")
     c.add_argument("file", type=Path)
     c = add("cites", help="Native citations that resolve to nothing in the target")

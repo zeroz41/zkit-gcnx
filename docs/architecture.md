@@ -210,7 +210,8 @@ address-named types, decompiler temporaries) at any revision and between revisio
 must not be committed or left behind: AI-only documents, dated session notes, one-off scripts, original game
 files, AI identities and co-author trailers, long commit messages, stray branches and worktrees. `session.py`
 records each session's start (heads, progress baseline) so the finish gate can judge what this session changed.
-The contracts (`zkit contract decomp|port`) are the rules agents follow; the skills tell them when to call what.
+The contracts (`zkit contract decomp|source-port|port`: source-port for a port that compiles the decomp's code
+natively, port for a native rewrite) are the rules agents follow; the skills tell them when to call what.
 
 ## Decisions
 

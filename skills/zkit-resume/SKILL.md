@@ -13,7 +13,9 @@ description: Start or resume a session on a decomp (GameCube or Switch) or a nat
 3. **Leave other work alone.** Dirty files, branches and worktrees may belong to another live session. Don't
    commit, merge, stash or delete what you didn't make; ask if it blocks you.
 4. **Read the contract.** The repo's README/CONTRIBUTING/architecture docs and the brief's required reading.
-   `zkit contract decomp` or `zkit contract port` prints the toolkit's rules for that kind of work.
+   `zkit contract decomp`, `zkit contract source-port` (a port that compiles the decomp's code natively against
+   a native library such as sonarlib) or `zkit contract port` (a native rewrite) prints the toolkit's rules for
+   that kind of work.
 5. **Size the machine.** The brief shows other agents and builds. Keep parallel jobs within available memory,
    one tree build at a time (`zkit wait <repo>` instead of sleep loops), and nothing that opens a window.
 6. **Use the tools, not greps.** `zkit lookup|names|refs|xrefs|asm|data|decompile|unit|compiled` answer what

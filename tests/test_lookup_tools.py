@@ -139,13 +139,27 @@ class LookupToolTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, r"unknown argument\(s\) sice\. zkit_progress takes: response_format, "
                                                r"since"):
             self.call("zkit_progress", {"sice": "x"})
-        with self.assertRaisesRegex(Exception, "kind: Input should be 'decomp' or 'port' \\(got 'native'\\)"):
+        with self.assertRaisesRegex(Exception, "kind: Input should be 'decomp', 'port' or 'source-port' "
+                                               "\\(got 'native'\\)"):
             self.call("zkit_contract", {"kind": "native"})
         with self.assertRaisesRegex(Exception, "size must be a number"):
             self.call("zkit_asm", {"query": "0x80003000", "size": "big"})
         self.assertIn("TEnemy::update()", self.call("zkit_names", {"query": "0x80003000"}))  # query -> queries
         self.assertIn("finish gate for decomp", self.call("zkit_gate", {"repository": "decomp"}))
         self.assertTrue(create_server(self.project))
+
+    def test_every_contract_kind_loads_through_the_cli_and_mcp(self):
+        from zkit.cli import build_parser, run
+        heads = {"decomp": "# Decomp contract", "port": "# Port contract", "source-port": "# Source-port contract"}
+        texts = {}
+        for kind, head in heads.items():
+            data, texts[kind] = run(build_parser().parse_args(["contract", kind]))
+            self.assertEqual((data["kind"], data["text"]), (kind, texts[kind]))
+            self.assertTrue(texts[kind].startswith(head), kind)
+            self.assertEqual(self.call("zkit_contract", {"kind": kind}), texts[kind])
+        # Each port contract sends the other kind of port to its own contract in its opening lines.
+        self.assertIn("`zkit contract port`", texts["source-port"][:600])
+        self.assertIn("`zkit contract source-port`", texts["port"][:600])
 
     def test_tools_default_to_the_repo_the_session_works_in(self):
         here = os.getcwd()
