@@ -69,6 +69,19 @@ def structor_partner(name: str) -> str | None:
     return name[:last.start(2)] + other + name[last.end(2):]
 
 
+PLACEHOLDER_NAME = re.compile(r"^[A-Za-z]+_[0-9A-Fa-f]{6,16}$")
+
+
+def placeholder_partner(name: str, names) -> str | None:
+    """The one Itanium name among `names` that spells the address-named placeholder `name` as its identifier (the
+    candidate defines `fn_<address>` as a member or in a namespace ahead of the rename), or None."""
+    if not PLACEHOLDER_NAME.match(name):
+        return None
+    pattern = re.compile(rf"(?<![0-9]){len(name)}{re.escape(name)}")
+    found = [n for n in names if n.startswith("_Z") and pattern.search(n)]
+    return found[0] if len(found) == 1 else None
+
+
 @dataclass
 class Placed:
     section: Section

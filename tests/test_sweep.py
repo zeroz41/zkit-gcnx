@@ -582,3 +582,12 @@ def test_a_conditions_first_call_is_held_and_the_other_test_comes_first(tmp_path
         result = subprocess.run([CLANG, "--target=aarch64-none-elf", "-std=gnu++14", "-fsyntax-only",
                                  str(tmp_path / "a.cpp")], capture_output=True, text=True)
         assert result.returncode == 0, f"{rewrite.what}: {result.stderr}"
+
+
+def test_a_placeholder_pairs_with_the_one_name_that_spells_it():
+    from zkit.nxlink import placeholder_partner
+    names = ["_ZN1A13fn_710002FD3CEb", "_ZN1A3runEv", "fn_7100000010"]
+    assert placeholder_partner("fn_710002FD3C", names) == "_ZN1A13fn_710002FD3CEb"
+    assert placeholder_partner("fn_710002FD3C", names + ["_ZN1B13fn_710002FD3CEv"]) is None   # two: no guess
+    assert placeholder_partner("fn_710002FD3C", ["_ZN1A113fn_710002FD3CEb"]) is None     # a longer identifier
+    assert placeholder_partner("_ZN1A3runEv", names) is None                                # not a placeholder

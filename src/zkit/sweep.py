@@ -1691,8 +1691,13 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
                 raise ValueError(f"{candidate} does not compile with its unit's command: "
                                  f"{'; '.join(_errors(messages)) or 'no messages'}")
             if objects._find(Elf.load(built), built_name) is None:
-                raise ValueError(f"{candidate} compiles but defines no {built_name}"
-                                 + ("" if symbol else "; name the candidate's symbol with --symbol"))
+                from .nxlink import placeholder_partner
+                partner = None if symbol else placeholder_partner(
+                    built_name, [s.name for s in Elf.load(built).symbols if s.kind == "func"])
+                if partner is None:
+                    raise ValueError(f"{candidate} compiles but defines no {built_name}"
+                                     + ("" if symbol else "; name the candidate's symbol with --symbol"))
+                built_name = partner
         result = climb(text, propose, evaluate, jobs or max(1, (os.cpu_count() or 2) // 2), rounds, seconds)
     finally:
         shutil.rmtree(work_root, ignore_errors=True)

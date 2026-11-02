@@ -205,6 +205,8 @@ def compare(project: Project, target: str, unit: dict, name: str, text: str, kee
     """Compile `text` outside the tree with the unit's exact command and compare function `name` with the unit's
     target object: {command, compiled, errors} or {command, compiled, exact, differences, reloc_only, rows...}."""
     from . import objects
+    from .elf import Elf
+    from .nxlink import placeholder_partner
     root = project.root(project.target(target)["repository"])
     with tempfile.TemporaryDirectory(prefix="zkit-try-", dir=_scratch(project, target)) as work:
         built, command, message = _compile(project, target, unit, text, Path(work), includes)
@@ -212,7 +214,9 @@ def compare(project: Project, target: str, unit: dict, name: str, text: str, kee
         if built is None:
             out.update(compiled=False, errors=message[-3000:])
             return out
-        diff = objects.function_diff(root / unit["target_path"], built, name,
+        names = {s.name for s in Elf.load(built).symbols if s.kind == "func"}
+        base = name if name in names else placeholder_partner(name, names)
+        diff = objects.function_diff(root / unit["target_path"], built, name, base_name=base,
                                      labels=objects.label_reader(project, target))
         out.update(compiled=True, **{k: v for k, v in diff.items() if k not in ("target", "base")})
         if keep:
@@ -258,7 +262,7 @@ def check_unit(project: Project, target: str, query: str, candidate: Path,
     from . import objects, quality
     from .elf import Elf
     from .index import connect
-    from .nxlink import structor_partner
+    from .nxlink import placeholder_partner, structor_partner
     unit = _unit_for(project, target, query)
     root = project.root(project.target(target)["repository"])
     text = candidate.read_text(encoding="utf-8", errors="replace")
@@ -275,7 +279,8 @@ def check_unit(project: Project, target: str, query: str, candidate: Path,
         names = {s.name for s in Elf.load(built).symbols if s.kind == "func"}
         rows = []
         for symbol in sorted((s for s in original.symbols if s.kind == "func" and s.size), key=lambda s: s.value):
-            base = symbol.name if symbol.name in names else structor_partner(symbol.name)
+            base = symbol.name if symbol.name in names else (structor_partner(symbol.name)
+                                                             or placeholder_partner(symbol.name, names))
             if base not in names:
                 rows.append({"function": symbol.name, "exact": False, "missing": True})
                 continue
