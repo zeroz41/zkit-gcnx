@@ -1396,7 +1396,16 @@ def _held_reach(program: Program) -> list[tuple[int, int]]:
         classes = {o: (text or "").removeprefix("vtable for ").replace("::", "/")
                    for o, text in zip(own, demangle_itanium([o.name for o in own]))}
     first: dict[int, int] = {}                        # held function -> the earliest code using data holding it
-    for o, users in program.users().items():
+    found = program.users()
+    # data no code forms the address of (a static method table only a static descriptor points to) is emitted
+    # with the data pointing into it: the code using that data is its user
+    within: dict[DataObject, set[int]] = collections.defaultdict(set)
+    for holder, pointee in program.pointers:
+        outer, inner = program.object_at(holder), program.object_at(pointee)
+        if inner in held and inner not in found and outer is not None and outer is not inner \
+                and outer.address not in shared:
+            within[inner].update(found.get(outer, ()))
+    for o, users in list(found.items()) + [(o, users) for o, users in within.items() if users]:
         if o in held and o.name.startswith("_ZTV") and o.address not in shared:
             users = {i for i in users if owner.get(i) == classes[o]}
         for j in held.get(o, ()):

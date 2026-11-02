@@ -661,6 +661,23 @@ class DeferredTailTests(unittest.TestCase):
         with unittest.mock.patch.object(units, "_function_classes", return_value={}):
             self.assertEqual(sorted(units._held_reach(code)), [(1, 2), (1, 3), (1, 4), (1, 6)])
 
+    def test_code_using_data_that_points_to_a_table_keeps_the_functions_the_table_holds(self):
+        """No code forms the table's address; only a descriptor 1 uses points to it (a static method table a
+        static class descriptor names): the table is emitted with the descriptor, so 1 keeps what it holds. A
+        weak descriptor (any unit's copy) says nothing."""
+        code = self._code()
+        table = code.object_at(0x9000)
+        descriptor = DataObject(0x9400, 0x10, "lbl_9400", ".data")
+        code.pointers = code.pointers + [(0x9408, 0x9000)]
+        code.object_at = lambda a: descriptor if 0x9400 <= a < 0x9410 else table if 0x9000 <= a < 0x9040 else None
+        code.users = lambda: {descriptor: {1}}
+        code.refs = {1: [(0, 0x9400, "addr")]}
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            self.assertEqual(sorted(units._held_reach(code)), [(1, 2), (1, 3), (1, 4), (1, 6)])
+            from dataclasses import replace
+            code.objects = [replace(descriptor, scope="weak")]
+            self.assertEqual(sorted(units._held_reach(code)), [])
+
     def test_weak_data_is_no_one_unit_s(self):
         code = _Code(4)
         code.objects = [DataObject(0x9000, 8, "_ZTV1TIiE", ".data", "weak"), DataObject(0x9100, 8, "s", ".bss")]
