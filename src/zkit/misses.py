@@ -383,12 +383,15 @@ def retry(project: Project, target: str, query: str | None = None, unit: str | N
             tree = data.get("tree") or {}
             written = written_in_tree(project, target, row.get("unit") or "")
             dropped = sorted(f["function"] for f in data["functions"] if f.get("missing") and f["function"] in written)
+            adds = sorted(({"function": f["function"], "differences": f.get("differences")} for f in data["functions"]
+                           if not f.get("missing") and not f.get("exact") and f["function"] not in written),
+                          key=lambda a: a["function"])
             if tree.get("gained"):
                 candidates.append({"candidate": row["candidate"], "unit": row.get("unit"), "source": row.get("source"),
                                    "headers": "kept copies" if with_headers else "tree's",
                                    "gained": [g["function"] for g in tree["gained"]],
                                    "lost": [g["function"] for g in tree.get("lost", [])],
-                                   "dropped": len(dropped), "debt": data.get("debt", [])})
+                                   "dropped": len(dropped), "adds": adds, "debt": data.get("debt", [])})
             functions = [f for f in data["functions"] if not f.get("missing")]
             names.update(addresses_by_name(project, target, (f["function"] for f in functions
                                                              if f["function"] not in names)))
@@ -426,7 +429,11 @@ def retry(project: Project, target: str, query: str | None = None, unit: str | N
     improved.sort(key=lambda e: e["address"])
     # whole candidates worth merging: what each gains against the tree's build, loses, and leaves out of what the
     # tree has written (a fragment leaves out most of its unit: its functions are spliced in, not the file)
-    candidates.sort(key=lambda c: (bool(c["lost"]), c["dropped"] > 0, -len(c["gained"]), c["headers"] != "tree's"))
+    # and what it writes that is not identical and the tree has not written: only identical code goes in
+    for c in candidates:
+        c["clean"] = not (c["lost"] or c["dropped"] or c["adds"] or c["debt"])
+    candidates.sort(key=lambda c: (not c["clean"], bool(c["lost"]), c["dropped"] > 0, bool(c["adds"]),
+                                   -len(c["gained"]), c["headers"] != "tree's"))
     return {"functions": len(groups), "compiles": len(work), "compiled": compiled, "failed": failed,
             "identical": identical, "improved": improved, "candidates": candidates,
             "seconds": round(time.monotonic() - started, 1)}

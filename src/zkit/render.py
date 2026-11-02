@@ -1138,14 +1138,16 @@ def misses_retry(data: dict) -> str:
                      f"{e['headers']} headers; zkit misses {e['candidate']} --restore DIR)")
     for e in data["improved"]:
         lines.append(f"  closer {e['address']} {e['function']}: {e['kept_as']} -> {e['now']} ({e['candidate']})")
-    whole = [c for c in data.get("candidates", []) if not c["lost"] and not c["dropped"]]
+    whole = [c for c in data.get("candidates", []) if c.get("clean")]
     if data.get("candidates"):
-        lines.append(f"  candidates gaining against the tree's build: {len(data['candidates'])}, "
-                     f"{len(whole)} with nothing lost or left out (the file can replace the unit's)")
+        lines.append(f"  candidates gaining against the tree's build: {len(data['candidates'])}, {len(whole)} clean "
+                     "(nothing lost or left out, nothing written that is not identical, no debt)")
     for c in data.get("candidates", [])[:40]:
-        lines.append(f"  +{len(c['gained'])} LOST {len(c['lost'])} left out {c['dropped']} {c['unit']} "
+        lines.append(f"  {'clean ' if c.get('clean') else ''}+{len(c['gained'])} LOST {len(c['lost'])} "
+                     f"left out {c['dropped']} adds {len(c.get('adds', []))} not identical {c['unit']} "
                      f"({c['headers']} headers{'; debt ' + ', '.join(c['debt']) if c['debt'] else ''}) "
                      f"{c['candidate']} {c.get('source') or ''}")
+        lines += [f"      not identical: {a['function']} ({a['differences']} word(s))" for a in c.get("adds", [])[:4]]
     return "\n".join(lines)
 
 
