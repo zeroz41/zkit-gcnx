@@ -424,7 +424,7 @@ def _unit_of_file(project: Project, target: str, text: str) -> str | None:
     from .index import connect, containing
     db = connect(project)
     votes: dict[str, int] = {}
-    for qualified in list(bridge._qualified_definitions(text))[:40]:
+    for qualified in list(bridge._qualified_definitions(text))[:8]:
         try:
             found = bridge.resolve(project, qualified, target, limit=2)
         except Exception:  # noqa: BLE001 - a name the index does not know
@@ -435,6 +435,37 @@ def _unit_of_file(project: Project, target: str, text: str) -> str | None:
         if row is not None and row["unit"]:
             votes[row["unit"]] = votes.get(row["unit"], 0) + 1
     return max(votes, key=votes.get) if votes else None
+
+
+def _unit_by_path(path: Path, sources: dict[str, str], stop: int = 3) -> str | None:
+    """The unit a work file's place names: a copy at the unit's own source path (`.../src/a/b.cpp`), or a file in
+    a work folder whose `src/` holds one unit's copy."""
+    parts = path.resolve().parts
+    for start in range(len(parts)):
+        unit = sources.get("/".join(parts[start:]))
+        if unit:
+            return unit
+    folder = path.parent
+    for _ in range(stop):
+        if (folder / "src").is_dir():
+            found = {sources.get(f"src/{p.relative_to(folder / 'src').as_posix()}")
+                     for p in (folder / "src").rglob("*") if p.suffix in (".c", ".cpp", ".cc")} - {None}
+            if len(found) == 1:
+                return found.pop()
+        folder = folder.parent
+    return None
+
+
+def _sources(project: Project, target: str) -> dict[str, str]:
+    """{a unit's source path, also without its first folder: unit name} of every objdiff unit."""
+    from . import objects
+    out = {}
+    for name, unit in objects.objdiff_units(project, target).items():
+        source = (unit.get("metadata") or {}).get("source_path")
+        if source:
+            out[source] = name
+            out[source.split("/", 1)[1] if "/" in source else source] = name
+    return out
 
 
 def _header_folders(path: Path, stop: int = 3) -> list[Path]:
@@ -449,7 +480,8 @@ def _header_folders(path: Path, stop: int = 3) -> list[Path]:
 
 
 def import_files(project: Project, target: str, paths: list[Path], jobs: int | None = None) -> dict[str, Any]:
-    """Store candidates earlier work left as files (.c/.cpp/.cc under each path): each file's unit is the one most
+    """Store candidates earlier work left as files (.c/.cpp/.cc under each path): each file's unit is the one its
+    place names (a copy at the unit's source path, or a work folder whose src/ copies one unit), else the one most
     of its definitions belong to; the file is compiled with the header copies beside it, every function it
     defines compared, and the functions the tree has not matched are kept."""
     started = time.monotonic()
@@ -461,40 +493,47 @@ def import_files(project: Project, target: str, paths: list[Path], jobs: int | N
     home = _home(project)
     manifest = str(project.path)
     known = {(r.get("source"), r["text"]) for r in rows(project)}
-    stored = skipped = failed = 0
-    jobs_list = []
-    for path in files:
-        text = path.read_text(encoding="utf-8", errors="replace")
-        blob = hashlib.sha256(text.encode()).hexdigest()
-        if (str(path), blob) in known:
-            skipped += 1
-            continue
-        unit = _unit_of_file(project, target, text)
-        if unit is None:
-            skipped += 1
-            continue
-        includes = _header_folders(path)
-        headers, _ = _headers(home, includes)
-        jobs_list.append((path, text, unit, includes, headers))
+    sources = _sources(project, target)
+    stored = skipped = failed = submitted = 0
+    names: dict[str, str] = {}
+
+    def collect(future, path, text, unit, includes) -> int:
+        try:
+            data = future.result()
+        except Exception:  # noqa: BLE001
+            return -1
+        if not data.get("compiled"):
+            return -1
+        functions = [f for f in data["functions"] if not f.get("missing")]
+        names.update(addresses_by_name(project, target, (f["function"] for f in functions
+                                                         if f["function"] not in names)))
+        results = [{**f, "address": names.get(f["function"]), "unit": unit}
+                   for f in functions if names.get(f["function"]) in open_]
+        return record(project, target, text, includes, results, "import", str(path))
+
     with concurrent.futures.ProcessPoolExecutor(max_workers=_jobs(jobs)) as pool:
-        futures = {pool.submit(_check, manifest, target, unit, text.encode(), headers, str(home), bool(headers)):
-                   (path, text, unit, includes) for path, text, unit, includes, headers in jobs_list}
-        names: dict[str, str] = {}
-        for future in concurrent.futures.as_completed(futures):
-            path, text, unit, includes = futures[future]
-            try:
-                data = future.result()
-            except Exception:  # noqa: BLE001
-                failed += 1
+        pending: dict = {}
+        for path in files:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if (str(path), hashlib.sha256(text.encode()).hexdigest()) in known:
+                skipped += 1
                 continue
-            if not data.get("compiled"):
-                failed += 1
+            unit = _unit_by_path(path, sources) or _unit_of_file(project, target, text)
+            if unit is None:
+                skipped += 1
                 continue
-            functions = [f for f in data["functions"] if not f.get("missing")]
-            names.update(addresses_by_name(project, target, (f["function"] for f in functions
-                                                             if f["function"] not in names)))
-            results = [{"address": names.get(f["function"]), "function": f["function"], "unit": unit, **f}
-                       for f in functions if names.get(f["function"]) in open_]
-            stored += record(project, target, text, includes, results, "import", str(path))
-    return {"files": len(files), "compiled": len(jobs_list) - failed, "failed": failed, "skipped": skipped,
+            includes = _header_folders(path)
+            headers, _ = _headers(home, includes)
+            pending[pool.submit(_check, manifest, target, unit, text.encode(), headers, str(home), bool(headers))] \
+                = (path, text, unit, includes)
+            submitted += 1
+            while len(pending) >= 4 * _jobs(jobs):       # bounded: results are kept as they come
+                done, _ = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+                for future in done:
+                    got = collect(future, *pending.pop(future))
+                    failed, stored = failed + (got < 0), stored + max(got, 0)
+        for future in concurrent.futures.as_completed(list(pending)):
+            got = collect(future, *pending.pop(future))
+            failed, stored = failed + (got < 0), stored + max(got, 0)
+    return {"files": len(files), "compiled": submitted - failed, "failed": failed, "skipped": skipped,
             "rows": stored, "seconds": round(time.monotonic() - started, 1)}
