@@ -216,6 +216,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="keep candidates left as files (.c/.cpp/.cc, folders searched): each compiled with the "
                         "include/ folder beside it or in a parent")
     c.add_argument("--jobs", type=int, help="--retry/--import: compiles at once (default: half the CPUs)")
+    c = add("twins", help="Unmatched functions whose code has the shape of a matched one (immediates, branch and "
+                          "address targets masked): its source is a ready template; --families: groups of "
+                          "unmatched functions of one shape")
+    c.add_argument("query", nargs="*", help="addresses or names: their closest matched twins (three each)")
+    c.add_argument("--unit", help="only this unit's functions (its name or an address in it)")
+    c.add_argument("--min", dest="minimum", type=float, default=0.85, help="similarity a twin needs (default 0.85)")
+    c.add_argument("--families", action="store_true")
+    c.add_argument("--limit", type=int, default=40, help="rows listed (0: all)")
     c = add("objects", help="Prove a change kept the code: --save copies every built object, --compare (after the "
                             "build) checks each against its copy modulo intended renames")
     c.add_argument("--save", action="store_true")
@@ -766,6 +774,14 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from .candidate import check
         data = check(project, target, args.query, args.candidate, args.force, args.keep, _folders(args.include))
         return data, render.candidate(data)
+    if command == "twins":
+        from . import twins
+        if args.families:
+            data = twins.families(project, target, args.unit, args.limit)
+            return data, twins.families_text(data)
+        data = twins.find(project, target, bridge.split_queries(" ".join(args.query)) if args.query else None,
+                          args.unit, args.minimum, args.limit)
+        return data, twins.text(data)
     if command == "misses":
         from . import misses
         if args.imports:
