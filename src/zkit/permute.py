@@ -309,6 +309,8 @@ def compile_argv(argv: list[str], source_arg: str, source_dir: Path, workdir: Pa
     from .candidate import _rel
     out: list[str] = []
     skip = replaced = False
+    # mwcc has no joined `-o<path>`; its `-o`-prefixed flags (`-opt nopeephole`) stay as they are.
+    mwcc = any("mwcc" in Path(a).name.lower() for a in argv[:3])
     for index, arg in enumerate(argv):
         if skip:
             skip = False
@@ -322,7 +324,7 @@ def compile_argv(argv: list[str], source_arg: str, source_dir: Path, workdir: Pa
             out += ["-o", "$OUTPUT"]
             skip = True
             continue
-        if arg.startswith("-o") and len(arg) > 2:
+        if arg.startswith("-o") and len(arg) > 2 and not mwcc:
             out += ["-o", "$OUTPUT"]
             continue
         if arg == source_arg or Path(arg).as_posix() == Path(source_arg).as_posix():

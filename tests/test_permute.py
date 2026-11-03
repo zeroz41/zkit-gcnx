@@ -35,6 +35,18 @@ class PermuteHelperTests(unittest.TestCase):
                                "-o", "$OUTPUT"])
         self.assertEqual(permute.include_dirs(argv, Path("/repo")), [Path("/repo/include")])
 
+    def test_compile_argv_keeps_mwcc_opt_flags(self):
+        argv = ["wibo", "mwcceppc.exe", "-O4,p", "-opt", "nopeephole", "-c", "src/game/a.cpp", "-o",
+                "build/src/game/a.o"]
+        out = permute.compile_argv(argv, "src/game/a.cpp", Path("/repo/src/game"), Path("/repo"))
+        self.assertEqual(out, ["wibo", "mwcceppc.exe", "-i", "src/game", "-O4,p", "-opt", "nopeephole", "-c",
+                               "$WRAPPED", "-o", "$OUTPUT"])
+
+    def test_compile_argv_swaps_joined_output_for_gcc(self):
+        argv = ["gcc", "-O2", "-c", "src/a.c", "-obuild/a.o"]
+        out = permute.compile_argv(argv, "src/a.c", Path("/repo/src"), Path("/repo"))
+        self.assertEqual(out, ["gcc", "-i", "src", "-O2", "-c", "$WRAPPED", "-o", "$OUTPUT"])
+
     @unittest.skipUnless(shutil.which("gcc"), "requires a host C compiler")
     def test_c_unit_compile_script_compiles_plain_c(self):
         with tempfile.TemporaryDirectory() as tmp:
