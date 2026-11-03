@@ -1640,8 +1640,7 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
     labels = objects.label_reader(project, target)
     built_name = symbol or row["name"]
     if symbol:
-        from .platform import demangle_itanium
-        simple = _simple_name(demangle_itanium([symbol])[0] or symbol)
+        simple = _symbol_simple_name(symbol)
     else:
         simple = _simple_name(row["demangled"] or row["name"])
     argv, _, _ = compile_command(project, target, unit)
@@ -1728,6 +1727,14 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
 def _errors(messages: str, limit: int = 3) -> list[str]:
     """The first `limit` error lines of a compiler's messages."""
     return [line.strip() for line in (messages or "").splitlines() if "error" in line.lower()][:limit]
+
+
+def _symbol_simple_name(symbol: str) -> str:
+    """The unqualified name a mangled symbol declares: Itanium (Switch) first, then CodeWarrior, whose
+    `__ct__9TClassFv` llvm-cxxfilt leaves alone."""
+    from .index import cw_demangle
+    from .platform import demangle_itanium
+    return _simple_name(demangle_itanium([symbol])[0] or cw_demangle(symbol) or symbol)
 
 
 def _simple_name(demangled: str) -> str:

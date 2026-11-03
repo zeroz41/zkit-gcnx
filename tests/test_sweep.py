@@ -591,3 +591,11 @@ def test_a_placeholder_pairs_with_the_one_name_that_spells_it():
     assert placeholder_partner("fn_710002FD3C", names + ["_ZN1B13fn_710002FD3CEv"]) is None   # two: no guess
     assert placeholder_partner("fn_710002FD3C", ["_ZN1A113fn_710002FD3CEb"]) is None     # a longer identifier
     assert placeholder_partner("_ZN1A3runEv", names) is None                                # not a placeholder
+
+
+
+def test_a_codewarrior_symbol_names_its_ctor_dtor_and_method():
+    assert sweep._symbol_simple_name("__ct__20TWindowShortListCtrlFP7TObjectl") == "TWindowShortListCtrl"
+    assert sweep._symbol_simple_name("__dt__20TWindowShortListCtrlFv") == "~TWindowShortListCtrl"
+    assert sweep._symbol_simple_name("get_flags__20TWindowShortListCtrlFl") == "get_flags"
+    assert sweep._symbol_simple_name("_ZN1A6updateEi") == "update"
