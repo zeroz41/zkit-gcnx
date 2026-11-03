@@ -108,6 +108,7 @@ Clean up the decomp source in large proven steps. Use zkit-clean-source. Finish 
 | `zkit misses addr --restore DIR` | write a kept candidate and its headers out to start from |
 | `zkit misses --retry` | compile the kept candidates again against today's tree: what became identical |
 | `zkit misses --import DIR...` | keep candidates left as files by earlier work |
+| `zkit twins [addr...] [--unit U] [--min 0.85]` | unmatched functions whose code has the shape of a matched one (immediates, branch and address targets masked; registers too for similarity): the matched one's source is a template; `--families` groups unmatched functions of one shape |
 | `zkit probe <unit> test.cpp` | compile an experiment with the unit's exact command and read its code |
 | `zkit compiled 0x80012345` | your built function against the original |
 | `zkit progress` | how much is matched and linked |
