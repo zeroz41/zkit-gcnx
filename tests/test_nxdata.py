@@ -366,6 +366,43 @@ class TableSizeTests(unittest.TestCase):
             self.assertEqual((absorbed, resized), ({table.value + 16}, {table.value - 8: 8}))
 
 
+# a class no code constructs: its static object is constant-initialized, so only that object's vptr (a word the
+# loader relocates) points to the table, and the object before it is a named one the gap to the next start oversizes
+STATIC_OBJECT = {
+    "a.cpp": """struct Curve { constexpr Curve() {} virtual float eval(float t); virtual float span(); };
+float Curve::eval(float t) { return t * 2.0f; }
+float Curve::span() { return 1.0f; }
+Curve s_curve;
+Curve *curve() { return &s_curve; }
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class DataOnlyTableTests(unittest.TestCase):
+    def test_a_table_only_a_static_objects_vptr_points_to_is_found(self):
+        """No code forms `Curve`'s address point; the static object's vptr does, so the table is still found."""
+        from zkit import signatures
+        with tempfile.TemporaryDirectory() as temp:
+            at, module = _module(STATIC_OBJECT, Path(temp))
+            matcher = signatures.Matcher(_program(module), [])
+            matcher.tables["_ZTV5Curve"].append(["_ZN5Curve4evalEf", "_ZN5Curve4spanEv"])
+            self.assertIn(at["_ZTV5Curve"].value, matcher.itanium_tables())
+
+    def test_a_named_object_running_into_a_table_ends_at_its_start(self):
+        """A named object the gap to the next start sized takes in a table's header: it ends where the table
+        starts, as a placeholder label does."""
+        from zkit import analyze
+        from zkit.program import DataObject
+        with tempfile.TemporaryDirectory() as temp:
+            at, module = _module(STATIC_OBJECT, Path(temp))
+            table = at["_ZTV5Curve"]
+            program = _program(module)
+            named = Program(program.platform, program.image, program.functions,
+                            [DataObject(table.value - 8, 24, "s_dir", ".data", "global")], program.sda)
+            self.assertEqual(analyze._room_for(named, {table.value: table.size}), (set(), {table.value - 8: 8}))
+
+
 @unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
 class ExternalDataTests(unittest.TestCase):
     def test_a_global_one_files_initializer_constructs_joins_no_users(self):

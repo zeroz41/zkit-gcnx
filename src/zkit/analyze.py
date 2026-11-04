@@ -39,8 +39,9 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
         named += _slot_names(program, named)
         symbols = {p.address: (p.name, "function" if p.kind == "function" else "object", 0) for p in named}
         sizes = {p.address: p.size for p in named if p.kind == "object" and p.size}
-        tables = {p.address: _table_size(program, p.address) for p in named
-                  if p.kind == "object" and not p.size and p.name.startswith("_ZTV")}
+        # a table no base object starts at (only data points into it) is sized by the module's own words
+        tables = {p.address: _table_size(program, p.address) for p in named if p.kind == "object"
+                  and p.name.startswith("_ZTV") and (not p.size or p.address not in current)}
         tables = {address: size for address, size in tables.items() if size}
         sizes.update(tables)
         absorbed, resized = _room_for(program, tables)
@@ -157,17 +158,17 @@ def _table_size(program: Program, address: int) -> int:
 
 def _room_for(program: Program, tables: dict[int, int]) -> tuple[set[int], dict[int, int]]:
     """Placeholder data labels a newly sized table covers: those starting inside it (its own slots, a label the
-    code's pointer to them made) go, and one running into its start ends there. Named objects are kept."""
+    code's pointer to them made) go; named objects inside are kept. Any object running into its start, named or
+    not, ends there: objects never overlap, and a size the base found by the gap to the next start takes in the
+    header of a table no object started at."""
     absorbed: set[int] = set()
     resized: dict[int, int] = {}
     for address, size in tables.items():
         for o in program.objects:
-            if not _placeholder(o.name):
-                continue
-            if address < o.address < address + size:
+            if o.address < address < o.address + o.size:
+                resized[o.address] = min(resized.get(o.address, o.size), address - o.address)
+            elif _placeholder(o.name) and address < o.address < address + size:
                 absorbed.add(o.address)
-            elif o.address < address < o.address + o.size:
-                resized[o.address] = address - o.address
     return absorbed, resized
 
 

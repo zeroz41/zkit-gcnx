@@ -914,9 +914,10 @@ class Matcher:
         return self._slot_classes
 
     def itanium_tables(self) -> dict[int, list[tuple[str, int | str | None]]]:
-        """Switch: every primary class table the code forms the address point of (offset-to-top zero, typeinfo
-        zero without RTTI or a pointer into data with it, a function or an import in the first slot), by the
-        table's start, with its slots up to the first word that is neither."""
+        """Switch: every primary class table the code forms the address point of, or data points to (a static
+        object's vptr: a class no code constructs), with offset-to-top zero, typeinfo zero without RTTI or a
+        pointer into data with it, and a function or an import in the first slot, by the table's start, with its
+        slots up to the first word that is neither."""
         from .itanium import typeinfo_word
         if self._itanium_tables is None:
             self._itanium_tables = {}
@@ -924,6 +925,7 @@ class Matcher:
             if self.tables:
                 for rows in self.program.refs.values():
                     formed.update(address for _, address, kind in rows if kind == "addr")
+                formed.update(getattr(image, "pointers", {}).values())
             for point in sorted(formed):
                 start = point - 16
                 if start < 0 or image.section_at(start) is None or point % 8 or image.section_at(point) is None:
