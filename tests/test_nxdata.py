@@ -457,6 +457,26 @@ class CutShortObjectTests(unittest.TestCase):
                 proposal = signatures.Proposal(table.value, "_ZTV5Curve", "object", "table", size)
                 self.assertEqual(analyze._grown(program, [proposal], set()), grown)
 
+    def test_a_names_copy_the_donors_place_elsewhere_goes_back_to_a_label(self):
+        """Two base objects with one external name: the one the donors do not place is a label again; with no
+        donor placing it, or the donors placing both, or a name of internal linkage, nothing changes."""
+        from zkit import analyze, signatures
+        with tempfile.TemporaryDirectory() as temp:
+            at, module = _module(POOL, Path(temp))
+            pool = at["s_pool"]
+            copy = pool.value + 8
+            label = {a: f"lbl_{_program(module).platform.text(a)[2:]}" for a in (pool.value, copy)}
+            for name, placed, expected in (("_ZN2ns5s_objE", [pool.value], {copy: label[copy]}),
+                                           ("_ZN2ns5s_objE", [copy], {pool.value: label[pool.value]}),
+                                           ("_ZN2ns5s_objE", [], {}),
+                                           ("_ZN2ns5s_objE", [pool.value, copy], {}),
+                                           ("_ZN2nsL5s_objE", [pool.value], {})):
+                program = self._cut(_program(module), pool.value, 8, [(copy, 8, name)])
+                program = program.derived(objects=[type(o)(o.address, o.size, name, o.section, o.scope)
+                                                   for o in program.objects])
+                proposals = [signatures.Proposal(a, name, "object", "shape", 8) for a in placed]
+                self.assertEqual(analyze._misplaced(program, proposals), expected)
+
 
 @unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
 class ExternalDataTests(unittest.TestCase):

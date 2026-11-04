@@ -32,12 +32,18 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
               and (p.address not in initializers or p.name.startswith("_GLOBAL__sub_I_"))}
     if initializers:                                # what an initializer array calls is named by its file alone
         program = _unnamed(program, initializers)
+    misplaced = _misplaced(program, proposals) if program.platform.name != "gamecube" else {}
+    if misplaced:                                   # the copies of a name the donors place elsewhere are labels
+        from dataclasses import replace
+        program = program.derived(objects=[replace(o, name=misplaced[o.address]) if o.address in misplaced else o
+                                           for o in program.objects])
     current = {f.address: f.name for f in program.functions} | {o.address: o.name for o in program.objects}
     named = [p for p in proposals if p.kind != "label" and _placeholder(current.get(p.address))
              and p.address not in initializers]
     if program.platform.name != "gamecube":
         named += _slot_names(program, named)
-        symbols = {p.address: (p.name, "function" if p.kind == "function" else "object", 0) for p in named}
+        symbols = {address: (name, "object", 0) for address, name in misplaced.items()}
+        symbols |= {p.address: (p.name, "function" if p.kind == "function" else "object", 0) for p in named}
         sizes = {p.address: p.size for p in named if p.kind == "object" and p.size}
         # a table no base object starts at (only data points into it) is sized by the module's own words
         tables = {p.address: _table_size(program, p.address) for p in named if p.kind == "object"
@@ -212,6 +218,42 @@ def _grown(program: Program, proposals: list, named: set[int]) -> tuple[set[int]
         resized[p.address] = p.size
         absorbed.update(x.address for x in inside)
     return absorbed, resized
+
+
+def _misplaced(program: Program, proposals: list) -> dict[int, str]:
+    """Placeholder labels for the base objects that share an external name with another (a linked module holds
+    one object per external name; a strong one is defined once, the copies of a weak one are folded into one)
+    where the donors place that name at exactly one of them: the others had the name put on a wrong address.
+    Names of internal linkage (a file's own statics, which each file may have) are left alone."""
+    by_name: dict[str, list[int]] = {}
+    for o in program.objects:
+        if not _placeholder(o.name) and o.scope != "local" and not _internal(o.name):
+            by_name.setdefault(o.name, []).append(o.address)
+    copies = {name: set(addresses) for name, addresses in by_name.items() if len(addresses) > 1}
+    placed: dict[str, set[int]] = {}
+    for p in proposals:
+        if p.kind == "object" and p.address in copies.get(p.name, ()):
+            placed.setdefault(p.name, set()).add(p.address)
+    return {address: f"lbl_{program.platform.text(address)[2:]}" for name, at in placed.items() if len(at) == 1
+            for address in copies[name] - at}
+
+
+def _internal(name: str) -> bool:
+    """Whether an Itanium data name has internal linkage: `_ZL`, or an `L` before a source name of its nested
+    name (`_ZN2gfL7s_tableE`)."""
+    if name.startswith("_ZL"):
+        return True
+    if not name.startswith("_ZN"):
+        return False
+    i = 3
+    while i < len(name):
+        if name[i] == "L" and name[i + 1:i + 2].isdigit():
+            return True
+        length = re.match(r"\d+", name[i:])
+        if not length:
+            return False
+        i += len(length.group()) + int(length.group())
+    return False
 
 
 def _placeholder(name: str | None) -> bool:
