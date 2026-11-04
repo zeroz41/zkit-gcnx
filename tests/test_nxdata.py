@@ -403,6 +403,61 @@ class DataOnlyTableTests(unittest.TestCase):
             self.assertEqual(analyze._room_for(named, {table.value: table.size}), (set(), {table.value - 8: 8}))
 
 
+# a pool the code reads a member of at a fixed offset: a base that made a label of every address the code forms
+# cut the pool's symbol short at that member
+POOL = {
+    "a.cpp": """struct Pool { int head; int slots[63]; };
+Pool s_pool;
+int pick(int i) { return s_pool.slots[i] + s_pool.slots[40] + s_pool.head; }
+""",
+}
+
+
+@unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
+class CutShortObjectTests(unittest.TestCase):
+    def _cut(self, program, address, size, labels):
+        from zkit.program import DataObject
+        objects = [DataObject(address, size, "s_obj", ".data", "global")]
+        objects += [DataObject(a, n, name or f"lbl_{a:08X}", ".data", "global") for a, n, name in labels]
+        return Program(program.platform, program.image, program.functions, objects, program.sda)
+
+    def test_a_named_object_cut_short_by_labels_grows_to_its_donors_size(self):
+        """The donors' size of a named object the base cut at a member label: it grows over the label."""
+        from zkit import analyze, signatures
+        with tempfile.TemporaryDirectory() as temp:
+            at, module = _module(POOL, Path(temp))
+            pool = at["s_pool"]
+            program = self._cut(_program(module), pool.value, 8, [(pool.value + 8, pool.size - 8, "")])
+            proposal = signatures.Proposal(pool.value, "s_obj", "object", "shape", pool.size)
+            self.assertEqual(analyze._grown(program, [proposal], set()), ({pool.value + 8}, {pool.value: pool.size}))
+
+    def test_a_named_object_or_a_label_running_past_the_donors_size_keeps_it_short(self):
+        """A named object inside the donors' extent, or a label inside that runs past it, is another object."""
+        from zkit import analyze, signatures
+        with tempfile.TemporaryDirectory() as temp:
+            at, module = _module(POOL, Path(temp))
+            pool = at["s_pool"]
+            proposal = signatures.Proposal(pool.value, "s_obj", "object", "shape", pool.size)
+            for label in ((pool.value + 8, 8, "s_other"), (pool.value + 8, pool.size, "")):
+                program = self._cut(_program(module), pool.value, 8, [label])
+                self.assertEqual(analyze._grown(program, [proposal], set()), (set(), {}))
+
+    def test_a_table_grows_only_as_far_as_its_slots_reach(self):
+        """A donor's table that has more slots than this module's words hold is not this table's size."""
+        from zkit import analyze, signatures
+        with tempfile.TemporaryDirectory() as temp:
+            at, module = _module(STATIC_OBJECT, Path(temp))
+            table = at["_ZTV5Curve"]
+            program = self._cut(_program(module), table.value, 8, [(table.value + 8, 8, "")])
+            program = Program(program.platform, program.image, program.functions,
+                              [o if o.name != "s_obj" else type(o)(o.address, 8, "_ZTV5Curve", o.section, o.scope)
+                               for o in program.objects], program.sda)
+            for size, grown in ((table.size, ({table.value + 8}, {table.value: table.size})),
+                                (table.size + 8, (set(), {}))):
+                proposal = signatures.Proposal(table.value, "_ZTV5Curve", "object", "table", size)
+                self.assertEqual(analyze._grown(program, [proposal], set()), grown)
+
+
 @unittest.skipUnless(CLANG and LLD, "needs clang++ and ld.lld to build an AArch64 module")
 class ExternalDataTests(unittest.TestCase):
     def test_a_global_one_files_initializer_constructs_joins_no_users(self):

@@ -45,6 +45,9 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
         tables = {address: size for address, size in tables.items() if size}
         sizes.update(tables)
         absorbed, resized = _room_for(program, tables)
+        more, grown = _grown(program, proposals, {p.address for p in named} | set(tables))
+        absorbed |= more
+        resized |= {address: size for address, size in grown.items() if address not in resized}
         weak = {p.address for p in named if p.weak}
         with_data = _with_objects(program, _new_objects(program, symbols, sizes, set(current) - absorbed, weak))
         named_program = signatures.renamed(with_data, named)       # the names say which class owns a function
@@ -169,6 +172,45 @@ def _room_for(program: Program, tables: dict[int, int]) -> tuple[set[int], dict[
                 resized[o.address] = min(resized.get(o.address, o.size), address - o.address)
             elif _placeholder(o.name) and address < o.address < address + size:
                 absorbed.add(o.address)
+    return absorbed, resized
+
+
+def _grown(program: Program, proposals: list, named: set[int]) -> tuple[set[int], dict[int, int]]:
+    """(absorbed, resized) for the named objects the base symbols cut short: each grows to the donors' size
+    where only placeholder labels (the code's accesses to its members, which the base made labels of) lie inside,
+    wholly, none of them named or sized by this analysis (`named`) and no function. A class table grows only as
+    far as the module's own slot words reach (`_table_size`): a table can gain slots between builds. On builds
+    with real symbols an older build's object size never overran a newer build's object, nor did a table's
+    where the words reached it."""
+    import bisect
+    objects = sorted(program.objects, key=lambda o: o.address)
+    starts = [o.address for o in objects]
+    at = {o.address: o for o in objects}
+    code = sorted(f.address for f in program.functions)
+    segment = getattr(program.image, "segment_at", lambda _: None)
+    absorbed: set[int] = set()
+    resized: dict[int, int] = {}
+    for p in proposals:
+        o = at.get(p.address)
+        if p.kind != "object" or not p.size or o is None or _placeholder(o.name) or o.name != p.name \
+                or p.size <= o.size:
+            continue
+        end = p.address + p.size
+        if p.name.startswith("_ZTV") and _table_size(program, p.address) < p.size:
+            continue
+        if segment(p.address) != segment(end - 1):
+            continue
+        k = bisect.bisect_right(starts, p.address)
+        inside = []
+        while k < len(starts) and starts[k] < end:
+            inside.append(objects[k])
+            k += 1
+        f = bisect.bisect_right(code, p.address)
+        if f < len(code) and code[f] < end or any(not _placeholder(x.name) or x.address in named
+                                                    or x.address + x.size > end for x in inside):
+            continue
+        resized[p.address] = p.size
+        absorbed.update(x.address for x in inside)
     return absorbed, resized
 
 
