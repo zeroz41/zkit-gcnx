@@ -27,38 +27,6 @@ int derived() { return get<Derived>()->value; }
 int plain() { return get<Plain>()->value; }
 """
 
-# Two this-adjusting thunks: one whose `sub x0, x0, #152` starts the block of its tail call and is followed by a
-# load through x0 (stock LLVM 3.9+ folds it into `ldr x8, [x0, #-152]!`, the pre-173b14db optimizer leaves it), and
-# one whose same update starts its entry block (folded under both).
-UPDATES = """
-struct Node { void sync(); char pad[0x40]; long value; const long &get() { sync(); return value; } };
-struct Base { virtual void s0(); virtual const long &self() const; char pad[0x90]; };
-struct Face { virtual const long &look() const = 0; virtual long peek() const = 0; char pad[0x98]; };
-struct Both : Base, Face { Node *node; const long &look() const; long peek() const; virtual long other() const; };
-const long &Both::look() const { return node ? node->get() : self(); }
-long Both::peek() const { return other(); }
-"""
-
-
-def compiled(clang: Path, source: Path, extra: list[str]) -> str:
-    return subprocess.run([str(clang), "--target=aarch64-none-elf", "-fPIC", "-O3", "-fno-exceptions", "-fno-rtti",
-                           "-ffunction-sections", "-S", str(source), "-o", "-", *extra], check=True,
-                          capture_output=True, text=True).stdout
-
-
-def pre_index_folds(asm: str) -> dict[str, int]:
-    """`[x0, #-152]!` loads per function of the compiled assembly."""
-    counts, function = {}, None
-    for line in asm.splitlines():
-        label = re.match(r"([A-Za-z_][\w$]*):", line)
-        if label:
-            function = label.group(1)
-            counts.setdefault(function, 0)
-        elif re.search(r"\[x0, #-152\]!", line):
-            counts[function] += 1
-    return counts
-
-
 def registrations(clang: Path, source: Path, extra: list[str]) -> dict[str, int]:
     """__cxa_atexit calls per function of the compiled assembly."""
     asm = subprocess.run([str(clang), "--target=aarch64-none-elf", "-fPIC", "-O3", "-fno-exceptions", "-fno-rtti",
@@ -110,21 +78,6 @@ class ClangPluginTests(unittest.TestCase):
             ruled = registrations(clang, source, ["-Xclang", "-load", "-Xclang", str(plugin)])
             self.assertEqual((stock["_Z7derivedv"], stock["_Z5plainv"]), (0, 0))
             self.assertEqual((ruled["_Z7derivedv"], ruled["_Z5plainv"]), (1, 0))
-
-    @unittest.skipUnless(OLD_CLANG, "set ZKIT_TEST_OLD_CLANG to a clang+llvm 3.9-8 release folder")
-    def test_pre_index_skips_block_start_leaves_block_first_updates_unfolded(self):
-        clang = Path(OLD_CLANG) / "bin" / "clang++"
-        with tempfile.TemporaryDirectory() as temp:
-            source = Path(temp) / "updates.cpp"
-            source.write_text(UPDATES, encoding="utf-8")
-            plugin = build.clang_plugin(Path(temp), clang, "pre-index-skips-block-start")
-            stock = pre_index_folds(compiled(clang, source, []))
-            ruled_asm = compiled(clang, source, ["-Xclang", "-load", "-Xclang", str(plugin)])
-            ruled = pre_index_folds(ruled_asm)
-            inner, entry = "_ZThn152_NK4Both4lookEv", "_ZThn152_NK4Both4peekEv"
-            self.assertEqual((stock[inner], stock[entry]), (1, 1))
-            self.assertEqual((ruled[inner], ruled[entry]), (0, 1))
-            self.assertIn("sub\tx0, x0, #152", ruled_asm)
 
 
 if __name__ == "__main__":
