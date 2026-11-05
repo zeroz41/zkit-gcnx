@@ -189,6 +189,11 @@ class ProgressTests(unittest.TestCase):
             self.assertIn("| Code |", text.split(progress.README_START)[1].split(progress.README_END)[0])
             self.assertFalse(progress.write_readme(project, ["t"], readme))      # same report: no change
             self.assertEqual(text.count(progress.README_START), 1)
+            readme.write_text("# Game\n\n## Progress\n\n[![Code]][page]\n\n## Building\n", encoding="utf-8")
+            self.assertTrue(progress.write_readme(project, ["t"], readme))      # existing heading: no second one
+            text = readme.read_text(encoding="utf-8")
+            self.assertEqual(text.count("## Progress"), 1)
+            self.assertLess(text.index(progress.README_END), text.index("[![Code]]"))
 
 
 class QualityTests(unittest.TestCase):

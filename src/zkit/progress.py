@@ -542,7 +542,8 @@ def readme_block(reports: list[tuple[str, dict]]) -> str:
 
 def write_readme(project: Project, targets: list[str], path: Path) -> bool:
     """Rewrite the progress table between the README's markers from the current reports; True when it changed.
-    A README without the markers gets a `## Progress` section with them before its first `##` heading."""
+    A README without the markers gets them under its `## Progress` heading, or a `## Progress` section with them
+    before its first `##` heading when it has none."""
     reports = []
     for target in targets:
         report = report_path(project, target)
@@ -551,6 +552,11 @@ def write_readme(project: Project, targets: list[str], path: Path) -> bool:
         reports.append((target, load(report)))
     text = path.read_text(encoding="utf-8") if path.is_file() else ""
     start, end = text.find(README_START), text.find(README_END)
+    if start < 0 or end < start:
+        existing = re.search(r"(?mi)^## +progress *\n\n?", text)
+        if existing:
+            text = text[:existing.end()] + f"{README_START}\n{README_END}\n\n" + text[existing.end():]
+            start, end = text.find(README_START), text.find(README_END)
     if start < 0 or end < start:
         section = f"## Progress\n\n{README_START}\n{README_END}\n\n"
         heading = re.search(r"(?m)^## ", text)
