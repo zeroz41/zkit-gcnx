@@ -42,6 +42,7 @@ TYPES_PRELUDE = (
     "typedef int BOOL;\ntypedef unsigned long size_t;\n"
     "#ifndef NULL\n#define NULL 0\n#endif\n"
 )
+TYPES_INCLUDE = re.compile(r'(?m)^[ \t]*#\s*include\s+"types\.h"[ \t]*$')
 CXX_SUFFIXES = {".cpp", ".cc", ".cp", ".cxx", ".c++"}
 DEP_FLAGS = {"-MMD", "-MD", "-MP", "-M", "-MM"}
 DEP_ARGS = {"-MF", "-MT", "-MQ"}
@@ -95,9 +96,15 @@ def inline_project_includes(text: str, folders: list[Path], seen: set | None = N
 
 def reduce_to_c(text: str, folders: list[Path]) -> str:
     """A C++ or extern-"C" seed as C the permuter parses, with the compiler still seeing the original text."""
-    text = inline_project_includes(text, folders)
-    text = re.sub(r'#\s*include\s+"types\.h"', TYPES_PRELUDE.rstrip(), text, count=1)
-    text = re.sub(r'(?m)^[ \t]*#\s*include\s+"types\.h"[ \t]*$', "", text)
+    seen: set = set()
+    inlined = inline_project_includes(text, folders, seen)
+    # The prelude goes first: a header inlined above the seed's own types.h include, or one whose types.h include
+    # was dropped while inlining, already uses f32/u32.
+    headers = [folder / name for name in seen for folder in folders if (folder / name).is_file()]
+    uses_types = any(TYPES_INCLUDE.search(body) for body in [text] + [path.read_text(errors="replace") for path in headers])
+    text = TYPES_INCLUDE.sub("", inlined)
+    if uses_types:
+        text = TYPES_PRELUDE + text
     # Remove the matching linkage braces, never the last function's brace. Seeds may contain several linkage
     # blocks, a single-declaration linkage specifier, or a trailing pragma after the final block.
     tokens = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', re.S)
@@ -127,6 +134,8 @@ def reduce_to_c(text: str, folders: list[Path]) -> str:
                if not re.search(rf"\btypedef\s+struct\s+{re.escape(name)}\s+{re.escape(name)}\s*;", text)]
     if aliases:
         text = "\n".join(aliases) + "\n" + text
+    # A forward `class X;` is a C syntax error; the class key does not change CodeWarrior's codegen or mangling.
+    text = re.sub(r"\bclass(\s+[A-Za-z_]\w*\s*;)", r"struct\1", text)
     # pycparser has no `bool`; it parses C99 `_Bool`, which compile.sh maps back (`#define _Bool bool`).
     text = re.sub(r"\bbool\b", "_Bool", text)
     text = hide_section_declspecs(preserve_virtual_calls(preserve_default_arguments(text)))

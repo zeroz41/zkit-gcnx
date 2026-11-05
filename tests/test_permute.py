@@ -368,6 +368,24 @@ int main() { Plain p; p.a = 1; p.b = 0; return chosen(&p) == 11 ? 0 : 1; }
         self.assertEqual(reduced.count('typedef signed long s32;'), 1)
         self.assertNotIn('#include', reduced)
 
+    def test_prelude_precedes_headers_included_before_types_h(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'include' / 'ui').mkdir(parents=True)
+            (root / 'include' / 'ui' / 'text.h').write_text('#include "types.h"\nvoid draw(f32 x, u32 c);\n')
+            reduced = reduce('#include "ui/text.h"\n#include "types.h"\nvoid f(void) { draw(1.0f, 2); }\n',
+                             [root / 'include'])
+        self.assertLess(reduced.index('typedef float f32;'), reduced.index('void draw(f32 x'))
+        self.assertEqual(reduced.count('typedef float f32;'), 1)
+        parsed = subprocess.run(['cc', '-x', 'c', '-fsyntax-only', '-'], input=reduced, text=True, capture_output=True)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+
+    def test_forward_class_declarations_parse(self):
+        reduced = reduce('#include "types.h"\nclass TObject;\ns32 f(TObject *o) { return o != 0; }\n')
+        self.assertIn('struct TObject;', reduced)
+        parsed = subprocess.run(['cc', '-x', 'c', '-fsyntax-only', '-'], input=reduced, text=True, capture_output=True)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+
     def test_reduction_rejects_unbalanced_linkage(self):
         with self.assertRaisesRegex(ValueError, 'unbalanced C linkage'):
             reduce('extern "C" { int f(void) { return 1; }')
