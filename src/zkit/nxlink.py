@@ -400,11 +400,38 @@ def _link_objects(linker: Linker, objects: list[_Object], results: dict[str, Uni
         done.add(key)
         obj = by_unit[key[0]]
         queue += _relocate(linker, obj, placed[key], placed, results[obj.unit])
+    _refuse_overlaps(linker, placed, results)
     for item in placed.values():
         _compare(linker, item, results[item.unit])
     for obj in objects:
         _cover(linker, obj, results[obj.unit], placed)
     return bytes(linker.image) == linker.original
+
+
+def _refuse_overlaps(linker: Linker, placed: dict, results: dict[str, UnitLink]) -> None:
+    """A section no name places goes where the original's reference reaches; when another placed section already
+    holds those bytes and this section's differ from them, the reference reaches that other function, not a copy of
+    this one (clang emits a destructor that only runs its base's as the base's own under -mconstructor-aliases,
+    where the inline is linkonce, so the original's table slot holds the base's). The section placed by reference
+    is then refused, left unwritten, and its unit does not link: a unit that does not link leaves the original's
+    bytes. Identical bytes at the same place are code the original's linker folded: they stand."""
+    items = sorted(placed.values(), key=lambda p: (p.address, p.reason == "reference"))
+    holder = None
+    for item in items:
+        end = item.address + item.section.size
+        if holder is not None and item.address < holder.address + holder.section.size and \
+                "reference" in (item.reason, holder.reason):
+            # (two sections that names place on the same bytes are copies the original's linker folded: both stand)
+            refused, kept = (item, holder) if item.reason == "reference" else (holder, item)
+            start, size = refused.address, refused.section.size
+            if refused.resolved and refused.section.type != SHT_NOBITS and \
+                    bytes(refused.data) != linker.original[start:start + size]:
+                refused.resolved = False
+                results[refused.unit].problems.append(
+                    f"{refused.section.name} would go at {linker.platform.text(refused.address)}, where "
+                    f"{kept.section.name} of {kept.unit} is placed: the original's reference reaches that one")
+        if holder is None or end > holder.address + holder.section.size:
+            holder = item
 
 
 def _first_difference(linker: Linker) -> dict[str, str]:

@@ -258,6 +258,33 @@ class SwitchToolTests(unittest.TestCase):
                 nxlink._value(linker, obj, symbol, relocation, 0xC0, ("address", pointee), [], placed, result)
                 self.assertEqual(placed[("u", 1)].address, placed_at)
 
+    def test_a_section_reached_where_a_named_one_stands_is_refused_and_leaves_the_original(self):
+        """A derived destructor that only runs its base's, reached from a table slot whose original word holds the
+        base destructor's address (clang aliased the two there): placed by that reference, it would overwrite the
+        base destructor placed by name. It is refused, both its unit's problem and the original's bytes stay, and
+        two sections names put on the same bytes (folded copies) both stand."""
+        from types import SimpleNamespace
+        from zkit import nxlink
+        from zkit.platform import Switch
+        original = bytes.fromhex("fd7bbfa9" "fd030091" "fd7bc1a8" "c0035fd6")
+        linker = SimpleNamespace(original=original, image=bytearray(original), platform=Switch(),
+                                 segment=lambda at: None)
+        code = lambda name, size: SimpleNamespace(name=name, size=size, type=1, flags=nxlink.SHF_EXECINSTR)
+        base = nxlink.Placed(code(".text._ZN4BaseD2Ev", 16), 0, bytearray(original), "u", "name")
+        derived = nxlink.Placed(code(".text._ZN7DerivedD2Ev", 4), 0, bytearray.fromhex("00000014"), "u",
+                                "reference")
+        folded = nxlink.Placed(code(".text._ZN5OtherD2Ev", 16), 0, bytearray(original), "v", "name")
+        placed = {("u", 1): base, ("u", 2): derived, ("v", 1): folded}
+        results = {"u": nxlink.UnitLink("u", True), "v": nxlink.UnitLink("v", True)}
+        nxlink._refuse_overlaps(linker, placed, results)
+        for item in placed.values():
+            nxlink._compare(linker, item, results[item.unit])
+        self.assertEqual(bytes(linker.image), original)
+        self.assertFalse(derived.resolved)
+        self.assertTrue(base.resolved and folded.resolved)
+        self.assertTrue(any("_ZN7DerivedD2Ev would go at" in p for p in results["u"].problems))
+        self.assertEqual(results["v"].problems, [])
+
     def test_a_recursive_call_the_split_object_resolved_in_place_is_the_same_call(self):
         """A weak function calling itself: the compiled object relocates the `bl` against its own symbol, while
         the original's split object resolved it in place (`bl` back to the function's start). The same call."""
