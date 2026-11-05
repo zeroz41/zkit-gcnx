@@ -166,7 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("query", help="the function's address or name")
     c.add_argument("candidate", type=Path, help="source file: the function and the includes it needs, or a unit copy")
     c.add_argument("--force", action="store_true", help="past the attempt cap (say why in your notes)")
-    c.add_argument("--keep", type=Path, help="also copy the compiled object here")
+    c.add_argument("--keep", type=Path, help="also copy the compiled object to this .o path")
     c.add_argument("--unit", action="store_true", help="the candidate is the whole unit (query: the unit or an "
                    "address in it): every function compared and, on Switch, the object linked into the original; "
                    "lists what became identical or was lost against the tree's build; records no attempts")
@@ -772,6 +772,8 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             data = check_unit(project, target, args.query, args.candidate, _folders(args.include))
             return data, render.candidate_unit(data)
         from .candidate import check
+        if args.keep and args.keep.suffix != ".o":
+            raise ValueError(f"--keep takes the path of an object file to write (ending in .o), not {str(args.keep)!r}")
         data = check(project, target, args.query, args.candidate, args.force, args.keep, _folders(args.include))
         return data, render.candidate(data)
     if command == "twins":
