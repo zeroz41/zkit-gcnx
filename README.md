@@ -112,7 +112,7 @@ Clean up the decomp source in large proven steps. Use zkit-clean-source. Finish 
 | `zkit probe <unit> test.cpp` | compile an experiment with the unit's exact command and read its code |
 | `zkit compiled 0x80012345` | your built function against the original |
 | `zkit progress` | how much is matched and linked |
-| `zkit report --readme` | the browsable progress page, and the progress table in your README |
+| `zkit report --readme` | the browsable progress page, and the progress table between your README's `<!-- progress -->` markers |
 | `zkit build` | build, check and relink the project |
 | `zkit gate` | what to run before you stop |
 

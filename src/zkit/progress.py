@@ -540,34 +540,23 @@ def readme_block(reports: list[tuple[str, dict]]) -> str:
     return "\n".join(lines).rstrip("\n")
 
 
-def write_readme(project: Project, targets: list[str], path: Path) -> bool:
-    """Rewrite the progress table between the README's markers from the current reports; True when it changed.
-    A README without the markers gets them under its `## Progress` heading, or a `## Progress` section with them
-    before its first `##` heading when it has none."""
+def write_readme(project: Project, targets: list[str], path: Path) -> str:
+    """Rewrite the progress table between the README's markers from the current reports: "updated", "unchanged",
+    or "no-markers" when the README has none. Markers are never added: a README without them (one that shows
+    progress through CI badges, or none at all) is the owner's choice and is left alone."""
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    start, end = text.find(README_START), text.find(README_END)
+    if start < 0 or end < start:
+        return "no-markers"
     reports = []
     for target in targets:
         report = report_path(project, target)
         if not report.is_file():
             raise ValueError(f"No report for {target} at {report}: build the project first")
         reports.append((target, load(report)))
-    text = path.read_text(encoding="utf-8") if path.is_file() else ""
-    start, end = text.find(README_START), text.find(README_END)
-    if start < 0 or end < start:
-        existing = re.search(r"(?mi)^## +progress *\n\n?", text)
-        if existing:
-            text = text[:existing.end()] + f"{README_START}\n{README_END}\n\n" + text[existing.end():]
-            start, end = text.find(README_START), text.find(README_END)
-    if start < 0 or end < start:
-        section = f"## Progress\n\n{README_START}\n{README_END}\n\n"
-        heading = re.search(r"(?m)^## ", text)
-        at = heading.start() if heading else len(text)
-        text = text[:at] + ("" if not text[:at] or text[:at].endswith("\n\n") else
-                            "\n" if text[:at].endswith("\n") else "\n\n") + section + text[at:]
-        start, end = text.find(README_START), text.find(README_END)
-    original = path.read_text(encoding="utf-8") if path.is_file() else None
     updated = text[:start + len(README_START)] + "\n" + readme_block(reports) + "\n" + text[end:]
     updated = updated.rstrip("\n") + "\n"
-    if updated == original:
-        return False
+    if updated == text:
+        return "unchanged"
     path.write_text(updated, encoding="utf-8")
-    return True
+    return "updated"

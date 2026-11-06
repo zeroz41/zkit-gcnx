@@ -171,7 +171,7 @@ class ProgressTests(unittest.TestCase):
                            c["measures"]["total_units"]) for c in shown["summary"]["categories"]], [("ns", 48, 32, 2)])
         self.assertEqual(sorted(u["module"] for u in data(None)["units"]), ["ns", "ns", "unit_7100002000"])
 
-    def test_readme_progress_table_between_markers_or_added(self):
+    def test_readme_progress_table_only_between_existing_markers(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "build").mkdir()
@@ -182,18 +182,36 @@ class ProgressTests(unittest.TestCase):
                 "repository": "decomp", "module": "main", "report": "build/report.json"}}}), encoding="utf-8")
             project = Project.load(manifest)
             readme = root / "README.md"
-            readme.write_text("# Game\n\nAbout it.\n\n## Building\n\nninja\n", encoding="utf-8")
-            self.assertTrue(progress.write_readme(project, ["t"], readme))
+            badges = "# Game\n\n## Progress\n\n[![Code]][page]\n\n## Building\n"
+            readme.write_text(badges, encoding="utf-8")
+            self.assertEqual(progress.write_readme(project, ["t"], readme), "no-markers")   # badges only: untouched
+            self.assertEqual(readme.read_text(encoding="utf-8"), badges)
+            readme.write_text(f"# Game\n\n## Progress\n\n{progress.README_START}\n{progress.README_END}\n",
+                              encoding="utf-8")
+            self.assertEqual(progress.write_readme(project, ["t"], readme), "updated")
             text = readme.read_text(encoding="utf-8")
-            self.assertLess(text.index("## Progress"), text.index("## Building"))
             self.assertIn("| Code |", text.split(progress.README_START)[1].split(progress.README_END)[0])
-            self.assertFalse(progress.write_readme(project, ["t"], readme))      # same report: no change
+            self.assertEqual(progress.write_readme(project, ["t"], readme), "unchanged")
             self.assertEqual(text.count(progress.README_START), 1)
-            readme.write_text("# Game\n\n## Progress\n\n[![Code]][page]\n\n## Building\n", encoding="utf-8")
-            self.assertTrue(progress.write_readme(project, ["t"], readme))      # existing heading: no second one
-            text = readme.read_text(encoding="utf-8")
-            self.assertEqual(text.count("## Progress"), 1)
-            self.assertLess(text.index(progress.README_END), text.index("[![Code]]"))
+
+    def test_hygiene_forbids_progress_table(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            readme = root / "README.md"
+            readme.write_text("# Game\n\n## Progress\n\n| | Matched | Linked |\n|:--|--:|--:|\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "README.md"], check=True)
+            manifest = root / "p.json"
+            config = {"schema_version": 1, "id": "readme", "repositories": {"decomp": {
+                "root": ".", "role": "decomp", "hygiene": {"progress_table": "forbid"}}}, "targets": {}}
+            manifest.write_text(json.dumps(config), encoding="utf-8")
+            found = hygiene.files(Project.load(manifest), "decomp")["findings"]
+            self.assertEqual([(f["kind"], f["severity"]) for f in found if f["kind"] == "progress-table"],
+                             [("progress-table", "error")])
+            config["repositories"]["decomp"]["hygiene"] = {}
+            manifest.write_text(json.dumps(config), encoding="utf-8")
+            found = hygiene.files(Project.load(manifest), "decomp")["findings"]
+            self.assertFalse([f for f in found if f["kind"] == "progress-table"])
 
 
 class QualityTests(unittest.TestCase):

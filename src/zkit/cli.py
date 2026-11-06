@@ -433,7 +433,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--targets", nargs="*", help="targets to include (default: every target with a report)")
     c.add_argument("--readme", nargs="?", type=Path, const=Path("README.md"),
                    help="also rewrite the progress table between <!-- progress --> and <!-- /progress --> in this "
-                        "file (default: the repository's README.md)")
+                        "file (default: the repository's README.md); markers are never added, and a repository whose "
+                        "hygiene sets progress_table: forbid is skipped")
     c = add("quality", help="Decompiler debt left in the source (hand-mangled names, raw offsets, fake vtables, "
                             "temporaries, placeholder names), at the working tree or a revision")
     c.add_argument("repo", nargs="?")
@@ -1047,8 +1048,17 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         if args.readme is not None:
             readme = args.readme.expanduser()
             readme = readme if readme.is_absolute() else root / readme
-            result["readme"] = {"path": str(readme), "changed": progress.write_readme(project, targets, readme)}
-            said += f"\n{'updated' if result['readme']['changed'] else 'unchanged'}: progress table in {readme}"
+            from .hygiene import policy
+            repo = project.target(targets[0])["repository"]
+            if policy(project, repo)["progress_table"] == "forbid":
+                result["readme"] = {"path": str(readme), "status": "forbidden"}
+                said += (f"\nskipped: {repo} forbids a progress table in its README (hygiene progress_table); "
+                         "its progress is published by CI")
+            else:
+                status = progress.write_readme(project, targets, readme)
+                result["readme"] = {"path": str(readme), "status": status, "changed": status == "updated"}
+                said += (f"\nskipped: {readme} has no <!-- progress --> markers; none are added"
+                         if status == "no-markers" else f"\n{status}: progress table in {readme}")
         return result, said
     if command == "quality":
         from . import quality

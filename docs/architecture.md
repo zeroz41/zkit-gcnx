@@ -180,7 +180,8 @@ matched and linked code and data bytes, exact functions and units, and changes k
 fold is not a regression; `report.html` is a self-contained page of the same, which every build writes to
 `build/progress/index.html` beside a copy of each report it shows, titled by the manifest's `title` and
 `subtitle`; a target with one module (a Switch `main`) is browsed by source folder. `zkit report --readme` writes
-a small table of the totals between `<!-- progress -->` markers in the decomp's README (adding them when missing).
+a small table of the totals between `<!-- progress -->` markers in the decomp's README (it never adds them: a README without markers is left alone, and a repository whose hygiene sets
+`progress_table: forbid` is skipped and fails `zkit hygiene` if a table appears).
 
 ### The index and the evidence tools
 

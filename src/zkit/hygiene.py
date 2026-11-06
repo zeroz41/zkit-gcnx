@@ -53,6 +53,7 @@ DEFAULTS: dict[str, Any] = {
     "forbidden_files": list(ORIGINAL_FILES),
     "allowed_files": [],
     "max_file_kb": 2048,
+    "progress_table": "allow",  # "forbid" when progress is published elsewhere (CI badges): no generated table
 }
 
 
@@ -243,6 +244,13 @@ def files(project: Project, repo: str) -> dict[str, Any]:
         elif rules["dated_docs"] == "forbid" and len(NARRATIVE.findall(text)) >= 3:
             add("narrative-doc", path, "reads as a session log (dated or 'later/next session' sections); "
                                       "documentation states how things are now", "warning")
+    if rules["progress_table"] == "forbid":
+        from .progress import README_END, README_START
+        for path in docs:
+            text = texts.get(path, "")
+            if README_START in text or README_END in text or re.search(r"(?m)^\|.*\| *Matched *\| *Linked *\|", text):
+                add("progress-table", path, "has a generated progress table; this repository publishes progress "
+                                            "through CI only (hygiene progress_table: forbid)")
     if len(docs) > rules["max_docs"]:
         findings.append({"kind": "doc-bloat", "path": f"{len(docs)} documents", "severity": "warning",
                          "message": f"{len(docs)} tracked documents (limit {rules['max_docs']}): the truth drifts "
