@@ -22,7 +22,7 @@ from mcp.types import ToolAnnotations
 from . import bridge, inspect_dol, render, session
 from .activity import activity, write_handoff
 from .platform import platform_name
-from .project import Project
+from .project import Project, tree_overlay
 from .guidance import PORT_GUIDANCE
 
 Format = Literal["text", "json"]
@@ -164,6 +164,15 @@ def create_server(project: Project) -> FastMCP:
         """Project for tools that read the original executable and decomp report. `repo` is optional and
         accepted because agents pass repo="decomp" everywhere; a decomp worktree path reads that worktree."""
         return scoped(repo)[0] if repo else current()
+
+    def tree(repo: str | None, *files: str | None) -> Project:
+        """decomp(repo) for tools that compile with a unit's command or read built objects: without repo, the
+        git worktree the server runs in (or the one holding a file passed in), so its own headers are used."""
+        if repo:
+            return decomp(repo)
+        p = current()
+        here, worktree = p.locate(Path.cwd())
+        return tree_overlay(p, target(p), here, worktree, files=[Path(f).expanduser() for f in files if f])
 
     def out(data, text: str, response_format: Format) -> str:
         return _json(data) if response_format == "json" else _cap(text)
@@ -431,7 +440,7 @@ def create_server(project: Project) -> FastMCP:
         candidate so far (default: the unit's source). Returns the command that runs the permuter (it runs until
         stopped; run it from a shell). A zero score is a match: check output-0-*/source.c with `zkit try`."""
         from . import permute
-        p = decomp(repo)
+        p = tree(repo, seed)
         data = permute.scratch(p, target(p), query, Path(seed).expanduser() if seed else None)
         return out(data, render.permute(data), response_format)
 
@@ -472,7 +481,7 @@ def create_server(project: Project) -> FastMCP:
         every function of the unit; several queries (space separated) give a batch. Relocations to the same place,
         constant or jump table under other names count as identical. Reads the objects the last build wrote (and
         says when one is older than its source); objdiff's report stays the match authority."""
-        p = decomp(repo)
+        p = tree(repo)
         data = bridge.compiled(p, query, target(p), max(1, min(limit, 200)))
         return out(data, render.compiled(data), response_format)
 

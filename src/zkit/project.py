@@ -209,6 +209,29 @@ class Project:
         return self.file(repository, relative)
 
 
+def tree_overlay(project: Project, target: str | None, here: str | None, worktree: str | None, explicit: bool = False,
+                 files=()) -> Project:
+    """`project` reading the working tree a compile command means: `--repo` when given (already applied), else
+    the git worktree holding the current directory, else the worktree holding the candidate file, else the
+    configured checkout."""
+    if explicit or not target:
+        return project
+    repo = project.target(target)["repository"]
+    if project.worktree(repo):
+        return project
+    if here == repo and worktree:
+        return project.with_overlay(repo, worktree)
+    for path in files:
+        if path is None:
+            continue
+        folder = Path(path).expanduser().resolve().parent
+        if folder.is_dir():
+            name, tree = project.locate(folder)
+            if name == repo and tree:
+                return project.with_overlay(repo, tree)
+    return project
+
+
 def under(path: str, prefixes) -> bool:
     """path equals or lies inside one of the prefixes (folder boundaries respected)."""
     return any(path == p.rstrip("/") or path.startswith(p.rstrip("/") + "/") for p in prefixes)

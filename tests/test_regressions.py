@@ -141,6 +141,55 @@ class AuditRegressions(unittest.TestCase):
         self.assertTrue(any(f["rule"] == "forbidden" for f in inside["findings"]))
         self.assertFalse(any(f["rule"] == "forbidden" for f in check(self.project, "native")["findings"]))
 
+    def test_try_and_probe_compile_in_the_worktree_they_run_in(self):
+        """A worker in a git worktree of the decomp compiles against that worktree's headers, not the main
+        checkout's: from its cwd, from a candidate file inside it, or named with --repo."""
+        import contextlib
+        import io
+        import os
+        from unittest import mock
+        from zkit import cli
+        from zkit.project import tree_overlay
+        self.git(self.decomp, "init", "-q")
+        self.git(self.decomp, "add", "-A")
+        self.git(self.decomp, "commit", "-qm", "base")
+        tree = self.decomp.parent / "decomp-wt"
+        self.git(self.decomp, "worktree", "add", "-q", "--detach", str(tree))
+        wt = str(tree.resolve())
+        here, worktree = self.project.locate(tree / "src")
+        self.assertEqual(tree_overlay(self.project, "t", here, worktree).root("decomp"), tree.resolve())
+        main_here, main_tree = self.project.locate(self.decomp)
+        self.assertEqual(tree_overlay(self.project, "t", main_here, main_tree).root("decomp"), self.decomp.resolve())
+        by_file = tree_overlay(self.project, "t", None, None, files=[tree / "src/Enemy.cpp"])
+        self.assertEqual(by_file.worktree("decomp"), wt)
+        self.assertIsNone(tree_overlay(self.project, "t", here, worktree, explicit=True).worktree("decomp"))
+        # The build command comes from the worktree's own compile database, so `-i include` is its include/.
+        from zkit import candidate
+        for root in (self.decomp, tree):
+            (root / "build/compile_commands.json").write_text(json.dumps([{
+                "directory": str(root), "file": "src/Enemy.cpp",
+                "arguments": ["mwcc", "-i", "include", "-c", "src/Enemy.cpp"]}]), encoding="utf-8")
+        unit = {"name": "Enemy", "base_path": "build/src/Enemy.o", "metadata": {"source_path": "src/Enemy.cpp"}}
+        self.assertEqual(candidate.compile_command(by_file, "t", unit)[1], tree.resolve())
+        self.assertEqual(candidate.compile_command(self.project, "t", unit)[1], self.decomp.resolve())
+        seen = []
+        result = {"unit": "Enemy", "source": "f.cpp", "command": "", "compiled": True, "warnings": "", "functions": []}
+        fake = lambda project, *a, **k: seen.append(str(project.root("decomp"))) or result
+        scratch = self.decomp.parent / "scratch"
+        scratch.mkdir()
+        (scratch / "f.cpp").write_text("void f() {}\n", encoding="utf-8")
+        cwd = os.getcwd()
+        try:
+            with mock.patch("zkit.candidate.probe", fake), contextlib.redirect_stdout(io.StringIO()):
+                for folder, extra in ((tree / "src", []), (self.decomp, []), (scratch, ["--repo", wt]),
+                                      (tree, ["--repo", "decomp"])):
+                    os.chdir(folder)
+                    self.assertEqual(cli.main(["--project", str(self.manifest), "probe", "Enemy",
+                                               str(scratch / "f.cpp"), *extra]), 0)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(seen, [wt, str(self.decomp.resolve()), wt, str(self.decomp.resolve())])
+
     def test_cli_accepts_json_after_subcommand_and_batches_asm(self):
         from zkit import cli
         import contextlib

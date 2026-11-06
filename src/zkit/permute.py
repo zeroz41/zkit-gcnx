@@ -52,8 +52,12 @@ def find_permuter(project: Project) -> Path | None:
     """The project file's `permuter`, $PERMUTER_DIR, the checkout `zkit build --download` fetched, or a
     decomp-permuter checkout beside a repository."""
     candidates = [project.config.get("permuter"), os.environ.get("PERMUTER_DIR")]
-    candidates += [str(project.root(repo) / "build/tools/decomp-permuter") for repo in project.config["repositories"]]
-    candidates += [str(project.root(repo).parent / "decomp-permuter") for repo in project.config["repositories"]]
+    # A git worktree (project.root) shares the configured checkout's tools: look beside both.
+    index_root = getattr(project, "index_root", project.root)
+    roots = list(dict.fromkeys(root for repo in project.config["repositories"]
+                               for root in (project.root(repo), index_root(repo))))
+    candidates += [str(root / "build/tools/decomp-permuter") for root in roots]
+    candidates += [str(root.parent / "decomp-permuter") for root in roots]
     for candidate in candidates:
         if candidate and (Path(candidate).expanduser() / "permuter.py").is_file():
             return Path(candidate).expanduser().resolve()

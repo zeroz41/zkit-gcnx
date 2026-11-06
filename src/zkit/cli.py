@@ -51,6 +51,10 @@ def find_manifest(explicit: Path | None, strict: bool = False) -> Path | None:
     raise ValueError(NO_PROJECT)
 
 
+WORKTREE_HELP = ("the checkout to compile in: a repo key or a git worktree path (default: the worktree you are in, "
+                 "else the one holding the file, else the configured checkout)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="zkit", description="Cross-repo evidence for decomp + native-port work")
     from . import __version__
@@ -161,12 +165,14 @@ def build_parser() -> argparse.ArgumentParser:
                              "differing words with both disassemblies")
     c.add_argument("query", help="address, name, or a unit name from objdiff.json")
     c.add_argument("--limit", type=int, default=24)
+    c.add_argument("--repo", help=WORKTREE_HELP)
     c = add("try", help="Compile a candidate (outside the tree) with its unit's exact command and compare the "
                         "function with the original; records the attempt (cap 4 per address)")
     c.add_argument("query", help="the function's address or name")
     c.add_argument("candidate", type=Path, help="source file: the function and the includes it needs, or a unit copy")
     c.add_argument("--force", action="store_true", help="past the attempt cap (say why in your notes)")
     c.add_argument("--keep", type=Path, help="also copy the compiled object to this .o path")
+    c.add_argument("--repo", help=WORKTREE_HELP)
     c.add_argument("--unit", action="store_true", help="the candidate is the whole unit (query: the unit or an "
                    "address in it): every function compared and, on Switch, the object linked into the original; "
                    "lists what became identical or was lost against the tree's build; records no attempts")
@@ -179,6 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("query", help="the unit whose command compiles it: its name, or an address in it")
     c.add_argument("source", type=Path, help="the file to compile")
     c.add_argument("names", nargs="*", help="functions to show (a name or part of one); default all")
+    c.add_argument("--repo", help=WORKTREE_HELP)
     c.add_argument("--include", type=Path, action="append", default=[], metavar="DIR",
                    help="header copies searched before the tree's (repeatable)")
     c = add("sweep", help="Near-misses (Switch and GameCube): rewrite one function's source site by site (operand order, compound "
@@ -191,6 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("query", help="the function's address or name")
     c.add_argument("candidate", type=Path, help="source file holding the function (a unit copy or a try file)")
     c.add_argument("--out", type=Path, help="where to write the best text (default build/sweep/<address>.cpp)")
+    c.add_argument("--repo", help=WORKTREE_HELP)
     c.add_argument("--jobs", type=int, help="compiles at once (default: half the CPUs)")
     c.add_argument("--rounds", type=int, default=12, help="most rewrites taken one after another")
     c.add_argument("--seconds", type=float, default=600.0)
@@ -319,6 +327,7 @@ def build_parser() -> argparse.ArgumentParser:
                             "disassembly for scoring (GameCube)")
     c.add_argument("query", help="the function's address or name")
     c.add_argument("--seed", type=Path, help="the best candidate so far (default: the unit's source)")
+    c.add_argument("--repo", help=WORKTREE_HELP)
     c.add_argument("--out", type=Path, help="scratch folder (default: build/permuter/<function> in the decomp)")
     c.add_argument("--run", action="store_true", help="run the permuter (stops at the first zero score) and verify "
                                                       "every zero-score output against the target object")
@@ -667,6 +676,10 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         elif command not in ("brief",):
             raise ValueError(f"Run inside a configured repo (or a git worktree of one) or name one: "
                              f"{', '.join(project.config['repositories'])}")
+    if command in TREE_COMMANDS:
+        from .project import tree_overlay
+        project = tree_overlay(project, target, here, worktree, explicit=bool(getattr(args, "repo", None)),
+                               files=[getattr(args, name, None) for name in ("candidate", "source", "seed")])
     if command == "brief":
         data = session.brief(project, args.repo)
         return data, render.brief(data, compact=args.repo is None and not args.full)
@@ -1154,6 +1167,11 @@ def _hook_agent() -> str:
         return str(json.loads(sys.stdin.read() or "{}").get("agent_type") or "")
     except (OSError, ValueError, AttributeError):
         return ""
+
+
+# Commands that compile with a unit's command or read the tree's built objects. In a git worktree of the target's
+# repository they use that worktree's sources, headers and build.ninja, not the configured checkout's.
+TREE_COMMANDS = ("try", "probe", "sweep", "compiled", "permute", "misses")
 
 
 def _folders(paths: list[Path]) -> list[Path]:
