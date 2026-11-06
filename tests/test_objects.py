@@ -62,6 +62,37 @@ class ObjectTests(unittest.TestCase):
         build(self.root, "cached", SOURCE.replace("add(", "sum("), TARGETS["aarch64"])
         self.assertEqual(set(Elf.load(path).functions()), {"sum", "scale"})
 
+    def test_unit_a_worktree_moved_is_found_by_its_object(self):
+        import json
+
+        class _Project:
+            def __init__(self, root):
+                self.base = root
+
+            def target(self, name):
+                return {"repository": "decomp"}
+
+            def root(self, repo):
+                return self.base
+
+            def file(self, repo, name):
+                return self.base / name
+
+        (self.root / "obj").mkdir()
+        build(self.root / "obj", "Enemy", SOURCE, TARGETS["ppc"])
+        build(self.root / "obj", "Other", "int other(void) { return 1; }\n", TARGETS["ppc"])
+        units = [{"name": "game/enemy/kind/Enemy", "target_path": "obj/Enemy.o"},
+                 {"name": "game/misc/Other", "target_path": "obj/Other.o"}]
+        (self.root / "objdiff.json").write_text(json.dumps({"units": units}), encoding="utf-8")
+        project = _Project(self.root)
+        moved = objects.unit_holding(project, "t", {"unit": "game/enemy/Enemy", "name": "add"})
+        self.assertEqual(moved["name"], "game/enemy/kind/Enemy")
+        renamed = objects.unit_holding(project, "t", {"unit": "game/Gone", "name": "other"})
+        self.assertEqual(renamed["name"], "game/misc/Other")
+        self.assertIsNone(objects.unit_holding(project, "t", {"unit": "game/Gone", "name": "absent"}))
+        self.assertEqual(objects.unit_holding(project, "t", {"unit": "game/misc/Other", "name": "x"})["name"],
+                         "game/misc/Other")
+
     def test_tree_delta_lists_gains_and_losses(self):
         from zkit.candidate import _tree_delta
         for machine, triple in TARGETS.items():

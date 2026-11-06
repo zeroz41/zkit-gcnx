@@ -390,6 +390,19 @@ int main() { Plain p; p.a = 1; p.b = 0; return chosen(&p) == 11 ? 0 : 1; }
         with self.assertRaisesRegex(ValueError, 'unbalanced C linkage'):
             reduce('extern "C" { int f(void) { return 1; }')
 
+    @unittest.skipUnless(shutil.which("cpp"), "needs a host cpp")
+    def test_c_shaped_seed_parses_and_real_class_header_is_refused_with_the_line(self):
+        self.assertIsNone(permute.parse_problem(reduce(
+            '#include "types.h"\nstruct Plain { s32 x; };\nextern "C" s32 f(Plain *p) { return p->x; }\n')))
+        problem = permute.parse_problem(reduce(
+            'class TObject {\npublic:\n    struct Node { int v; };\n    int get() const { return m_v; }\n'
+            '    int m_v;\n};\nint TObject_get(TObject *o) { return o->get(); }\n'))
+        self.assertIsNotNone(problem)
+        self.assertIn("TObject", problem)
+        message = permute.cxx_refusal("get__7TObjectCFv", problem)
+        self.assertIn("C-shaped candidate", message)
+        self.assertIn("permute and C++", message)
+
 
 if __name__ == "__main__":
     unittest.main()

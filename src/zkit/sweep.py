@@ -1632,7 +1632,7 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
     row = containing(connect(project), target, found[0])
     if row is None:
         raise ValueError(f"{query} is not inside a known function")
-    unit = objects.objdiff_units(project, target).get(row["unit"] or "")
+    unit = objects.unit_holding(project, target, row)
     if unit is None:
         raise ValueError(f"{row['address']} belongs to no objdiff unit ({row['unit']})")
     root = project.root(project.target(target)["repository"])

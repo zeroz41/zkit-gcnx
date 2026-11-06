@@ -204,6 +204,41 @@ they survive renames, unit folds and file moves.
 | `check` / `gate` | Rule hits on added lines; the repo's finish gate | Semantics; whether the gate passes until it is run |
 | port tools | Which original functions native code cites and whether the decomp is ready (exact, named, clean) for them; where native behavior probably differs; which tests cover a change | That ported code is correct: a citation is a mention, not a verification |
 
+### Worktrees
+
+A command run inside a git worktree of a configured repository reads that worktree; the index stays the configured
+checkout's. Commands that compile with a unit's command or read built objects (`try`, `probe`, `sweep`,
+`compiled`, `permute`, `misses`) use the worktree's sources, headers, `build.ninja` and `objdiff.json`: the one the
+current directory is in, else the one holding the candidate file, else the configured checkout; `--repo <key or
+worktree path>` overrides both. A unit the worktree renamed or moved is found by its last path part, then by the
+target object that defines the function.
+
+### permute and C++
+
+decomp-permuter parses base.c with pycparser, a C99 parser. `permute.py` lowers a C++ seed only as far as C-shaped
+code: headers inlined, linkage blocks dropped, `bool` as `_Bool`, plain classes (no nested braces) flattened into
+parser-only structs, member calls through typed pointers as typed macros, default arguments and section declspecs
+hidden behind the permuter's late-literal pragmas. A seed that still does not parse is refused before the scratch
+is written, with the construct and line pycparser stopped at; a seed that compiles without defining the function
+is refused too. Real class headers (nested types, inline bodies, constructors, operators, references, templates,
+C++ casts) need the design below, which is not built yet:
+
+- Isolate the target. Everything before and after the target function goes to the compiler only, verbatim
+  (`#pragma _permuter b64literal`), so includes, linkage and namespaces stay as written and compile.sh compiles
+  the file as C++ with no `extern "C"` wrap.
+- The parser sees only the target, its name and qualified names spelled as identifiers (`Cls::m` as `Cls_zk_m`),
+  with compiler-only `#define`s mapping them back (a function-like one for a `const` member), `bool` as `_Bool`,
+  and `this`, implicit members and `p->m()` left as they are: all three are C syntax.
+- Parser-only context (`#pragma _permuter latedefine`), generated from the seed preprocessed as C++: every class
+  as a flattened C struct (base fields first, methods as function-pointer fields so call types resolve, nested
+  types hoisted as `Outer_zk_Inner`), typedefs and enums, and for a member target `Cls *this;` plus the members it
+  uses as globals. Each item is test-parsed and replaced by `int name;` (or dropped) when pycparser rejects it;
+  only what the target reaches is emitted.
+- Outputs are restored before verification: the define block removed and every alias spelled back, so the
+  verified candidate is bankable C++.
+- Constructors (initializer lists), destructors, operators, references, templates, `new`/`delete` and C++ casts
+  in the target itself stay refused with the line that fails.
+
 ### Discipline
 
 `quality.py` measures decompiler debt in the source (hand-mangled names, raw pointer offsets, fake vtables,

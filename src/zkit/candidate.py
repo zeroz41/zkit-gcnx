@@ -398,8 +398,7 @@ def check(project: Project, target: str, query: str, candidate: Path, force: boo
                          f"Best so far: {-best if best is not None and best > -10**9 else '?'} differing words "
                          f"(`zkit misses {address} --restore DIR` writes it out). "
                          "--force overrides with a reason.")
-    units = objects.objdiff_units(project, target)
-    unit = units.get(row["unit"] or "")
+    unit = objects.unit_holding(project, target, row)
     if unit is None:
         raise ValueError(f"{address} belongs to no objdiff unit ({row['unit']})")
     out: dict[str, Any] = {"address": address, "function": row["name"], "unit": row["unit"],
@@ -453,7 +452,7 @@ def _unit_for(project: Project, target: str, query: str) -> dict:
         refresh(project)
         found = bridge.resolve(project, query, target, limit=2)
         row = containing(connect(project), target, found[0]) if len(found) == 1 else None
-        unit = units.get(row["unit"]) if row is not None and row["unit"] else None
+        unit = objects.unit_holding(project, target, row) if row is not None else None
     if unit is None:
         raise ValueError(f"{query} names no objdiff unit (give the unit's name or an address in it)")
     return unit

@@ -2070,7 +2070,7 @@ def compiled(project: Project, query: str, target: str | None = None, limit: int
     row = containing(db, target, found[0])
     if row is None or not row["unit"]:
         raise ValueError(f"{query} is not a function of any objdiff unit")
-    unit = units.get(row["unit"])
+    unit = objects.unit_holding(project, target, row)
     if not unit or not unit.get("base_path"):
         raise ValueError(f"Unit {row['unit']} has no compiled object yet (no source, or not built)")
     target_path, base_path = root / unit["target_path"], root / unit["base_path"]

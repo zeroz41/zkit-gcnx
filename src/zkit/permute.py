@@ -10,7 +10,9 @@ destinations relative to its start, because target objects hold whole units.
 The permuter parses base.c as C (pycparser). C++ seeds are lowered for the parser only: project headers are
 inlined, extern "C" wrappers dropped, class definitions, member calls, default arguments and section declspecs are
 shown to the parser as C while the compiler receives the original text (the permuter's late-literal pragmas), and
-compile.sh compiles the result as C++ inside extern "C". Seeds with other C++-only syntax need a C-shaped candidate.
+compile.sh compiles the result as C++ inside extern "C". A seed that still does not parse (real class headers:
+nested types, inline bodies, constructors, references, templates) is refused with the line pycparser stops at and
+needs a C-shaped candidate; docs/architecture.md ("permute and C++") has the design for lowering those.
 
     zkit permute 0x8000FF3C --seed best.cpp          # write the scratch, print the run command
     zkit permute 0x8000FF3C --seed best.cpp --run    # run it (--stop-on-zero, 180 s) and verify every zero
@@ -403,6 +405,46 @@ def wrapped(source: str, cxx: bool) -> str:
     return '#define _Bool bool\nextern "C" {\n' + source + "\n}\n" if cxx else source
 
 
+def parse_problem(base: str) -> str | None:
+    """Why decomp-permuter's C parser rejects base.c (preprocessed as it does: cpp -P -nostdinc), or None."""
+    try:
+        from pycparser import c_parser
+    except ImportError:
+        return None
+    try:
+        expanded = subprocess.run(["cpp", "-P", "-nostdinc", "-DPERMUTER", "-"], input=base, capture_output=True,
+                                  text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None   # no host cpp: the permuter reports it
+    if expanded.returncode:
+        return None
+    text = re.sub(r"^#ident.*", "", expanded.stdout, flags=re.M)
+    try:
+        c_parser.CParser().parse(text, "<base.c>")
+    except c_parser.ParseError as error:
+        message = str(error)
+        found = re.match(r"[^:]*:(\d+)(?::\d+)?:\s*(.*)", message)
+        if not found:
+            return message
+        lines = text.splitlines()
+        number = int(found[1])
+        line = lines[number - 1].strip() if 0 < number <= len(lines) else ""
+        return f"{found[2]} in `{line[:160]}`"
+    except Exception as error:  # pycparser asserts on some inputs
+        return f"{type(error).__name__}: {error}"
+    return None
+
+
+def cxx_refusal(name: str, problem: str) -> str:
+    return (f"zkit permute cannot lower this C++ seed for decomp-permuter's C parser (pycparser): {problem}.\n"
+            "Only C-shaped C++ seeds work today: plain structs, simple classes without nested braces, member calls "
+            "through typed pointers, default arguments. Class definitions with nested types, inline bodies, "
+            "constructors or operators, references, templates and C++ casts are not lowered yet "
+            "(docs/architecture.md, 'permute and C++'). Instead: give --seed a C-shaped candidate (the function "
+            f"as `{name}` inside extern \"C\", taking the object as a `Cls *self` first parameter, with only the "
+            "plain struct layout it reads), or close the gap with `zkit sweep`, which compiles C++ as it is.")
+
+
 def scratch(project: Project, target: str, query: str, seed: Path | None = None, out: Path | None = None) -> dict:
     """Write the permuter scratch for one function; returns where everything went and how to run it."""
     from . import bridge, objects
@@ -425,7 +467,7 @@ def scratch(project: Project, target: str, query: str, seed: Path | None = None,
     row = containing(db, target, found[0])
     if row is None:
         raise ValueError(f"{query} is not inside a known function")
-    unit = objects.objdiff_units(project, target).get(row["unit"] or "")
+    unit = objects.unit_holding(project, target, row)
     if unit is None or not (unit.get("metadata") or {}).get("source_path"):
         raise ValueError(f"{address_text(row['address'])} has no unit with a source file yet ({row['unit']}): give "
                          "it its owning unit first")
@@ -448,21 +490,30 @@ def scratch(project: Project, target: str, query: str, seed: Path | None = None,
     if checked.get("reloc_only"):
         raise ValueError(f"{name} differs from the original only in relocations: that is data ownership "
                          "(`zkit compiled` names the symbols), not a permuter job")
+    if checked.get("missing"):
+        raise ValueError(f"The seed compiles but defines no {name}: write the function under the original's name "
+                         f"({row['demangled'] or name}) so the permuter can score it")
+    cxx = source.suffix.lower() in CXX_SUFFIXES
+    base = reduce_to_c(seed_text, folders)
+    if cxx:
+        problem = parse_problem(base)
+        if problem:
+            raise ValueError(cxx_refusal(name, problem))
     folder = (out or root / "build" / "permuter" / re.sub(r"[^\w.-]", "_", name)).resolve()
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "base.c").write_text(reduce_to_c(seed_text, folders), encoding="utf-8")
+    (folder / "base.c").write_text(base, encoding="utf-8")
     (folder / "target.o").write_bytes(target_o.read_bytes())
     (folder / "function.txt").write_text(name + "\n", encoding="utf-8")
     script = folder / "compile.sh"
-    script.write_text(compile_script(compile_argv(argv, source_arg, source.parent, workdir), workdir,
-                                     source.suffix.lower() in CXX_SUFFIXES), encoding="utf-8")
+    script.write_text(compile_script(compile_argv(argv, source_arg, source.parent, workdir), workdir, cxx),
+                      encoding="utf-8")
     script.chmod(0o755)
     (folder / "settings.toml").write_text(settings(name, objdump), encoding="utf-8")
     permuter = find_permuter(project)
     command = run_command(permuter or Path("decomp-permuter"), folder)
-    return {"function": name, "address": address_text(row["address"]), "unit": row["unit"],
+    return {"function": name, "address": address_text(row["address"]), "unit": unit["name"],
             "seed": str(seed_path), "seed_differences": checked.get("differences"), "target": str(target_o),
-            "scratch": str(folder), "cxx": source.suffix.lower() in CXX_SUFFIXES,
+            "scratch": str(folder), "cxx": cxx,
             "permuter": str(permuter) if permuter else None, "run": shlex.join(command)}
 
 

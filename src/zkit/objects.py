@@ -47,6 +47,31 @@ def objdiff_units(project: Project, target: str) -> dict[str, dict]:
     return {u["name"]: u for u in data.get("units", []) if u.get("name")}
 
 
+def unit_holding(project: Project, target: str, row) -> dict | None:
+    """The objdiff unit holding an index row's function. The index reads the configured checkout's splits; a git
+    worktree's objdiff.json may have moved or renamed the unit, so a name it lacks is found by its last path part,
+    then by the target object that defines the function."""
+    units = objdiff_units(project, target)
+    name = row["unit"] or ""
+    if name in units:
+        return units[name]
+    root = project.root(project.target(target)["repository"])
+
+    def defines(unit: dict) -> bool:
+        path = root / unit.get("target_path", "")
+        try:
+            return unit.get("target_path") and path.is_file() and row["name"] in Elf.load(path).functions()
+        except (OSError, ValueError):
+            return False
+
+    stem = name.rsplit("/", 1)[-1]
+    alike = [unit for key, unit in units.items() if stem and key.rsplit("/", 1)[-1] == stem]
+    for unit in alike:
+        if defines(unit):
+            return unit
+    return next((unit for unit in units.values() if unit not in alike and defines(unit)), None)
+
+
 def _symbol_name(elf: Elf, index: int) -> str:
     symbol = elf.symbols[index] if index < len(elf.symbols) else None
     if symbol is None:
