@@ -20,13 +20,14 @@ from typing import Any
 
 from .bridge import HEX, _status, _symbol_table, default_target, resolve, status_word
 from .gc import read_splits
-from .index import address_text, connect, containing, refresh
+from .index import MODULE_SHIFT, address_text, connect, containing, is_dol_unit, refresh
 from .platform import for_target
 from .project import Project
 
 CODE_SECTIONS = {".text", ".init"}
 LITERAL_SECTIONS = {".sdata2", ".rodata", ".sbss2"}  # compiler-pooled constants: a unit's own copy, not a shared global
 _SPLITS: dict[str, tuple[str, list, list[int]]] = {}
+_TREE_REPORTS: dict[str, tuple[str, dict]] = {}
 
 
 def splits(project: Project, target: str) -> tuple[list[tuple[str, str, int, int]], list[int]]:
@@ -44,6 +45,63 @@ def splits(project: Project, target: str) -> tuple[list[tuple[str, str, int, int
         rows = sorted(read_splits(path), key=lambda r: r[2])
         cached = _SPLITS[str(path)] = (stamp, rows, [r[2] for r in rows])
     return cached[1], cached[2]
+
+
+def _tree_report(project: Project, target: str) -> dict[int, dict] | None:
+    """In a git worktree, that worktree's own objdiff report by function address (match, linked, unit, source).
+    The shared index holds the configured checkout's report, whose link state does not describe the worktree's
+    splits: a unit the worktree linked or regrew would show as exact but not linked. None outside a worktree."""
+    config = project.target(target)
+    if not project.worktree(config["repository"]) or not config.get("report"):
+        return None
+    path = project.file(config["repository"], config["report"])
+    if not path.is_file():
+        return None
+    info = path.stat()
+    stamp = f"{info.st_mtime_ns}:{info.st_size}"
+    cached = _TREE_REPORTS.get(str(path))
+    if cached and cached[0] == stamp:
+        return cached[1]
+    try:
+        data = json.loads(path.read_bytes())
+    except ValueError:  # half-written during a rebuild: fall back to the shared index
+        return None
+    platform = for_target(config)
+    module = config.get("module")
+    out: dict[int, dict] = {}
+    for entry in data.get("units", []):
+        meta = entry.get("metadata", {})
+        base = 0
+        if not is_dol_unit(meta, module):
+            number = int(meta.get("module_id") or 0)
+            if not number or config.get("rels") is False:
+                continue
+            base = number << MODULE_SHIFT
+        for function in entry.get("functions") or []:
+            value = function.get("metadata", {}).get("virtual_address")
+            if value is None:
+                continue
+            value = int(value)
+            if not base and platform.base and value >= platform.base:
+                value -= platform.base
+            out[base + value] = {"match": function.get("fuzzy_match_percent"), "linked": bool(meta.get("complete")),
+                                 "unit": entry["name"], "source": meta.get("source_path")}
+    _TREE_REPORTS[str(path)] = (stamp, out)
+    return out
+
+
+def _functions(project: Project, db, target: str, start: int, end: int) -> list[dict]:
+    """The functions in [start, end) with their match and link state, from the worktree's report in a worktree."""
+    tree = _tree_report(project, target) or {}
+    rows = []
+    for record in db.execute("SELECT * FROM functions WHERE target=? AND address>=? AND address<? ORDER BY address",
+                             (target, start, end)):
+        row = _status(record)
+        state = tree.get(record["address"])
+        if state:
+            row.update(state, exact=state["match"] == 100)
+        rows.append(row)
+    return rows
 
 
 def split_owner(project: Project, target: str, address: int) -> dict | None:
@@ -128,9 +186,7 @@ def unit(project: Project, query: str, target: str | None = None, limit: int = 4
     functions: list[dict] = []
     for _, section, start, end in ranges:
         if section in CODE_SECTIONS:
-            functions += [_status(r) for r in db.execute(
-                "SELECT * FROM functions WHERE target=? AND address>=? AND address<? ORDER BY address",
-                (target, start, end))]
+            functions += _functions(project, db, target, start, end)
     counts = collections.Counter()
     for f in functions:
         counts["total"] += 1
@@ -220,13 +276,11 @@ def blocked(project: Project, target: str | None = None, limit: int = 40) -> dic
     for name, section, start, end in rows:
         if section not in CODE_SECTIONS:
             continue
-        total, exact, linked = db.execute(
-            "SELECT count(*), coalesce(sum(match >= 100), 0), coalesce(sum(linked), 0) FROM functions "
-            "WHERE target=? AND address>=? AND address<?", (target, start, end)).fetchone()
         counts = per_unit[name]
-        counts[0] += total
-        counts[1] += exact
-        counts[2] += linked
+        for row in _functions(project, db, target, start, end):
+            counts[0] += 1
+            counts[1] += (row["match"] or 0) >= 100
+            counts[2] += row["linked"]
     candidates = [name for name, (total, exact, linked) in per_unit.items() if total and exact == total and linked < total]
     linked_units = sum(1 for total, exact, linked in per_unit.values() if total and linked == total)
     from .build import layout

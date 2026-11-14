@@ -106,6 +106,19 @@ class StructureTests(unittest.TestCase):
         self.assertTrue(any("used by other units" in r for r in data["units"][0]["reasons"]))
         self.assertTrue(any("literal" in r for r in data["units"][0]["reasons"]))
 
+    def test_blocked_in_a_worktree_reads_its_own_report(self):
+        import shutil
+        from zkit.structure import blocked, unit
+        tree = Path(self.temp.name) / "tree"
+        shutil.copytree(self.project.root("decomp"), tree)
+        report = json.loads((tree / "build/report.json").read_text(encoding="utf-8"))
+        report["units"][0]["metadata"]["complete"] = True  # the worktree linked Enemy; the checkout has not
+        (tree / "build/report.json").write_text(json.dumps(report), encoding="utf-8")
+        overlay = self.project.with_overlay("decomp", tree)
+        self.assertEqual(blocked(overlay)["units"], [])
+        self.assertEqual(unit(overlay, "game/Enemy")["functions"]["linked"], 1)
+        self.assertEqual([u["unit"] for u in blocked(self.project)["units"]], ["game/Enemy.cpp"])
+
     def test_classes_reports_symbols_that_are_not_tables(self):
         from zkit.classes import audit_project
         data = audit_project(self.project)
