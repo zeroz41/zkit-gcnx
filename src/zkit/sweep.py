@@ -88,11 +88,43 @@ def definitions(ast_text: str) -> list[dict]:
             out.append(node)
 
 
+def char_offsets(decls: list[dict], text: str) -> list[dict]:
+    """The dump's source offsets turned from clang's UTF-8 byte offsets into indexes of `text`, so a file with
+    non-ASCII text (a string literal or comment in another script) slices right; offsets past the file (another
+    file's locations) are left alone."""
+    data = text.encode("utf-8")
+    if len(data) == len(text):
+        return decls
+    index = [0] * (len(data) + 1)
+    at = 0
+    for i, ch in enumerate(text):
+        width = len(ch.encode("utf-8"))
+        for k in range(width):
+            index[at + k] = i
+        at += width
+    index[at] = len(text)
+
+    def visit(node) -> None:
+        if isinstance(node, dict):
+            offset = node.get("offset")
+            if isinstance(offset, int) and 0 <= offset <= len(data) and ("line" in node or "col" in node
+                                                                         or "tokLen" in node):
+                node["offset"] = index[offset]
+            for value in node.values():
+                visit(value)
+        elif isinstance(node, list):
+            for value in node:
+                visit(value)
+
+    visit(decls)
+    return decls
+
+
 def body_of(decls: Iterable[dict], text: str, name: str, symbol: str | None = None) -> dict | None:
     """The body (CompoundStmt) of the definition of `name` (the function's unqualified name, or its `symbol` when
     the source spells the mangled name with C linkage) in the parsed text; of several (methods of other classes,
     overloads) the one whose mangled name is `symbol`, when the dump names one."""
-    decls = list(decls)
+    decls = char_offsets(list(decls), text)
     if symbol and any(d.get("mangledName") == symbol for d in decls):
         decls = sorted(decls, key=lambda d: d.get("mangledName") != symbol)
     for decl in decls:

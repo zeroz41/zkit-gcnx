@@ -599,3 +599,14 @@ def test_a_codewarrior_symbol_names_its_ctor_dtor_and_method():
     assert sweep._symbol_simple_name("__dt__20TWindowShortListCtrlFv") == "~TWindowShortListCtrl"
     assert sweep._symbol_simple_name("get_flags__20TWindowShortListCtrlFl") == "get_flags"
     assert sweep._symbol_simple_name("_ZN1A6updateEi") == "update"
+
+
+@unittest.skipUnless(CLANG, "needs a host clang that writes JSON ASTs")
+def test_a_body_after_and_with_non_ascii_text_is_found_and_rewritten():
+    text = ('// 管理\nconst char16_t* note = u"領域";\nstruct H { int total; void run(int v); };\n'
+            'void H::run(int v) {\n    const char16_t* m = u"枯渇しました";\n    total = total + v;\n}\n')
+    body = parse(text, "run")
+    assert body is not None
+    found = {r.what: r for r in sweep.rewrites(text, body)}
+    assert "total = total + v -> total += v" in found
+    assert "total += v;" in found["total = total + v -> total += v"].apply(text)
