@@ -1171,7 +1171,9 @@ def _hook_agent() -> str:
 
 # Commands that compile with a unit's command or read the tree's built objects. In a git worktree of the target's
 # repository they use that worktree's sources, headers and build.ninja, not the configured checkout's.
-TREE_COMMANDS = ("try", "probe", "sweep", "compiled", "permute", "misses")
+# Commands that read the working tree run in: a git worktree of the repo reads its own files. `unit` reads
+# splits.txt and symbols.txt, so inside a worktree it must not report the configured checkout's split state.
+TREE_COMMANDS = ("try", "probe", "sweep", "compiled", "permute", "misses", "unit")
 
 
 def _folders(paths: list[Path]) -> list[Path]:
