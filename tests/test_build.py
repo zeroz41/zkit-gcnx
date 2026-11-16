@@ -115,6 +115,27 @@ class SettingsTests(unittest.TestCase):
             self.assertNotIn("stage", plain)
             self.assertNotIn("-iquote", plain["flags"])
 
+    def test_the_compiler_must_say_an_accepted_version(self):
+        """`compiler_version` is a string `clang --version` must contain, or a list of them (hosts whose own
+        release of the compiler differs but compiles alike)."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "clang++").write_text("")
+            for accepted, says, ok in (("clang version 3.9.1", "clang version 3.9.1 (tags/RELEASE_391/final)", True),
+                                       ("clang version 3.9.1", "clang version 3.9.0 (tags/RELEASE_390/final)", False),
+                                       (["clang version 3.9.1", "clang version 3.9.0"], "clang version 3.9.0", True),
+                                       (["clang version 3.9.1", "clang version 3.9.0"], "clang version 4.0.1", False)):
+                config = build.settings({"platform": "switch", "build": {"compiler": str(root / "clang++"),
+                                                                          "compiler_version": accepted}})
+                unit = build.unit_settings(config, "a.cpp")
+                with self.subTest(accepted=accepted, says=says), \
+                        mock.patch.object(build, "clang_version", return_value=says):
+                    if ok:
+                        build._compile(root, unit, "a.cpp", build.layout("t", {}), {}, [])
+                    else:
+                        with self.assertRaisesRegex(ValueError, "it says 'clang version"):
+                            build._compile(root, unit, "a.cpp", build.layout("t", {}), {}, [])
+
     def test_a_staged_copy_names_the_original_and_keeps_its_lines(self):
         """The copy's `#line` comes first, after a byte-order mark if there is one; every line keeps its number."""
         self.assertEqual(build.stage(b"int a;\n", "D:/p/a.cpp"), b'#line 1 "D:/p/a.cpp"\nint a;\n')

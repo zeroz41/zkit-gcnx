@@ -356,6 +356,13 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--download-build-tools", action="store_true",
                    help="--download, but only what building needs: the compilers, wibo and objdiff-cli (not LLVM, "
                         "binutils, m2c or decomp-permuter, which only analysis uses)")
+    c = add("extract", help="Switch: write each target's missing original (its `original` file, checked against its "
+                            "`sha1`) out of the game's packages (.nsp, .xci: the game and its updates), decrypted with "
+                            "prod.keys; `zkit build` does this by itself from the original's folder or one above it")
+    c.add_argument("sources", nargs="*", type=Path, help="packages, or folders searched with their subfolders "
+                                                         "(default: the original's folder and those above it)")
+    c.add_argument("--keys", type=Path, help="prod.keys (default: next to the packages, then ~/.switch and the "
+                                             "emulators' folders)")
     c = add("refs", help="Where a function or global is defined, declared and used in the source (any spelling)")
     c.add_argument("query", nargs="+")
     c.add_argument("--repo")
@@ -953,6 +960,12 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
                                args.download or args.download_build_tools, quiet=args.json,
                                analysis=not args.download_build_tools)
         return data, build.render(data)
+    if command == "extract":
+        from . import build
+        project = project.with_overlay(here, worktree) if here else project
+        data = build.extract(project, here, args.target, [s.expanduser().resolve() for s in args.sources],
+                             args.keys.expanduser().resolve() if args.keys else None)
+        return data, build.render_extract(data)
     if command == "refs":
         data = bridge.refs(project, " ".join(args.query), target, project.repo_key(args.repo) if args.repo else None,
                            args.limit)

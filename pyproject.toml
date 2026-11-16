@@ -11,6 +11,7 @@ readme = "README.md"
 license = "GPL-3.0-only"
 keywords = ["gamecube", "switch", "decompilation", "delinker", "mcp"]
 dependencies = [
+  "cryptography>=41",  # `zkit extract` and `zkit build` read Switch packages (.nsp, .xci) with it
   "mcp>=1.30,<2",
   "psutil>=5.9; sys_platform != 'linux'",
   "pycparser>=2.21",  # m2c and decomp-permuter, which `zkit m2c` and `zkit permute` run with zkit's Python

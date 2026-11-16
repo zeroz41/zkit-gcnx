@@ -114,6 +114,7 @@ Clean up the decomp source in large proven steps. Use zkit-clean-source. Finish 
 | `zkit progress` | how much is matched and linked |
 | `zkit report --readme` | the browsable progress page, and the progress table between your README's `<!-- progress -->` markers |
 | `zkit build` | build, check and relink the project |
+| `zkit extract [folder]` | Switch: take the original executable out of the game's `.nsp`/`.xci` files (with your `prod.keys`); `zkit build` does it by itself when they sit in the original's folder or one above it |
 | `zkit gate` | what to run before you stop |
 
 `zkit --help` lists everything, and `zkit doctor` checks your setup and says how to fix what's missing.

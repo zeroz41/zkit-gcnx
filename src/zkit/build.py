@@ -397,6 +397,8 @@ def configure(project: Project, repository: str | None = None, only: str | None 
             raise ValueError(f"Target {name} has no `splits` file: the units come from it")
         splits = project.file(repository, target["splits"])
         original = project.file(repository, target["original"]) if target.get("original") else None
+        if original is not None and not original.is_file() and config["platform"] == "switch":
+            notes.append(_provide_original(root, name, target, original))
         if original is None or not original.is_file():
             raise ValueError(f"Target {name}: the original {target.get('original')} is missing")
         units = unit_names(splits)
@@ -504,6 +506,65 @@ def configure(project: Project, repository: str | None = None, only: str | None 
             "default": defaults}
 
 
+def _provide_original(root: Path, name: str, target: dict[str, Any], original: Path) -> str:
+    """A Switch original that is missing comes out of the game's packages (.nsp/.xci) in its folder or one above
+    it in the repository, decrypted with prod.keys there or in the user's usual places (`nxpackage`)."""
+    from . import nxpackage
+    folders = nxpackage.near(root, original)
+    try:
+        done = nxpackage.provide(original, target.get("sha1"), folders)
+    except nxpackage.NotFound as error:
+        where = _relative(folders[-2] if len(folders) > 1 else folders[0], root)
+        why = "" if isinstance(error, nxpackage.NoPackages) and "compressed" not in str(error) else f" ({error})"
+        raise ValueError(f"Target {name}: the original {target['original']} is missing: put the game's packages "
+                         f"(.nsp or .xci: the game and its update) and prod.keys in {where}/, or run `zkit extract "
+                         f"<folder>`{why}") from None
+    return f"extracted {target['original']} from {Path(done['package']).name}"
+
+
+def extract(project: Project, repository: str | None = None, only: str | None = None,
+            sources: list[Path] = (), keys: Path | None = None) -> dict[str, Any]:
+    """`zkit extract`: each Switch target's missing original out of the game's packages among `sources` (files, or
+    folders and their subfolders; default: where `zkit build` looks for them)."""
+    from . import nxpackage
+    from .platform import platform_name
+    targets = project.config.get("targets", {})
+    if only is not None and only not in targets:
+        raise ValueError(f"Unknown target: {only}")
+    rows = {}
+    for name, target in targets.items():
+        if only not in (None, name) or (repository and target["repository"] != repository) or \
+                platform_name(target) != "switch" or not target.get("original"):
+            continue
+        original = project.file(target["repository"], target["original"])
+        if original.is_file():
+            rows[name] = {"original": target["original"], "present": True}
+            continue
+        root = project.root(target["repository"])
+        try:
+            done = nxpackage.provide(original, target.get("sha1"), list(sources) or nxpackage.near(root, original),
+                                     [keys] if keys else None, recursive=bool(sources))
+            rows[name] = {"original": target["original"], **done}
+        except nxpackage.NotFound as error:
+            rows[name] = {"original": target["original"], "error": str(error)}
+    if not rows:
+        raise ValueError(f"No Switch target with an `original` in {project.path}")
+    return {"targets": rows, "ok": not any("error" in row for row in rows.values())}
+
+
+def render_extract(data: dict[str, Any]) -> str:
+    lines = []
+    for name, row in data["targets"].items():
+        if row.get("present"):
+            lines.append(f"{name}: {row['original']} is already there")
+        elif "error" in row:
+            lines.append(f"{name}: {row['original']} not extracted: {row['error']}")
+        else:
+            lines.append(f"{name}: wrote {row['original']} ({row['size']:,} bytes, SHA-1 {row['sha1']}) from "
+                         f"{Path(row['package']).name}")
+    return "\n".join(lines)
+
+
 def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found: dict[str, Path | None],
              notes: list[str]) -> dict[str, Any]:
     """One unit's compile step: its rule, the compiler words and flags, the whole argv (compile_commands.json),
@@ -516,9 +577,12 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
                                                             "bundle)" if config["platform"] == "gamecube" else
                                                             " (set build.compiler, or pin its archive in "
                                                             "build.compiler_download for `zkit build --download`)"))
-        elif config["platform"] == "switch" and config.get("compiler_version") and \
-                config["compiler_version"] not in clang_version(exe):
-            raise ValueError(f"{exe} is not {config['compiler_version']!r}: it says {clang_version(exe)!r}")
+        elif config["platform"] == "switch" and config.get("compiler_version"):
+            accepted = [config["compiler_version"]] if isinstance(config["compiler_version"], str) \
+                else config["compiler_version"]
+            says = clang_version(exe)
+            if not any(version in says for version in accepted):
+                raise ValueError(f"{exe} is not {' or '.join(map(repr, accepted))}: it says {says!r}")
         found[config["compiler"]] = exe
     exe = found[config["compiler"]]
     includes = words(config.get("includes"))
