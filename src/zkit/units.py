@@ -48,6 +48,8 @@ from typing import Any
 from .program import CODE_SECTIONS, DataObject, Program
 
 TIGHT = 60          # functions: data used across a wider run is shared (a global), not one unit's
+POOL_REACH = 24     # functions: a pool out of code order farther than this is a cited constant, not one unit's
+POOL_BYTES = 0x400  # bytes: and the two literals no farther apart than one unit's pool
 LITERAL_SIZES = range(1, 65)
 LITERAL_SECTIONS = (".sdata2", ".rodata", ".data")
 WRITABLE_SECTIONS = (".data", ".bss", ".sdata", ".sbss")
@@ -162,6 +164,7 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
                 if local[b][0] > local[a][-1]:
                     separations.append((local[a][-1] + 1, local[b][0],
                                         f"two copies of one constant: {text(a.address)} and {text(b.address)}"))
+    copies = list(separations)
     firsts = _first_users(program)
     ev = Evidence(local, joins + firsts, separations, firsts=firsts)
     ev.globals = {row for row, (o, fs) in zip(joins, tight) if _through_got(program, o, fs)}
@@ -182,6 +185,7 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     _initializer_ends(program, ev)
     _initializers_apart(program, ev)
     _start_up_object(program, ev)
+    ev.joins += _pools_out_of_order(program, local, copies + [r for r in ev.separations if r in ev.direct])
     return ev
 
 
@@ -440,6 +444,64 @@ def _tables_out_of_order(program: Program) -> list[tuple[int, int, str]]:
             if latest is None or first > latest[1]:
                 latest = (address, first)
     return out
+
+
+def _pools_out_of_order(program: Program, local: dict[DataObject, list[int]],
+                        apart: list[tuple[int, int, str]] = ()) -> list[tuple[int, int, str]]:
+    """GameCube (CodeWarrior): a unit pools its own literals (`_pooled_literals`; no other unit can name one), and
+    the link lays out each section's data in the order of the units' code. So of two pooled literals in one
+    section, the one at the lower address is in the same or an earlier unit: where every user of the lower one
+    comes after every user of the higher one (a unit compiled `-inline deferred` pools in reverse function order),
+    the code from the higher one's last user to the lower one's first is one unit's. Only within `POOL_REACH`
+    functions and `POOL_BYTES` of pool: farther, a literal is more likely a named constant another file's code
+    cites than one unit's. A class's named constant (a static member) loads like a literal and its other files'
+    code cites it: an order no unit's pool explains where what the code states (`apart`: two copies of one
+    constant, two files' static initializers) parts the code it would join is such a one, and so is a constant
+    whose own users it parts. One function's own `.rodata` copies (`_initializer_copies`) are as private."""
+    if program.platform.name != "gamecube":
+        return []
+    pooled = (_pooled_literals(program, local) or set()) | _initializer_copies(program, local)
+    text = program.platform.text
+    by_section: dict[str, list[DataObject]] = collections.defaultdict(list)
+    for o in pooled:                                    # not a constant whose own users two copies part
+        if o.section in (".sdata2", ".rodata") and \
+                not any(local[o][0] < lo and hi <= local[o][-1] for lo, hi, _ in apart):
+            by_section[o.section].append(o)
+    out = []
+    for objects in by_section.values():
+        firsts: list[int] = []                          # the lower literals' first users, in order
+        lows: list[DataObject] = []
+        for high in sorted(objects, key=lambda o: o.address):
+            last = local[high][-1]
+            end = bisect.bisect_right(firsts, last + POOL_REACH)
+            reach = [k for k in range(bisect.bisect_right(firsts, last), end)
+                     if high.address - lows[k].address <= POOL_BYTES]
+            if reach and not any(last < lo and hi <= firsts[reach[-1]] for lo, hi, _ in apart):
+                low = lows[reach[-1]]
+                out.append((last, firsts[reach[-1]], f"the literal {text(low.address)} lies before "
+                                                   f"{text(high.address)}, whose users come first: one unit"))
+            at = bisect.bisect_right(firsts, local[high][0])
+            firsts.insert(at, local[high][0])
+            lows.insert(at, high)
+    if apart:                                           # nor where they part it together
+        joined = Evidence({}, out, []).joined(max(hi for _, hi, _ in [*apart, *out]) + 1)
+        for lo, hi, _ in apart:
+            if all(joined[p] for p in range(lo, hi + 1)):
+                out = [j for j in out if j[1] < lo or j[0] >= hi]
+    return out
+
+
+def _initializer_copies(program: Program, local: dict[DataObject, list[int]]) -> set[DataObject]:
+    """GameCube (CodeWarrior): the small `.rodata` objects only one function reaches, and only by forming their
+    address: a local aggregate's initializer (a `Vec v = {...}`, a `char name[] = "..."`), made once per use in
+    the unit compiling that function, or a C++ file's `const` table (internal linkage: its own file's)."""
+    kinds: dict[DataObject, set[str]] = collections.defaultdict(set)
+    for rows in program.refs.values():
+        for _, address, kind in rows:
+            found = program.object_at(address)
+            if found is not None and found.section == ".rodata" and found in local:
+                kinds[found].add(kind)
+    return {o for o, k in kinds.items() if k == {"addr"} and o.size in LITERAL_SIZES and len(local[o]) == 1}
 
 
 def _held_statics(program: Program, ev: Evidence) -> list[tuple[int, int, str]]:

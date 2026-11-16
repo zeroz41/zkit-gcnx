@@ -404,6 +404,28 @@ class UnitEvidenceTests(unittest.TestCase):
         program.platform = Switch()
         self.assertIsNone(units._pooled_literals(program, {scalar}))
 
+    def test_a_pool_out_of_code_order_is_one_unit_s(self):
+        """GameCube: b's user 2 comes before a's 5, yet b lies after a: 2-5 is one unit (a unit compiled
+        `-inline deferred` pools in reverse). Not past POOL_REACH functions (f at 30, e at 60) or POOL_BYTES of
+        pool (h, g), nor where two copies of one constant part the span; one function's own `.rodata` copy (i)
+        counts, a table two functions reach (k) does not. Another platform's pools say nothing."""
+        from zkit.platform import Switch
+        def at(address, size=4, section=".sdata2"):
+            return DataObject(address, size, f"lbl_{address:X}", section)
+        a, b, e, f, g, h = at(0x9000), at(0x9004), at(0x9010), at(0x9014), at(0x9100), at(0x9600)
+        i, j, k, l = at(0xA000, 12, ".rodata"), at(0xA010, 4, ".rodata"), at(0xA020, 8, ".rodata"), \
+            at(0xA030, 4, ".rodata")
+        local = {a: [5], b: [2], e: [60], f: [30], g: [80], h: [78], i: [90], j: [88], k: [100, 101], l: [99]}
+        program = _Objects(list(local))
+        program.refs = {n: [(0, o.address, "f32")] for n, o in enumerate([a, b, e, f, g, h, j, l])}
+        program.refs[20] = [(0, i.address, "addr"), (4, k.address, "addr")]
+        joins = units._pools_out_of_order(program, local)
+        self.assertEqual([(lo, hi) for lo, hi, _ in joins], [(2, 5), (88, 90)])
+        apart = [(3, 4, "two copies of one constant")]
+        self.assertEqual([(lo, hi) for lo, hi, _ in units._pools_out_of_order(program, local, apart)], [(88, 90)])
+        program.platform = Switch()
+        self.assertEqual(units._pools_out_of_order(program, local), [])
+
     def test_a_nested_class_citing_nothing_is_its_enclosing_class_s_file(self):
         """K's 1 cites k.cpp; its nested K::Listener's 2 and 3 cite nothing and another build put them in m.cpp,
         whose own citation is at 5: they are k.cpp's. J::Inner's 7 has no enclosing file to take."""
