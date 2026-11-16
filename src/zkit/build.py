@@ -229,6 +229,16 @@ def macho_arch(path: Path) -> str | None:
     return MACHO_ARCHES.get(int.from_bytes(head[4:8], "little"))
 
 
+def ninja_command() -> str:
+    """How objdiff runs ninja: by name, unless the ninja found is the one installed with zkit's own Python (in its
+    virtual environment), which objdiff, started on its own, would not find on PATH."""
+    found = shutil.which("ninja")
+    scripts = Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")
+    if found and sys.prefix != sys.base_prefix and Path(found).resolve().parent == scripts.resolve():
+        return str(Path(found).resolve())
+    return "ninja"
+
+
 def linker(root: Path, config: dict[str, Any]) -> Path | None:
     """GameCube: mwldeppc.exe of `linker` (default: the target's compiler version)."""
     path = compilers_folder(root, config) / (config.get("linker") or config["compiler"]) / "mwldeppc.exe"
@@ -732,7 +742,7 @@ def write_objdiff(path: Path, root: Path, units: list[str], compiled: set[str], 
         if categories:
             row["metadata"]["progress_categories"] = categories_of(unit, categories)
         rows.append(row)
-    config: dict[str, Any] = {"min_version": "2.0.0", "custom_make": "ninja",
+    config: dict[str, Any] = {"min_version": "2.0.0", "custom_make": ninja_command(),
                               "custom_args": ["-f", os.path.relpath(root / NINJA, folder).replace(os.sep, "/")],
                               "build_target": False, "build_base": True,
                               "watch_patterns": ["*.c", "*.cp", "*.cpp", "*.h", "*.hpp", "*.inc"]}

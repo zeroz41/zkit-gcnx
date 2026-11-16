@@ -154,6 +154,21 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(build.layout("t", {}).report, "build/t/report.json")
 
 
+class NinjaCommandTests(unittest.TestCase):
+    def test_objdiff_runs_the_ninja_installed_with_zkit_by_its_path(self):
+        scripts = Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")
+        with mock.patch.object(sys, "base_prefix", "/somewhere/else"):
+            with mock.patch.object(build.shutil, "which", return_value=str(scripts / "ninja")):
+                self.assertEqual(build.ninja_command(), str((scripts / "ninja").resolve()))
+            with mock.patch.object(build.shutil, "which", return_value="/usr/bin/ninja"):
+                self.assertEqual(build.ninja_command(), "ninja")
+            with mock.patch.object(build.shutil, "which", return_value=None):
+                self.assertEqual(build.ninja_command(), "ninja")
+        with mock.patch.object(sys, "base_prefix", sys.prefix), \
+                mock.patch.object(build.shutil, "which", return_value=str(scripts / "ninja")):
+            self.assertEqual(build.ninja_command(), "ninja")  # not a virtual environment: PATH finds it
+
+
 class ConfigureTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
