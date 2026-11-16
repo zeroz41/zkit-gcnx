@@ -1,0 +1,41 @@
+{
+  "about": [
+    "The plugin's rule as byte patches to official clang releases that can load no plugin (a Windows clang.exe",
+    "exports none of LLVM's symbols). zkit applies a patch to a copy of the official binary whose SHA-256 is the",
+    "patch's `sha256`, checks each edit's `old` bytes first and the result against `patched_sha256`, and compiles",
+    "the plugin's units with the copy (build.patched_clang). Each edits LLVM's cxxDtorIsEmpty",
+    "(lib/Transforms/IPO/GlobalOpt.cpp), which GlobalOpt's OptimizeEmptyGlobalCXXDtors asks whether a guarded",
+    "static's destructor is empty before it drops the static's __cxa_atexit call, into LLVM 9's version",
+    "(llvm-project 6e679f8, r353603): the destructor is empty only when its entry block, debug intrinsics aside,",
+    "starts with `ret`. Up to LLVM 8 it is also empty when its one block calls only empty functions and has no",
+    "other side effects. Offsets are file offsets; each `why` names the instruction (virtual address) it changes."
+  ],
+  "patches": [
+    {
+      "release": "LLVM 3.9.1 for Windows x86-64, LLVM-3.9.1-win64.exe: bin/clang.exe (clang++.exe and clang-cl.exe are the same file)",
+      "sha256": "07062cd797559b8ad89368d6f5f0b8bd17e6b043b4368e1c2949578ab7f062fa",
+      "patched_sha256": "b2701da6a14971fa59be17702d3c86935854b820d72c5e58151b036ae15fcdea",
+      "function": "cxxDtorIsEmpty at 0x140c27da0 (the function that calls itself and compares the instruction kinds Call 0x4e and Ret 0x19); its one other caller is the inlined OptimizeEmptyGlobalCXXDtors at 0x140c2036e",
+      "edits": [
+        {
+          "offset": "0xc271e4",
+          "old": "7407",
+          "new": "eb07",
+          "why": "0x140c27de4 je -> jmp: a destructor of more than one block is no longer refused, only its entry block is read"
+        },
+        {
+          "offset": "0xc27290",
+          "old": "488b5fe8",
+          "new": "31db6690",
+          "why": "0x140c27e90 mov rbx, [rdi-0x18] -> xor ebx, ebx: a call that is not a debug intrinsic reads as a call to an unknown function, so the destructor is not empty (the callee is not examined)"
+        },
+        {
+          "offset": "0xc27331",
+          "old": "4889",
+          "new": "eb1e",
+          "why": "0x140c27f31 mov rcx, rdi -> jmp 0x140c27f51 (return false): any other instruction but `ret` makes the destructor not empty, side effects or not"
+        }
+      ]
+    }
+  ]
+}

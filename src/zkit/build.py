@@ -177,16 +177,65 @@ def compiler(root: Path, config: dict[str, Any]) -> tuple[Path | None, str]:
     return _tool(root, config["compiler"]), config["compiler"]
 
 
+def plugin_source(name: str) -> Path:
+    """build.clang_plugins: the source of zkit's clang plugin `name` (clang_plugins/<name>.cpp, `-` read as `_`)."""
+    source = PLUGINS / f"{name.replace('-', '_')}.cpp"
+    if not source.is_file():
+        known = sorted(path.stem.replace("_", "-") for path in PLUGINS.glob("*.cpp"))
+        raise ValueError(f"build.clang_plugins: no plugin {name!r} (zkit has: {', '.join(known)})")
+    return source
+
+
+def plugin_patches(name: str) -> list[dict[str, Any]]:
+    """build.clang_plugins: plugin `name`'s rule as byte patches to official clang binaries that can load no plugin
+    (clang_plugins/<name>.patches.json): each names the SHA-256 of the binary it fits, its edits (file offset, old
+    and new bytes) and the SHA-256 of the result."""
+    table = plugin_source(name).with_suffix(".patches.json")
+    return json.loads(table.read_text(encoding="utf-8"))["patches"] if table.is_file() else []
+
+
+def patched_clang(clang: Path, names: list[str]) -> Path | None:
+    """build.clang_plugins where clang can load no plugin (a Windows clang.exe): a copy of the official `clang` with
+    each plugin's rule applied in turn as zkit's byte patch for exactly the binary it has then (`plugin_patches`:
+    its SHA-256 picks the patch, each edit's old bytes are checked, and the result must have the patch's SHA-256),
+    or None when zkit has no patch for it. The copy lies beside `clang`, so it finds the same resource folder, named
+    `<name>-<plugins>` (clang's driver reads its mode from its name without the last `-` part, so a clang++ copy is
+    still clang++); it is made once and made again when its bytes are not the expected ones."""
+    for name in names:
+        plugin_source(name)
+    patched = bytearray(clang.read_bytes())
+    digest = hashlib.sha256(patched).hexdigest()
+    for name in names:
+        patch = next((patch for patch in plugin_patches(name) if patch["sha256"] == digest), None)
+        if patch is None:
+            return None
+        for edit in patch["edits"]:
+            offset, old, new = int(edit["offset"], 16), bytes.fromhex(edit["old"]), bytes.fromhex(edit["new"])
+            if len(new) != len(old) or patched[offset:offset + len(old)] != old:
+                raise ValueError(f"build.clang_plugins: {name}'s patch for {clang} does not fit it at {edit['offset']}")
+            patched[offset:offset + len(new)] = new
+        digest = hashlib.sha256(patched).hexdigest()
+        if digest != patch["patched_sha256"]:
+            raise ValueError(f"build.clang_plugins: {name}'s patch for {clang} gave SHA-256 {digest}, not "
+                             f"{patch['patched_sha256']}")
+    tag = "+".join(name.replace("-", "_") for name in names)
+    out = clang.with_name(f"{clang.stem}-{tag}{clang.suffix}")
+    if out.is_file() and hashlib.sha256(out.read_bytes()).hexdigest() == digest:
+        return out
+    partial = out.with_name(out.name + ".partial")
+    partial.write_bytes(patched)
+    shutil.copymode(clang, partial)
+    partial.replace(out)
+    return out
+
+
 def clang_plugin(root: Path, clang: Path, name: str) -> Path:
     """build.clang_plugins: zkit's clang plugin `name` (clang_plugins/<name>.cpp) as a shared object built with the
     host C++ compiler ($CXX, else c++) against this clang's own LLVM headers (`<clang>/../../include`, as its
     release archive has them), once per source and LLVM version, into build/tools/clang-plugins. On macOS its LLVM
     symbols are left for clang itself to provide when it loads the plugin (Linux allows that by default), and it is
     built for clang's own architecture (an x86-64 clang, run by Rosetta 2 on an Arm Mac, loads only an x86-64 one)."""
-    source = PLUGINS / f"{name.replace('-', '_')}.cpp"
-    if not source.is_file():
-        known = sorted(path.stem.replace("_", "-") for path in PLUGINS.glob("*.cpp"))
-        raise ValueError(f"build.clang_plugins: no plugin {name!r} (zkit has: {', '.join(known)})")
+    source = plugin_source(name)
     include = clang.parent.parent / "include"
     version = include / "llvm" / "Config" / "llvm-config.h"
     if not version.is_file():
@@ -641,12 +690,19 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
     implicit = [_relative(exe, root)] if exe else []
     wanted = words(config.get("clang_plugins")) if exe else []
     if wanted and sys.platform == "win32":
-        # A Windows clang.exe exports none of LLVM's symbols, so it can load no plugin: build the units as they
-        # are, say so once.
-        if "clang_plugins" not in found:
-            found["clang_plugins"] = None
-            notes.append(f"clang on Windows cannot load plugins: units built with build.clang_plugins "
-                         f"({', '.join(wanted)}) may not match here (build on Linux or in WSL to match them)")
+        # A Windows clang.exe exports none of LLVM's symbols, so it can load no plugin: compile with a copy of it
+        # that has the plugins' rules as zkit's byte patches, or, for a clang zkit has no patch for, without them
+        # (said once).
+        key = f"clang_plugins {exe} {' '.join(wanted)}"
+        if key not in found:
+            found[key] = patched_clang(exe, wanted)
+            if found[key] is None:
+                digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+                notes.append(f"clang on Windows cannot load plugins, and zkit has no patch for this {exe.name} "
+                             f"(SHA-256 {digest}): units built with build.clang_plugins ({', '.join(wanted)}) may "
+                             "not match here (build on Linux or in WSL to match them)")
+        if found[key] is not None:
+            cc, implicit = [str(found[key])], [_relative(found[key], root)]
         wanted = []
     plugins = [clang_plugin(root, exe, name) for name in wanted]
     implicit += [_relative(path, root) for path in plugins]
