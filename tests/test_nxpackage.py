@@ -220,6 +220,27 @@ class ProjectTests(unittest.TestCase):
             self.assertEqual((root / "orig/v1/main").read_bytes(), self.main)
             self.assertIn("extracted orig/v1/main from update.nsp", data["targets"]["v1"]["notes"])
 
+    def test_a_target_names_the_folder_its_packages_go_in(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = self.project(root)
+            project.config["targets"]["v1"]["packages"] = "roms"
+            with self.assertRaisesRegex(ValueError, r"put the game's packages .* in roms/, or run"):
+                build.configure(project, None, None, zkit=["zkit"])
+            nsp(root / "update.nsp", self.main, generation=3)  # outside roms/: not looked at
+            keys_file(root / "prod.keys")
+            with self.assertRaisesRegex(ValueError, r" in roms/, or run"):
+                build.configure(project, None, None, zkit=["zkit"])
+            (root / "roms/updates").mkdir(parents=True)
+            nsp(root / "roms/updates/update.nsp", self.main, generation=3)
+            keys_file(root / "roms/prod.keys")
+            data = build.configure(project, None, None, zkit=["zkit"])
+            self.assertEqual((root / "orig/v1/main").read_bytes(), self.main)
+            self.assertIn("extracted orig/v1/main from update.nsp", data["targets"]["v1"]["notes"])
+            (root / "orig/v1/main").unlink()
+            self.assertTrue(build.extract(project)["ok"])
+            self.assertEqual((root / "orig/v1/main").read_bytes(), self.main)
+
     def test_extract_reads_the_given_folders_and_their_subfolders(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

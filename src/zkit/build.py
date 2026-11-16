@@ -534,15 +534,25 @@ def configure(project: Project, repository: str | None = None, only: str | None 
             "default": defaults}
 
 
-def _provide_original(root: Path, name: str, target: dict[str, Any], original: Path) -> str:
-    """A Switch original that is missing comes out of the game's packages (.nsp/.xci) in its folder or one above
-    it in the repository, decrypted with prod.keys there or in the user's usual places (`nxpackage`)."""
+def _package_folders(root: Path, target: dict[str, Any], original: Path) -> tuple[list[Path], bool]:
+    """(folders, whether their subfolders count) where a Switch target's packages go: its `packages` folder(s) in
+    the repository and their subfolders, or else the original's folder and each one above it."""
     from . import nxpackage
-    folders = nxpackage.near(root, original)
+    named = target.get("packages")
+    if named:
+        return [root / folder for folder in ([named] if isinstance(named, str) else named)], True
+    return nxpackage.near(root, original), False
+
+
+def _provide_original(root: Path, name: str, target: dict[str, Any], original: Path) -> str:
+    """A Switch original that is missing comes out of the game's packages (.nsp/.xci) where its target keeps them
+    (`_package_folders`), decrypted with prod.keys there or in the user's usual places (`nxpackage`)."""
+    from . import nxpackage
+    folders, recursive = _package_folders(root, target, original)
     try:
-        done = nxpackage.provide(original, target.get("sha1"), folders)
+        done = nxpackage.provide(original, target.get("sha1"), folders, recursive=recursive)
     except nxpackage.NotFound as error:
-        where = _relative(folders[-2] if len(folders) > 1 else folders[0], root)
+        where = _relative(folders[0] if recursive or len(folders) == 1 else folders[-2], root)
         why = "" if isinstance(error, nxpackage.NoPackages) and "compressed" not in str(error) else f" ({error})"
         raise ValueError(f"Target {name}: the original {target['original']} is missing: put the game's packages "
                          f"(.nsp or .xci: the game and its update) and prod.keys in {where}/, or run `zkit extract "
@@ -553,7 +563,7 @@ def _provide_original(root: Path, name: str, target: dict[str, Any], original: P
 def extract(project: Project, repository: str | None = None, only: str | None = None,
             sources: list[Path] = (), keys: Path | None = None) -> dict[str, Any]:
     """`zkit extract`: each Switch target's missing original out of the game's packages among `sources` (files, or
-    folders and their subfolders; default: where `zkit build` looks for them)."""
+    folders and their subfolders; default: where `zkit build` looks for them, `_package_folders`)."""
     from . import nxpackage
     from .platform import platform_name
     targets = project.config.get("targets", {})
@@ -568,10 +578,11 @@ def extract(project: Project, repository: str | None = None, only: str | None = 
         if original.is_file():
             rows[name] = {"original": target["original"], "present": True}
             continue
-        root = project.root(target["repository"])
+        folders, recursive = (list(sources), True) if sources else \
+            _package_folders(project.root(target["repository"]), target, original)
         try:
-            done = nxpackage.provide(original, target.get("sha1"), list(sources) or nxpackage.near(root, original),
-                                     [keys] if keys else None, recursive=bool(sources))
+            done = nxpackage.provide(original, target.get("sha1"), folders, [keys] if keys else None,
+                                     recursive=recursive)
             rows[name] = {"original": target["original"], **done}
         except nxpackage.NotFound as error:
             rows[name] = {"original": target["original"], "error": str(error)}
