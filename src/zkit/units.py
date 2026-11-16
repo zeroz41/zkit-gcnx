@@ -148,9 +148,10 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     joins = [(fs[0], fs[-1], f"{o.name} ({o.section}) is one unit's") for o, fs in tight]
     separations = []
     if per_unit:
+        pooled = _pooled_literals(program, local)
         copies: dict[tuple[str, bytes], list[DataObject]] = collections.defaultdict(list)
         for o in local:
-            if o.section in LITERAL_SECTIONS and o.size in LITERAL_SIZES:
+            if o.section in LITERAL_SECTIONS and o.size in LITERAL_SIZES and (pooled is None or o in pooled):
                 try:
                     copies[(o.section, program.read(o.address, o.size))].append(o)
                 except ValueError:
@@ -179,8 +180,26 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     _language_runs(program, ev)
     _deferred_tails(program, ev)
     _initializer_ends(program, ev)
+    _initializers_apart(program, ev)
     _start_up_object(program, ev)
     return ev
+
+
+def _pooled_literals(program: Program, objects) -> set[DataObject] | None:
+    """GameCube (CodeWarrior): the objects that are a unit's pooled literals, kept once per unit: a scalar constant
+    every access loads into a float register (`lfs`/`lfd`). A local aggregate's initializer (a `Vec v = {0, 0, 0}`,
+    a `char name[] = "..."` padded to 16 bytes, a table copied word by word with `lwz` or formed with `addi`) is
+    emitted once per use, so two copies of one in a unit say nothing of a boundary. None where accesses carry no
+    kind."""
+    if program.platform.name != "gamecube":
+        return None
+    kinds: dict[DataObject, set[str]] = collections.defaultdict(set)
+    for rows in program.refs.values():
+        for _, address, kind in rows:
+            found = program.object_at(address)
+            if found is not None and found in objects:
+                kinds[found].add(kind)
+    return {o for o, k in kinds.items() if k and k <= {"f32", "f64"}}
 
 
 def _through_got(program: Program, o: DataObject, fs) -> bool:
@@ -925,6 +944,19 @@ def _initializer_ends(program: Program, ev: Evidence) -> None:
         ev.direct.add(ev.separations[-1])
 
 
+def _initializers_apart(program: Program, ev: Evidence) -> None:
+    """The functions a `.ctors` table calls: a compiler gives a file one static initializer (CodeWarrior's
+    `__sinit_<file>`, GCC's `_GLOBAL__sub_I_<file>`), so a boundary lies between any two. Not where in between:
+    CodeWarrior emits a file's weak inline copies after its initializer."""
+    found = sorted({i for at in _table_entries(program, ".ctors")
+                    if (i := program.function_index.get(int.from_bytes(program.read(at, 4), "big"))) is not None})
+    for a, b in zip(found, found[1:]):
+        ev.separations.append((a + 1, b, f"{program.platform.text(program.functions[a].address)} and "
+                                         f"{program.platform.text(program.functions[b].address)} are two files' "
+                                         "static initializers"))
+        ev.direct.add(ev.separations[-1])
+
+
 def _constructed(program: Program, owner: dict[int, str]) -> dict[int, set[str]]:
     """{object address: the units whose own static initializer (`_initializers`) stores into it}."""
     from .aarch64 import global_stores
@@ -1167,16 +1199,22 @@ def _compiled_alone(program: Program) -> bool:
 
 def _wide_statics(program: Program, ev: Evidence) -> None:
     """A static no symbol names (a file's own, in no symbol table) whose users spread wider than a tight run, but
-    over no evidence of another file than one: its users are that file's, and the run between them one unit."""
+    over no evidence of another file than one: its users are that file's, and the run between them one unit.
+    Not where the code itself states a boundary between them (two copies of one literal, each unit's own): its
+    users are then two units', so it is a global no symbol names (a decomp's unnamed object), not a static."""
     from .score import placeholder
     anchors = sorted(ev.files.items())
     keys = [i for i, _ in anchors]
+    stated = sorted((lo, hi) for lo, hi, _ in ev.separations)
+    starts = [lo for lo, _ in stated]
     for o, fs in program.users().items():
         if o.section not in WRITABLE_SECTIONS or not placeholder(o.name) or not fs:
             continue
         lo, hi = min(fs), max(fs)
         if hi - lo <= TIGHT:
             continue                                   # a tight run's: a join already
+        if any(end <= hi for _, end in stated[bisect.bisect_right(starts, lo):bisect.bisect_right(starts, hi)]):
+            continue                                   # a boundary must fall between its users
         files = {f for _, f in anchors[bisect.bisect_left(keys, lo):bisect.bisect_right(keys, hi)]}
         if len(files) == 1:
             ev.joins.append((lo, hi, f"{o.name} ({o.section}) is {next(iter(files))}'s only"))
@@ -2541,11 +2579,9 @@ def _initializer_tables(program: Program, owner: dict[int, str]) -> list[tuple[i
     `.ctors` entry points into, and the `.dtors` entries before the first that points into it are its own too
     (CodeWarrior's runtime: `__destroy_global_chain_reference`, then `__fini_cpp_exceptions_reference`)."""
     entries: dict[str, list[tuple[int, str | None]]] = collections.defaultdict(list)
-    for o in program.objects:
-        if o.section not in TABLES:
-            continue
-        for at in range(o.address, o.address + o.size - 3, 4):
-            entries[o.section].append(
+    for section in TABLES:
+        for at in _table_entries(program, section):
+            entries[section].append(
                 (at, owner.get(program.function_index.get(int.from_bytes(program.read(at, 4), "big"), -1))))
     for rows in entries.values():
         rows.sort()
@@ -2555,6 +2591,27 @@ def _initializer_tables(program: Program, owner: dict[int, str]) -> list[tuple[i
         rows = entries[".dtors"]                    # reference to the global destructor chain's code)
         rows[:lead] = [(at, runtime) for at, _ in rows[:lead]]
     return [(at, at + 4, unit, section) for section, rows in entries.items() for at, unit in rows if unit is not None]
+
+
+def _static_initializers(program: Program, unit_of: list) -> dict[str, list[int]]:
+    """Each unit's static initializers, the functions its `.ctors` entries point to, in address order. A compiler
+    gives a file one (CodeWarrior's `__sinit_<file>`, GCC's `_GLOBAL__sub_I_<file>`): a unit holding two is two
+    files, and two units holding one each are two files, whatever data their code shares."""
+    found: dict[str, set[int]] = collections.defaultdict(set)
+    for at in _table_entries(program, ".ctors"):
+        i = program.function_index.get(int.from_bytes(program.read(at, 4), "big"))
+        if i is not None and unit_of[i] is not None:
+            found[unit_of[i]].add(i)
+    return {unit: sorted(fs) for unit, fs in found.items()}
+
+
+def _table_entries(program: Program, section: str) -> list[int]:
+    """The addresses of a pointer table's words: the whole section where its range is known (a symbol names only
+    the table's first entry, `__init_cpp_exceptions_reference`, not the files' entries after it), else its objects."""
+    ranges = [(start, end) for name, start, end in getattr(program, "sections", ()) if name == section]
+    if not ranges:
+        ranges = [(o.address, o.address + o.size) for o in program.objects if o.section == section]
+    return sorted({at for start, end in ranges for at in range(start, end - 3, 4)})
 
 
 def _initializer_arrays(program: Program, owner: dict[int, str]) -> list[tuple[int, int, str, str]]:
@@ -2711,12 +2768,17 @@ def check(program: Program, splits: list[tuple[str, str, int, int]], limit: int 
         if len(homes) == 2:
             folds[tuple(homes)].append(because)
     splits_needed: dict[str, list] = collections.defaultdict(list)
+    apart: set[tuple[str, str]] = set()
     for lo, hi, because in ev.separations:
         if (lo, hi, because) in ev.edges:     # where evidence stops reaching, not what contradicts a unit
             continue
         inside = {unit_of[i] for i in range(lo - 1, hi + 1)}
+        if len(inside) == 2 and None not in inside:   # the code states a boundary between these two: no fold,
+            apart.add(tuple(sorted(inside)))          # whatever data (a global) their code shares
         if len(inside) == 1 and None not in inside:
             splits_needed[next(iter(inside))].append((lo, hi, because))
+    initializers = _static_initializers(program, unit_of)   # two holding one each are two files (one holding two
+    apart |= {pair for pair in folds if all(u in initializers for u in pair)}   # is a separation already)
     claims = []
     for o, fs in ev.local.items():
         homes = {unit_of[i] for i in fs} - {None}
@@ -2738,7 +2800,7 @@ def check(program: Program, splits: list[tuple[str, str, int, int]], limit: int 
                                "size": tables[address].size, "unit": next(iter(homes)),
                                "used_by": len(info.constructors), "vtable": True})
     fold_rows = sorted(({"units": list(pair), "shared": len(why), "examples": why[:3]}
-                        for pair, why in folds.items()), key=lambda r: -r["shared"])
+                        for pair, why in folds.items() if pair not in apart), key=lambda r: -r["shared"])
     split_rows = sorted(({"unit": unit, "evidence": len(rows),
                           "window": [text(program.functions[rows[0][0] - 1].address),
                                      text(program.functions[rows[0][1]].address)],

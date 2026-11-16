@@ -284,10 +284,10 @@ class UnitTests(unittest.TestCase):
 
     def program(self):
         image = Image()
-        def lfs(rd, address): return (48 << 26) | (rd << 21) | (0 << 16) | (address & 0xFFFF)  # lfs fD, addr(r0)
-        # a: uses literal A; b: uses A too; c: uses B (a second copy of the same value)
-        image.functions = {"a": [lis(3, DATA), addi(3, 3, DATA), BLR], "b": [lis(3, DATA), addi(3, 3, DATA), BLR],
-                           "gap": [BLR], "c": [lis(3, DATA + 4), addi(3, 3, DATA + 4), BLR]}
+        def lfs(fd, address): return (48 << 26) | (fd << 21) | (3 << 16) | (address & 0xFFFF)  # lfs fD, lo(r3)
+        # a: loads literal A; b: loads A too; c: loads B (a second copy of the same value)
+        image.functions = {"a": [lis(3, DATA), lfs(1, DATA), BLR], "b": [lis(3, DATA), lfs(1, DATA), BLR],
+                           "gap": [BLR], "c": [lis(3, DATA + 4), lfs(1, DATA + 4), BLR]}
         image.tables = {"one": [0x3F800000], "copy": [0x3F800000]}
         dol, functions, objects = image.build()
         objects = [DataObject(o.address, 4, o.name, ".sdata2") for o in objects]

@@ -378,6 +378,32 @@ class UnitEvidenceTests(unittest.TestCase):
         units._wide_statics(code, ev)
         self.assertEqual([(lo, hi) for lo, hi, _ in ev.joins], [(0, 100)])
 
+    def test_an_unnamed_object_across_a_stated_boundary_is_a_global(self):
+        """Two copies of one literal put a boundary in 30..40: an unnamed object 0 and 100 use is then no file's
+        static (a decomp's unnamed global) and joins nothing; one whose users the boundary does not part still does."""
+        code = _Code(200)
+        wide = DataObject(0x9000, 8, "lbl_9000", ".bss")
+        after = DataObject(0x9010, 8, "lbl_9010", ".bss")
+        code.users = lambda: {wide: {0, 100}, after: {50, 150}}
+        ev = units.Evidence({}, [], [(30, 40, "two copies of one constant")])
+        ev.files = {60: "a.cpp"}
+        units._wide_statics(code, ev)
+        self.assertEqual([(lo, hi) for lo, hi, _ in ev.joins], [(50, 150)])
+
+    def test_only_constants_loaded_into_float_registers_are_pooled_literals(self):
+        """GameCube: a constant every access loads into a float register is a pooled literal (one copy per unit);
+        one also read as an integer (a table, a local aggregate's initializer, emitted per use) or taken by address
+        is not. Another platform's accesses say nothing."""
+        from zkit.platform import Switch
+        scalar = DataObject(0x9000, 4, "lbl_9000", ".sdata2")
+        mixed = DataObject(0x9008, 8, "lbl_9008", ".rodata")
+        formed = DataObject(0x9010, 4, "lbl_9010", ".sdata2")
+        program = _Objects([scalar, mixed, formed])
+        program.refs = {0: [(0, 0x9000, "f32"), (4, 0x9008, "f64")], 1: [(0, 0x9008, "u32"), (4, 0x9010, None)]}
+        self.assertEqual(units._pooled_literals(program, {scalar, mixed, formed}), {scalar})
+        program.platform = Switch()
+        self.assertIsNone(units._pooled_literals(program, {scalar}))
+
     def test_a_nested_class_citing_nothing_is_its_enclosing_class_s_file(self):
         """K's 1 cites k.cpp; its nested K::Listener's 2 and 3 cite nothing and another build put them in m.cpp,
         whose own citation is at 5: they are k.cpp's. J::Inner's 7 has no enclosing file to take."""
@@ -464,6 +490,45 @@ class UnitEvidenceTests(unittest.TestCase):
             cuts = [c.position for c in units.boundaries(code, ev)]
         self.assertEqual(cuts[0], 30)
         self.assertEqual(len(cuts), 2)
+
+
+class CheckTests(unittest.TestCase):
+    """What `units --check` proposes for an existing splits.txt."""
+
+    def test_no_fold_across_a_stated_boundary_or_two_static_initializers(self):
+        """Data joins a/b, c/d and e/f. Two copies of one literal put a boundary between a and b, and c and d hold
+        a static initializer each: only e+f is a fold. g holds two initializers (one per file): a split."""
+        from unittest import mock
+        code = _Code(16)
+        code.objects = []
+        table = [code.functions[i].address for i in (5, 6, 12, 14)]
+        code.sections = [(".ctors", 0x9000, 0x9000 + 4 * len(table))]
+        code.read = lambda at, n: table[(at - 0x9000) // 4].to_bytes(4, "big")
+        splits = [(name, ".text", code.functions[lo].address, code.functions[hi].address + 0x40)
+                  for name, lo, hi in [("a", 0, 1), ("b", 2, 3), ("c", 4, 5), ("d", 6, 7), ("e", 8, 9), ("f", 10, 11),
+                                       ("g", 12, 15)]]
+        ev = units.Evidence({}, [(1, 2, "x"), (5, 6, "y"), (9, 10, "z")], [(2, 2, "two copies of one constant")])
+        units._initializers_apart(code, ev)
+        with mock.patch.object(units, "evidence", return_value=ev), \
+                mock.patch.object(units, "linker_code", return_value=set()):
+            result = units.check(code, splits)
+        self.assertEqual([r["units"] for r in result["folds"]], [["e", "f"]])
+        self.assertEqual([(r["unit"], r["window"]) for r in result["splits"]],
+                         [("g", [code.platform.text(code.functions[12].address), code.platform.text(code.functions[14].address)])])
+
+
+    def test_a_boundary_lies_between_two_static_initializers(self):
+        """.ctors calls 3 and 9 (a symbol names only its first entry, not the section's others): a boundary lies in
+        4..9, the code's own statement."""
+        code = _Code(12)
+        code.objects = [DataObject(0x9000, 4, "__init_cpp_exceptions_reference", ".ctors")]
+        code.sections = [(".ctors", 0x9000, 0x900C)]
+        words = [code.functions[3].address, code.functions[9].address, 0]
+        code.read = lambda at, n: words[(at - 0x9000) // 4].to_bytes(4, "big")
+        ev = units.Evidence({}, [], [])
+        units._initializers_apart(code, ev)
+        self.assertEqual([(lo, hi) for lo, hi, _ in ev.separations], [(4, 9)])
+        self.assertEqual(ev.direct, set(ev.separations))
 
 
 class LinkerTableTests(unittest.TestCase):
