@@ -50,6 +50,31 @@ class UnpackTests(unittest.TestCase):
             self.assertFalse((root / "escape").exists())
 
 
+def _deb(path: Path, files: dict[str, bytes]) -> str:
+    """A Debian package (an ar archive) whose data.tar.xz holds files."""
+    data = path.with_suffix(".data")
+    _tarball(data, files)
+    members = [("debian-binary", b"2.0\n"), ("control.tar.xz", b"x" * 3), ("data.tar.xz", data.read_bytes())]
+    out = bytearray(b"!<arch>\n")
+    for name, body in members:
+        out += f"{name + '/':<16}{0:<12}{0:<6}{0:<6}{'100644':<8}{len(body):<10}`\n".encode() + body
+        out += b"\n" if len(body) % 2 else b""
+    path.write_bytes(bytes(out))
+    data.unlink()
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class PackageTests(unittest.TestCase):
+    def test_a_debian_package_unpacks_its_data(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _deb(root / "lib.deb", {"./usr/lib/x86_64-linux-gnu/libz.so.1": b"so", "./usr/share/doc/c": b"d"})
+            count = fetch.unpack(root / "lib.deb", root / "out", "lib", ("libz*",), strip=3)
+            self.assertEqual(count, 1)
+            self.assertEqual((root / "out/libz.so.1").read_bytes(), b"so")
+            self.assertEqual(list(root.glob("*.data.tar*")), [])  # the copied data is gone
+
+
 class FetchTests(unittest.TestCase):
     def test_a_release_asset_is_refused_unless_its_hash_is_pinned(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -126,6 +151,43 @@ class FetchTests(unittest.TestCase):
             self.assertTrue((root / "repo/build/compilers/clang-4.0.1/bin/clang++").is_file())
             self.assertIsNone(fetch.compiler_archive(root / "repo", config))  # present: nothing to fetch
 
+    def test_each_host_fetches_its_own_archives_into_one_folder(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            linux = _tarball(root / "clang-linux.tar.xz", {"clang+llvm/bin/clang++": b"elf"})
+            darwin = _tarball(root / "clang-darwin.tar.xz", {"clang+llvm/bin/clang++": b"mach-o"})
+            lib = _deb(root / "libx.deb", {"./lib/libx.so.5": b"x"})
+            spec = {"folder": "build/compilers/clang",
+                    "linux-x86_64": [{"url": (root / "clang-linux.tar.xz").as_uri(), "sha256": linux},
+                                     {"url": (root / "libx.deb").as_uri(), "sha256": lib, "strip": 1,
+                                      "folder": "build/compilers/clang/lib"}],
+                    "macos-x86_64": {"url": (root / "clang-darwin.tar.xz").as_uri(), "sha256": darwin}}
+            config = {"platform": "switch", "compiler": "build/compilers/clang/bin/clang++",
+                      "compiler_download": spec}
+            for place, repo, expected in (("linux-x86_64", "a", b"elf"), ("macos-arm64", "b", b"mach-o")):
+                result = fetch.compiler_archive(root / repo, config, place)
+                self.assertEqual((root / repo / "build/compilers/clang/bin/clang++").read_bytes(), expected)
+            self.assertEqual(result["files"], 1)
+            self.assertEqual((root / "a/build/compilers/clang/lib/libx.so.5").read_bytes(), b"x")
+            with self.assertRaisesRegex(ValueError, "no archive for windows-x86_64 .*linux-x86_64, macos-x86_64"):
+                fetch.compiler_archive(root / "c", config, "windows-x86_64")
+            with self.assertRaisesRegex(ValueError, "need `folder`"):
+                fetch.compiler_archive(root / "c", {**config, "compiler_download": {k: v for k, v in spec.items()
+                                                                                    if k != "folder"}})
+
+    def test_an_installer_is_unpacked_whole(self):
+        import test_nsis
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            test_nsis.installer(root / "LLVM-win64.exe", "nsis3", "solid-lzma", test_nsis.FILES)
+            sha = hashlib.sha256((root / "LLVM-win64.exe").read_bytes()).hexdigest()
+            config = {"platform": "switch", "compiler": "build/compilers/clang/bin/clang.exe",
+                      "compiler_download": {"folder": "build/compilers/clang", "windows-x86_64": {
+                          "url": (root / "LLVM-win64.exe").as_uri(), "sha256": sha}}}
+            result = fetch.compiler_archive(root / "repo", config, "windows-arm64")
+            self.assertEqual(result["files"], 3)
+            self.assertTrue((root / "repo/build/compilers/clang/lib/clang/3.9.1/include/stddef.h").is_file())
+
     def test_a_unit_override_with_its_own_compiler_archive_is_fetched_too(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -166,6 +228,13 @@ class NeededTests(unittest.TestCase):
         self.assertNotIn("llvm", gamecube)  # a GameCube project never downloads LLVM
         self.assertEqual(set(gamecube) - {"wibo"}, {"objdiff-cli", "binutils", "m2c", "decomp-permuter"})
         self.assertEqual(switch, ["objdiff-cli", "llvm"])
+
+    def test_building_alone_needs_no_analysis_tools(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch("shutil.which", return_value=None):
+            gamecube = fetch.needed(_Project(Path(temp), "gamecube"), "t", analysis=False)
+            switch = fetch.needed(_Project(Path(temp), "switch"), "t", analysis=False)
+        self.assertEqual(set(gamecube) - {"wibo"}, {"objdiff-cli"})
+        self.assertEqual(switch, ["objdiff-cli"])
 
 
 class HostTests(unittest.TestCase):

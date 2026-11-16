@@ -339,6 +339,9 @@ def build_parser() -> argparse.ArgumentParser:
                                                            "pinned tools (wibo, objdiff-cli, binutils, m2c, "
                                                            "decomp-permuter; Switch: LLVM, the project's clang), "
                                                            "each checked against its SHA-256 or commit")
+    c.add_argument("--download-build-tools", action="store_true",
+                   help="--download, but only what building needs: the compilers, wibo and objdiff-cli (not LLVM, "
+                        "binutils, m2c or decomp-permuter, which only analysis uses)")
     c = add("build", help="Build the project: target objects from the original, every unit with a source in src/, "
                           "the objdiff report, and the relinked executable checked against the original (GameCube: "
                           "the DOL's SHA-1; Switch: the NSO's segment SHA-256s, marking the units it proves linked)")
@@ -350,6 +353,9 @@ def build_parser() -> argparse.ArgumentParser:
                                                            "pinned tools (wibo, objdiff-cli, binutils, m2c, "
                                                            "decomp-permuter; Switch: LLVM, the project's clang), "
                                                            "each checked against its SHA-256 or commit")
+    c.add_argument("--download-build-tools", action="store_true",
+                   help="--download, but only what building needs: the compilers, wibo and objdiff-cli (not LLVM, "
+                        "binutils, m2c or decomp-permuter, which only analysis uses)")
     c = add("refs", help="Where a function or global is defined, declared and used in the source (any spelling)")
     c.add_argument("query", nargs="+")
     c.add_argument("--repo")
@@ -938,12 +944,14 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from . import build
         project = project.with_overlay(here, worktree) if here else project
         if command == "configure":
-            fetched = build.ensure_downloads(project, build.build_targets(project, here, args.target)) \
-                if args.download else []
+            fetched = build.ensure_downloads(project, build.build_targets(project, here, args.target),
+                                             not args.download_build_tools) \
+                if args.download or args.download_build_tools else []
             data = {**build.configure(project, here, args.target), "downloaded": fetched}
         else:
-            data = build.build(project, here, args.target, args.targets, args.jobs, args.keep_going, args.download,
-                               quiet=args.json)
+            data = build.build(project, here, args.target, args.targets, args.jobs, args.keep_going,
+                               args.download or args.download_build_tools, quiet=args.json,
+                               analysis=not args.download_build_tools)
         return data, build.render(data)
     if command == "refs":
         data = bridge.refs(project, " ".join(args.query), target, project.repo_key(args.repo) if args.repo else None,

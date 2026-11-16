@@ -149,13 +149,16 @@ def stem(unit: str) -> str:
 # Tools
 
 def _tool(root: Path, value: str | None) -> Path | None:
-    """A tool given as a path (repository-relative or absolute, `~` allowed) or a name on PATH."""
+    """A tool given as a path (repository-relative or absolute, `~` allowed; on Windows `.exe` may be left off, so
+    one project file names it on every system) or a name on PATH."""
     if not value:
         return None
     path = Path(value).expanduser()
     path = path if path.is_absolute() else root / path
-    if path.is_file():
-        return path
+    for candidate in (path, path.with_name(path.name + ".exe")) if sys.platform == "win32" and not path.suffix \
+            else (path,):
+        if candidate.is_file():
+            return candidate
     found = shutil.which(value) if os.sep not in value and "/" not in value else None
     return Path(found) if found else None
 
@@ -177,7 +180,8 @@ def compiler(root: Path, config: dict[str, Any]) -> tuple[Path | None, str]:
 def clang_plugin(root: Path, clang: Path, name: str) -> Path:
     """build.clang_plugins: zkit's clang plugin `name` (clang_plugins/<name>.cpp) as a shared object built with the
     host C++ compiler ($CXX, else c++) against this clang's own LLVM headers (`<clang>/../../include`, as its
-    release archive has them), once per source and LLVM version, into build/tools/clang-plugins."""
+    release archive has them), once per source and LLVM version, into build/tools/clang-plugins. On macOS its LLVM
+    symbols are left for clang itself to provide when it loads the plugin (Linux allows that by default)."""
     source = PLUGINS / f"{name.replace('-', '_')}.cpp"
     if not source.is_file():
         known = sorted(path.stem.replace("_", "-") for path in PLUGINS.glob("*.cpp"))
@@ -196,7 +200,8 @@ def clang_plugin(root: Path, clang: Path, name: str) -> Path:
         raise ValueError("build.clang_plugins: no host C++ compiler to build the plugin with (set CXX)")
     out.parent.mkdir(parents=True, exist_ok=True)
     partial = out.with_suffix(".partial")
-    run = subprocess.run([*shlex.split(cxx), "-shared", "-fPIC", "-O2", "-std=c++11", "-fno-rtti", "-w",
+    darwin = ["-undefined", "dynamic_lookup"] if sys.platform == "darwin" else []
+    run = subprocess.run([*shlex.split(cxx), "-shared", "-fPIC", "-O2", "-std=c++11", "-fno-rtti", "-w", *darwin,
                           f"-I{include}", "-D__STDC_CONSTANT_MACROS", "-D__STDC_LIMIT_MACROS", str(source),
                           "-o", str(partial)], capture_output=True, text=True)
     if run.returncode != 0:
@@ -531,7 +536,16 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
                 "implicit": [_relative(p, root) for p in (run, exe) if p]}
     cc = [str(exe) if exe else config["compiler"]]
     implicit = [_relative(exe, root)] if exe else []
-    plugins = [clang_plugin(root, exe, name) for name in words(config.get("clang_plugins"))] if exe else []
+    wanted = words(config.get("clang_plugins")) if exe else []
+    if wanted and sys.platform == "win32":
+        # A Windows clang.exe exports none of LLVM's symbols, so it can load no plugin: build the units as they
+        # are, say so once.
+        if "clang_plugins" not in found:
+            found["clang_plugins"] = None
+            notes.append(f"clang on Windows cannot load plugins: units built with build.clang_plugins "
+                         f"({', '.join(wanted)}) may not match here (build on Linux or in WSL to match them)")
+        wanted = []
+    plugins = [clang_plugin(root, exe, name) for name in wanted]
     implicit += [_relative(path, root) for path in plugins]
     config = {**config, "extra_cflags": config["extra_cflags"] + [word for path in plugins for word in
                                                                   ("-Xclang", "-load", "-Xclang", path.as_posix())]}
@@ -724,10 +738,11 @@ def ensure_compilers(project: Project, names: list[str]) -> list[dict[str, Any]]
     return fetched
 
 
-def ensure_downloads(project: Project, names: list[str]) -> list[dict[str, Any]]:
-    """--download: the compiler bundle where a compiler is missing, then every pinned tool a target lacks."""
+def ensure_downloads(project: Project, names: list[str], analysis: bool = True) -> list[dict[str, Any]]:
+    """--download: the compiler bundle where a compiler is missing, then every pinned tool a target lacks (only
+    those building needs without `analysis`: --download-build-tools)."""
     from .fetch import ensure
-    return ensure_compilers(project, names) + ensure(project, names)
+    return ensure_compilers(project, names) + ensure(project, names, analysis)
 
 
 def run_ninja(root: Path, targets: list[str], jobs: int | None = None, keep_going: int | None = None,
@@ -743,10 +758,10 @@ def run_ninja(root: Path, targets: list[str], jobs: int | None = None, keep_goin
 
 def build(project: Project, repository: str | None = None, only: str | None = None, targets: list[str] = (),
           jobs: int | None = None, keep_going: int | None = None, download: bool = False,
-          quiet: bool = False) -> dict[str, Any]:
+          quiet: bool = False, analysis: bool = True) -> dict[str, Any]:
     """Configure, then run ninja; what was built and where each target's report and link stand."""
     names = build_targets(project, repository, only)
-    fetched = ensure_downloads(project, names) if download else []
+    fetched = ensure_downloads(project, names, analysis) if download else []
     configured = configure(project, repository, only)
     code = run_ninja(Path(configured["root"]), list(targets), jobs, keep_going, quiet)
     root = Path(configured["root"])

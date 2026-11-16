@@ -164,9 +164,11 @@ def download(url: str, sha256: str, directory: Path) -> Path:
 
 
 def unpack(archive_path: Path, folder: Path, source: str, members: tuple[str, ...] = (), strip: int = 0) -> int:
-    """Unpack a zip or tarball into folder (never outside it), every file executable; the number of files. `strip`
-    drops that many leading folders from each path (tar's --strip-components); with `members`, only the files
-    matching those globs (after stripping) are kept. A tarball is read once, in order (an xz stream)."""
+    """Unpack a zip, tarball, Debian package (its data) or NSIS installer (the files it installs, read without
+    running it) into folder (never outside it), every file executable; the number of files. `strip` drops that many
+    leading folders from each path (tar's --strip-components); with `members`, only the files matching those globs
+    (after stripping) are kept. A tarball is read once, in order (an xz stream)."""
+    from . import nsis
     folder.mkdir(parents=True, exist_ok=True)
     count = 0
     if zipfile.is_zipfile(archive_path):
@@ -180,6 +182,18 @@ def unpack(archive_path: Path, folder: Path, source: str, members: tuple[str, ..
                 destination.chmod(0o755)
                 count += 1
         return count
+    if nsis.is_installer(archive_path):
+        return nsis.Installer(archive_path).extract(lambda name: _destination(folder, name, strip, members, source))
+    data = _deb_data(archive_path)
+    try:
+        return _untar(data or archive_path, folder, source, members, strip)
+    finally:
+        if data:
+            data.unlink(missing_ok=True)
+
+
+def _untar(archive_path: Path, folder: Path, source: str, members: tuple[str, ...], strip: int) -> int:
+    count = 0
     with tarfile.open(archive_path, "r:*") as archive:
         for member in archive:
             destination = _destination(folder, member.name, strip, members, source)
@@ -196,6 +210,26 @@ def unpack(archive_path: Path, folder: Path, source: str, members: tuple[str, ..
                 destination.chmod(0o755)
             count += 1
     return count
+
+
+def _deb_data(path: Path) -> Path | None:
+    """A Debian package's data.tar.* copied beside it (a temporary file), or None when path is no package (an ar
+    archive: "!<arch>\\n", then members of a 60-byte header and their bytes, each padded to an even size)."""
+    with path.open("rb") as file:
+        if file.read(8) != b"!<arch>\n":
+            return None
+        while len(header := file.read(60)) == 60:
+            name, size = header[:16].decode("ascii", "replace").strip().rstrip("/"), int(header[48:58])
+            if not name.startswith("data.tar"):
+                file.seek(size + size % 2, 1)
+                continue
+            with tempfile.NamedTemporaryFile(dir=path.parent, suffix=f".{name}", delete=False) as out:
+                left = size
+                while left and (block := file.read(min(left, 1 << 20))):
+                    out.write(block)
+                    left -= len(block)
+            return Path(out.name)
+    raise ValueError(f"{path}: a Debian package without data.tar")
 
 
 def _destination(folder: Path, name: str, strip: int, members: tuple[str, ...], source: str) -> Path | None:
@@ -302,36 +336,73 @@ def llvm_tool(name: str) -> str | None:
     return None
 
 
-def compiler_archive(root: Path, config: dict[str, Any]) -> dict[str, Any] | None:
-    """`build.compiler_download` ({url, sha256, folder?, strip?}): the project's own pinned compiler archive, fetched
-    into `folder` (default build/compilers/<archive name>) when the configured compiler is missing."""
+# A host with no archive of its own runs this one's (Rosetta 2 on an Arm Mac, x64 emulation on Arm Windows).
+EMULATES = {"macos-arm64": "macos-x86_64", "windows-arm64": "windows-x86_64"}
+
+
+def compiler_archives(spec: Any, place: str | None = None) -> tuple[str | None, list[dict[str, Any]]]:
+    """(folder, the archives to fetch on this host) of `build.compiler_download`."""
+    def checked(archive: Any) -> dict[str, Any]:
+        if not isinstance(archive, dict) or not archive.get("url") or not archive.get("sha256"):
+            raise ValueError("build.compiler_download: each archive needs `url` and `sha256` (and optionally "
+                             "`folder`, `strip`, `members`)")
+        return archive
+    if not isinstance(spec, dict):
+        raise ValueError("build.compiler_download is {url, sha256, ...} or {folder, \"<host>\": archive, ...}")
+    if "url" in spec:
+        return spec.get("folder"), [checked(spec)]
+    if not spec.get("folder"):
+        raise ValueError("build.compiler_download: archives per host need `folder` (one place for build.compiler "
+                         "to name on every host)")
+    place = place or host()
+    hosts = sorted(key for key in spec if key != "folder")
+    chosen = spec.get(place) or spec.get(EMULATES.get(place, ""))
+    if not chosen:
+        raise ValueError(f"build.compiler_download has no archive for {place} (it has: {', '.join(hosts)})")
+    return spec["folder"], [checked(archive) for archive in (chosen if isinstance(chosen, list) else [chosen])]
+
+
+def compiler_archive(root: Path, config: dict[str, Any], place: str | None = None) -> dict[str, Any] | None:
+    """`build.compiler_download`: the project's own pinned compiler, fetched when the configured one is missing.
+    Either one archive for every host, {url, sha256, folder?, strip?, members?}, or archives per host, {folder,
+    "<host>": archive or [archives], ...} with hosts named as `host()` names them (an Arm Mac or Windows without its
+    own takes the x86-64 one). An archive is a zip, tarball, Debian package or NSIS installer (LLVM's Windows
+    releases), unpacked into `folder` (default build/compilers/<archive name>; an archive's own `folder` puts it
+    elsewhere, such as a library the compiler loads from its lib folder), `strip` leading folders dropped (default
+    1, 0 for an installer) and, with `members`, only the files matching those globs kept."""
     spec = config.get("compiler_download")
     if not spec:
         return None
-    if not isinstance(spec, dict) or not spec.get("url") or not spec.get("sha256"):
-        raise ValueError("build.compiler_download needs `url` and `sha256` (and optionally `folder`, `strip`)")
+    default, archives = compiler_archives(spec, place)
+    from . import nsis
     from .build import compiler
     if compiler(root, config)[0] is not None:
         return None
-    url = spec["url"]
-    stem = url.rstrip("/").rsplit("/", 1)[-1]
-    for suffix in (".tar.xz", ".tar.gz", ".tar.bz2", ".tgz", ".zip"):
-        stem = stem.removesuffix(suffix)
-    folder = Path(spec.get("folder") or f"build/compilers/{stem}").expanduser()
-    folder = folder if folder.is_absolute() else root / folder
-    temporary = download(url, spec["sha256"].lower().removeprefix("sha256:"), folder.parent)
-    try:
-        files = unpack(temporary, folder, url, strip=int(spec.get("strip", 1)))
-    finally:
-        temporary.unlink(missing_ok=True)
+    files, urls, top = 0, [], None
+    for archive in archives:
+        url = archive["url"]
+        stem = url.rstrip("/").rsplit("/", 1)[-1]
+        for suffix in (".tar.xz", ".tar.gz", ".tar.bz2", ".tgz", ".zip", ".deb", ".exe"):
+            stem = stem.removesuffix(suffix)
+        folder = Path(archive.get("folder") or default or f"build/compilers/{stem}").expanduser()
+        folder = folder if folder.is_absolute() else root / folder
+        top = top or folder
+        temporary = download(url, archive["sha256"].lower().removeprefix("sha256:"), folder.parent)
+        try:
+            strip = int(archive.get("strip", 0 if nsis.is_installer(temporary) else 1))
+            files += unpack(temporary, folder, url, tuple(archive.get("members", ())), strip)
+        finally:
+            temporary.unlink(missing_ok=True)
+        urls.append(url)
     if compiler(root, config)[0] is None:
-        raise ValueError(f"{url} unpacked into {folder}, but the configured compiler {config['compiler']} is still "
+        raise ValueError(f"{urls[0]} unpacked into {top}, but the configured compiler {config['compiler']} is still "
                          "not there: point build.compiler at it")
-    return {"tool": "compiler", "url": url, "folder": str(folder), "files": files}
+    return {"tool": "compiler", "url": " ".join(urls), "folder": str(top), "files": files}
 
 
-def needed(project, name: str) -> list[str]:
-    """The tools a target needs that are found nowhere else (or were fetched at an older version)."""
+def needed(project, name: str, analysis: bool = True) -> list[str]:
+    """The tools a target needs that are found nowhere else (or were fetched at an older version); without
+    `analysis`, only those building needs (objdiff-cli, wibo), not the disassemblers, m2c or the permuter."""
     from . import build
     from .platform import for_target
     target = project.target(name)
@@ -340,17 +411,18 @@ def needed(project, name: str) -> list[str]:
     found: dict[str, Any] = {}
     if config is not None and not config.get("objdiff_cli"):
         found["objdiff-cli"] = build.objdiff_cli(root, config)
-    if for_target(target).name == "switch":
+    switch = for_target(target).name == "switch"
+    if not switch and config is not None and os.name != "nt" and config.get("wrapper") in (None, "wibo"):
+        found["wibo"] = build.wrapper(root, config)[0]
+    if analysis and switch:
         mine = managed(root, "llvm")
         for program in ("llvm-objdump", "llvm-cxxfilt"):
             path = shutil.which(program) or (str(mine / "bin" / program) if mine else None)
             found.setdefault("llvm", path if path and Path(path).exists() else None)
-    else:
+    elif analysis:
         from .asmfile import find_m2c
         from .inspect_dol import _objdump
         from .permute import find_permuter
-        if config is not None and os.name != "nt" and config.get("wrapper") in (None, "wibo"):
-            found["wibo"] = build.wrapper(root, config)[0]
         found["binutils"] = _objdump(project)
         found["m2c"] = find_m2c(project)
         found["decomp-permuter"] = find_permuter(project)
@@ -371,9 +443,9 @@ def _same(found: Any, mine: Path) -> bool:
         return False
 
 
-def ensure(project, names: list[str]) -> list[dict[str, Any]]:
+def ensure(project, names: list[str], analysis: bool = True) -> list[dict[str, Any]]:
     """--download: each target's own pinned compiler archive (and each `build.units` override's) when its compiler
-    is missing, then every missing tool, once per repository."""
+    is missing, then every missing tool (only those building needs without `analysis`), once per repository."""
     from .build import settings
     fetched, done = [], set()
     for name in names:
@@ -384,7 +456,7 @@ def ensure(project, names: list[str]) -> list[dict[str, Any]]:
             for own in [config, *({**config, **o} for o in config.get("units", {}).values() if "compiler_download" in o)]:
                 result = compiler_archive(root, own)
                 fetched += [result] if result else []
-        for tool in needed(project, name):
+        for tool in needed(project, name, analysis):
             if (root, tool) in done:
                 continue
             fetched.append(fetch(root, tool))

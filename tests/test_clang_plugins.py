@@ -65,6 +65,38 @@ class ClangPluginTests(unittest.TestCase):
             self.assertEqual(step["flags"][-5:], ["-DX", "-Xclang", "-load", "-Xclang", plugin.as_posix()])
             self.assertIn("build/tools/clang-plugins/p.so", step["implicit"])
 
+    def test_windows_builds_without_plugins_and_says_so_once(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch("sys.platform", "win32"), \
+                mock.patch.object(build, "clang_plugin") as made:
+            root = Path(temp)
+            (root / "clang++.exe").write_text("")
+            config = {**build.settings({"platform": "switch", "build": {"compiler": str(root / "clang++")}}),
+                      "clang_plugins": ["bare-return-atexit"], "extra_cflags": ["-DX"]}
+            found, notes = {}, []
+            for unit in ("a.cpp", "b.cpp"):
+                step = build._compile(root, config, unit, build.Layout("build/t"), found, notes)
+                self.assertEqual(step["flags"][-1], "-DX")
+            made.assert_not_called()
+            self.assertEqual(len(notes), 1)
+            self.assertIn("cannot load plugins", notes[0])
+            self.assertEqual(step["cc"], [str(root / "clang++.exe")])  # .exe left off in the project file
+
+    def test_macos_leaves_llvm_symbols_to_clang(self):
+        for platform, expected in (("darwin", True), ("linux", False)):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temp, \
+                    mock.patch("sys.platform", platform), mock.patch.dict(os.environ, {"CXX": "c++"}), \
+                    mock.patch.object(build.subprocess, "run") as run:
+                clang = Path(temp) / "llvm/bin/clang++"
+                config = Path(temp) / "llvm/include/llvm/Config/llvm-config.h"
+                config.parent.mkdir(parents=True)
+                config.write_text("#define LLVM_VERSION_MAJOR 3\n")
+                run.return_value = subprocess.CompletedProcess([], 0, "", "")
+                with mock.patch.object(Path, "replace"):
+                    build.clang_plugin(Path(temp), clang, "bare-return-atexit")
+                argv = run.call_args[0][0]
+                self.assertEqual("dynamic_lookup" in argv and argv[argv.index("dynamic_lookup") - 1] == "-undefined",
+                                 expected)
+
     @unittest.skipUnless(OLD_CLANG, "set ZKIT_TEST_OLD_CLANG to a clang+llvm 3.9-8 release folder")
     def test_bare_return_atexit_keeps_registrations_of_destructors_that_call_empty_ones(self):
         clang = Path(OLD_CLANG) / "bin" / "clang++"
