@@ -181,7 +181,8 @@ def clang_plugin(root: Path, clang: Path, name: str) -> Path:
     """build.clang_plugins: zkit's clang plugin `name` (clang_plugins/<name>.cpp) as a shared object built with the
     host C++ compiler ($CXX, else c++) against this clang's own LLVM headers (`<clang>/../../include`, as its
     release archive has them), once per source and LLVM version, into build/tools/clang-plugins. On macOS its LLVM
-    symbols are left for clang itself to provide when it loads the plugin (Linux allows that by default)."""
+    symbols are left for clang itself to provide when it loads the plugin (Linux allows that by default), and it is
+    built for clang's own architecture (an x86-64 clang, run by Rosetta 2 on an Arm Mac, loads only an x86-64 one)."""
     source = PLUGINS / f"{name.replace('-', '_')}.cpp"
     if not source.is_file():
         known = sorted(path.stem.replace("_", "-") for path in PLUGINS.glob("*.cpp"))
@@ -200,7 +201,8 @@ def clang_plugin(root: Path, clang: Path, name: str) -> Path:
         raise ValueError("build.clang_plugins: no host C++ compiler to build the plugin with (set CXX)")
     out.parent.mkdir(parents=True, exist_ok=True)
     partial = out.with_suffix(".partial")
-    darwin = ["-undefined", "dynamic_lookup"] if sys.platform == "darwin" else []
+    darwin = ["-undefined", "dynamic_lookup", *(["-arch", arch] if (arch := macho_arch(clang)) else [])] \
+        if sys.platform == "darwin" else []
     run = subprocess.run([*shlex.split(cxx), "-shared", "-fPIC", "-O2", "-std=c++11", "-fno-rtti", "-w", *darwin,
                           f"-I{include}", "-D__STDC_CONSTANT_MACROS", "-D__STDC_LIMIT_MACROS", str(source),
                           "-o", str(partial)], capture_output=True, text=True)
@@ -209,6 +211,22 @@ def clang_plugin(root: Path, clang: Path, name: str) -> Path:
         raise ValueError(f"build.clang_plugins: building {name} failed:\n{run.stderr[-2000:]}")
     partial.replace(out)
     return out
+
+
+# A thin 64-bit Mach-O executable: its magic, then its CPU type.
+MACHO_ARCHES = {0x01000007: "x86_64", 0x0100000C: "arm64"}
+
+
+def macho_arch(path: Path) -> str | None:
+    """The architecture of a thin 64-bit Mach-O executable, or None (another format, or a universal binary)."""
+    try:
+        with open(path, "rb") as stream:
+            head = stream.read(8)
+    except OSError:
+        return None
+    if len(head) < 8 or head[:4] != b"\xcf\xfa\xed\xfe":
+        return None
+    return MACHO_ARCHES.get(int.from_bytes(head[4:8], "little"))
 
 
 def linker(root: Path, config: dict[str, Any]) -> Path | None:

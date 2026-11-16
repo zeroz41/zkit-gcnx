@@ -97,6 +97,27 @@ class ClangPluginTests(unittest.TestCase):
                 self.assertEqual("dynamic_lookup" in argv and argv[argv.index("dynamic_lookup") - 1] == "-undefined",
                                  expected)
 
+    def test_macos_builds_the_plugin_for_the_clang_architecture(self):
+        # an x86-64 clang (Rosetta 2 on an Arm Mac) needs an x86-64 plugin; another format adds nothing
+        for head, expected in ((b"\xcf\xfa\xed\xfe\x07\x00\x00\x01", ["-arch", "x86_64"]),
+                               (b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01", ["-arch", "arm64"]),
+                               (b"\x7fELF\x02\x01\x01\x00", [])):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as temp, \
+                    mock.patch("sys.platform", "darwin"), mock.patch.dict(os.environ, {"CXX": "c++"}), \
+                    mock.patch.object(build.subprocess, "run") as run:
+                clang = Path(temp) / "llvm/bin/clang++"
+                clang.parent.mkdir(parents=True)
+                clang.write_bytes(head + bytes(24))
+                config = Path(temp) / "llvm/include/llvm/Config/llvm-config.h"
+                config.parent.mkdir(parents=True)
+                config.write_text("#define LLVM_VERSION_MAJOR 3\n")
+                run.return_value = subprocess.CompletedProcess([], 0, "", "")
+                with mock.patch.object(Path, "replace"):
+                    build.clang_plugin(Path(temp), clang, "bare-return-atexit")
+                argv = run.call_args[0][0]
+                self.assertEqual(argv[argv.index("-arch"):argv.index("-arch") + 2] if "-arch" in argv else [],
+                                 expected)
+
     @unittest.skipUnless(OLD_CLANG, "set ZKIT_TEST_OLD_CLANG to a clang+llvm 3.9-8 release folder")
     def test_bare_return_atexit_keeps_registrations_of_destructors_that_call_empty_ones(self):
         clang = Path(OLD_CLANG) / "bin" / "clang++"
