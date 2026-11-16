@@ -59,8 +59,7 @@ class ClangPluginTests(unittest.TestCase):
             clang.write_text("")
             config = {**build.settings({"platform": "switch", "build": {"compiler": str(clang)}}),
                       "clang_plugins": ["bare-return-atexit"], "extra_cflags": ["-DX"]}
-            with mock.patch.object(build, "clang_plugin", return_value=plugin) as made, \
-                    mock.patch.object(build, "source_root", return_value=None):
+            with mock.patch.object(build, "clang_plugin", return_value=plugin) as made:
                 step = build._compile(root, config, "a.cpp", build.Layout("build/t"), {}, [])
             made.assert_called_once_with(root, clang, "bare-return-atexit")
             self.assertEqual(step["flags"][-5:], ["-DX", "-Xclang", "-load", "-Xclang", plugin.as_posix()])

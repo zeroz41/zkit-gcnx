@@ -94,8 +94,8 @@ class SettingsTests(unittest.TestCase):
 
     def test_a_library_built_elsewhere_has_its_own_source_root(self):
         """A library the game linked prebuilt cites the folder it was built in, not the game's: a `units` pattern
-        gives its units their own `source_root`, and each compiles as `<its root>/<unit>` from the same folder,
-        where both roots link to src/."""
+        gives its units their own `source_root`, and each compiles from a copy that names it `<its root>/<unit>`,
+        with its own folder searched for quoted includes; a unit without the setting compiles src/ itself."""
         config = build.settings({"platform": "switch", "build": {
             "compiler": "clang++", "source_root": "D:/game/prog",
             "units": {"libs/mm/*": {"source_root": "C:/Lib/prog"}}}})
@@ -105,12 +105,27 @@ class SettingsTests(unittest.TestCase):
             paths, notes = build.layout("t", {}), []
             game, library = (build._compile(root, build.unit_settings(config, unit), unit, paths, {}, notes)
                              for unit in ("app/main.cpp", "libs/mm/thread.cpp"))
-            self.assertEqual(game["variables"]["source"], "D:/game/prog/app/main.cpp")
-            self.assertEqual(library["variables"]["source"], "C:/Lib/prog/libs/mm/thread.cpp")
-            self.assertEqual(game["variables"]["folder"], library["variables"]["folder"])
-            folder = Path(game["variables"]["folder"])
-            for original in ("D:/game/prog", "C:/Lib/prog"):
-                self.assertEqual((folder / original).resolve(), (root / "src").resolve())
+            self.assertEqual(game["stage"], {"source": "src/app/main.cpp", "named": "D:/game/prog/app/main.cpp",
+                                             "copy": "build/t/rooted/app/main.cpp"})
+            self.assertEqual(library["stage"]["named"], "C:/Lib/prog/libs/mm/thread.cpp")
+            self.assertIn("-iquote src/app", " ".join(game["flags"]))
+            self.assertEqual(game["argv"][-4:], ["-c", "src/app/main.cpp", "-o", "build/t/src/app/main.o"])
+            bare = build.settings({"platform": "switch", "build": {"compiler": "clang++"}})
+            plain = build._compile(root, build.unit_settings(bare, "app/main.cpp"), "app/main.cpp", paths, {}, notes)
+            self.assertNotIn("stage", plain)
+            self.assertNotIn("-iquote", plain["flags"])
+
+    def test_a_staged_copy_names_the_original_and_keeps_its_lines(self):
+        """The copy's `#line` comes first, after a byte-order mark if there is one; every line keeps its number."""
+        self.assertEqual(build.stage(b"int a;\n", "D:/p/a.cpp"), b'#line 1 "D:/p/a.cpp"\nint a;\n')
+        self.assertEqual(build.stage(b"\xef\xbb\xbfint a;", 'C:\\x"y.cpp'),
+                         b'\xef\xbb\xbf#line 1 "C:\\\\x\\"y.cpp"\nint a;')
+        with tempfile.TemporaryDirectory() as temp:
+            source, copy = Path(temp) / "a.cpp", Path(temp) / "out/a.cpp"
+            source.write_bytes(b"int a;\n")
+            rows = [{"source": str(source), "named": "D:/p/a.cpp", "copy": str(copy)}]
+            self.assertEqual(build.write_staged(rows), 1)
+            self.assertEqual(build.write_staged(rows), 0)                 # unchanged: left as it is
 
     def test_layout(self):
         self.assertEqual(build.layout("t", {"report": "build/GAME01/report.json"}).obj, "build/GAME01/obj")

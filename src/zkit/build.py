@@ -370,11 +370,9 @@ def configure(project: Project, repository: str | None = None, only: str | None 
         depfile="$basefile.d", deps="gcc", description="MWCC $out")
     ninja.rule("clang", "$cc $cflags -MMD -MF $out.d -c $in -o $out", depfile="$out.d", deps="gcc",
                description="CC $out")
-    # Compiled from the folder itself, not with clang's -working-directory, which makes the main file's path, and
-    # so its `__FILE__`, absolute. The dependencies come first, from the source's path in the repository (the same
-    # file through the folder's link): ninja reads them from there, where the original's path does not exist.
-    ninja.rule("clang_rooted", "$cc $cflags -MM -MT $out -MF $object.d $in && cd $folder && "
-               "$cc $cflags -c $source -o $object", depfile="$out.d", deps="gcc", description="CC $out")
+    # `source_root`: each unit's copy that names it as the original's build did (`stage`); one step writes every
+    # copy whose source changed, restat: an unchanged copy keeps its time, so only a changed unit recompiles
+    ninja.rule("rooted", _command(python) + " rooted $in", restat="1", description="ROOTED $in")
     ninja.rule("report", "$objdiff report generate -p $project $args -o $out", description="REPORT $out")
     # restat: a view whose bytes did not change keeps its time, so the report reruns only for a changed one
     ninja.rule("views", _command(python) + " views $list $folders", rspfile="$list", rspfile_content="$in_newline",
@@ -412,22 +410,29 @@ def configure(project: Project, repository: str | None = None, only: str | None 
                         variables={"target": name, "splits": _command([_relative(splits, root)]),
                                    "outdir": _command([paths.obj])})
         ninja.lines.append("")
-        compiled, sources, found = [], set(), {}
+        compiled, sources, found, staged = [], set(), {}, []
         for unit in units:
             if not (root / "src" / unit).is_file():
                 continue
             step = _compile(root, unit_settings(config, unit), unit, paths, found, notes)
             commands.append({"directory": str(root), "file": f"src/{unit}", "arguments": step["argv"],
                              "output": step["out"]})
+            variables = {}
             if config["platform"] == "gamecube":
                 basedir = Path(step["out"]).parent.as_posix()
                 variables = {"basedir": _command([basedir]), "basefile": _command([f"{basedir}/{Path(unit).stem}"])}
-            else:
-                variables = {key: _command([value]) for key, value in step.get("variables", {}).items()}
-            ninja.build([step["out"]], step["rule"], [f"src/{unit}"], implicit=step["implicit"],
+            if step.get("stage"):
+                staged.append(step["stage"])
+            ninja.build([step["out"]], step["rule"], [step["stage"]["copy"] if step.get("stage") else f"src/{unit}"],
+                        implicit=step["implicit"],
                         variables={"cc": _command(step["cc"]), "cflags": _command(step["flags"]), **variables})
             compiled.append(step["out"])
             sources.add(unit)
+        if staged:
+            manifest = f"{paths.dir}/rooted.json"
+            _write(root / manifest, json.dumps(staged, indent=1) + "\n")
+            ninja.build([row["copy"] for row in staged], "rooted", [manifest],
+                        implicit=[row["source"] for row in staged])
         objdiff = project.file(repository, target.get("objdiff", "objdiff.json"))
         if objdiff in objdiff_files.values():
             raise ValueError(f"Targets {name} and {next(n for n, p in objdiff_files.items() if p == objdiff)} share "
@@ -530,47 +535,46 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
     implicit += [_relative(path, root) for path in plugins]
     config = {**config, "extra_cflags": config["extra_cflags"] + [word for path in plugins for word in
                                                                   ("-Xclang", "-load", "-Xclang", path.as_posix())]}
-    mirror = source_root(root, paths, config, notes)
-    if mirror is not None:
-        # from the folder whose `source_root` is src/: the source as the original's build named it, every other
-        # path absolute (clang resolves includes and the object against the working directory)
-        named = f"{config['source_root'].strip('/')}/{unit}"
-        flags = words(config["cflags"]) + [f"-I{(root / folder).as_posix()}" for folder in includes] + \
-            config["extra_cflags"]
-        target = (root / out).as_posix()
-        # argv (compile_commands.json, `zkit try`) names the folder with -working-directory; ninja runs from it
-        return {"rule": "clang_rooted", "cc": cc, "flags": flags,
-                "argv": [*cc, *flags, "-working-directory", mirror.as_posix(), "-c", named, "-o", target],
-                "out": out, "implicit": implicit,
-                "variables": {"source": named, "object": target, "folder": mirror.as_posix()}}
-    flags = words(config["cflags"]) + [f"-I{folder}" for folder in includes] + config["extra_cflags"]
-    return {"rule": "clang", "cc": cc, "flags": flags, "argv": [*cc, *flags, "-c", source, "-o", out], "out": out,
+    named = original_name(config, unit)
+    # `source_root`: ninja compiles a copy that names the source as the original's build did (`stage`), with the
+    # source's own folder searched first for quoted includes, as the source's would be. argv (compile_commands.json,
+    # editors, `zkit try`) compiles the source itself: the same object but for `__FILE__`.
+    quoted = ["-iquote", Path(source).parent.as_posix()] if named else []
+    flags = words(config["cflags"]) + quoted + [f"-I{folder}" for folder in includes] + config["extra_cflags"]
+    step = {"rule": "clang", "cc": cc, "flags": flags, "argv": [*cc, *flags, "-c", source, "-o", out], "out": out,
             "implicit": implicit}
+    if named:
+        step["stage"] = {"source": source, "named": named, "copy": f"{paths.dir}/rooted/{unit}"}
+    return step
 
 
-def source_root(root: Path, paths: Layout, config: dict[str, Any], notes: list[str]) -> Path | None:
-    """Where a clang target with `source_root` compiles from: `<build dir>/root`, in which that path (the folder
-    the original's `__FILE__` strings start with, e.g. `D:/Studio/Game/prog`) is a link to src/, so a unit's
-    `__FILE__` reads as the original's. None without the setting, or where links cannot be made."""
+def original_name(config: dict[str, Any], unit: str) -> str | None:
+    """The unit's path as the original's build named it, which its `__FILE__` strings cite: `<source_root>/<unit>`
+    (e.g. `D:/Studio/Game/prog/game/Player.cpp`); None without `source_root`."""
     original = (config.get("source_root") or "").strip("/")
-    if not original:
-        return None
-    mirror = root / paths.dir / "root"
-    link = mirror / original
-    wanted = os.path.relpath(root / "src", link.parent)
-    if os.name == "nt":
-        notes.append("source_root is ignored on Windows: its drive letter cannot be a folder name there")
-        return None
-    try:
-        if not (link.is_symlink() and os.readlink(link) == wanted):
-            link.parent.mkdir(parents=True, exist_ok=True)
-            if link.is_symlink() or link.exists():
-                link.unlink()
-            link.symlink_to(wanted, target_is_directory=True)
-    except OSError as error:
-        notes.append(f"source_root is ignored: cannot link {link} to src/ ({error})")
-        return None
-    return mirror
+    return f"{original}/{unit}" if original else None
+
+
+def stage(source: bytes, named: str) -> bytes:
+    """The source as a file named `named`: a `#line` directive first (after any byte-order mark), so `__FILE__`
+    and `__LINE__` read as in the original's build, from any folder, on any system."""
+    mark = b"\xef\xbb\xbf" if source.startswith(b"\xef\xbb\xbf") else b""
+    quoted = named.replace("\\", "\\\\").replace('"', '\\"')
+    return mark + f'#line 1 "{quoted}"\n'.encode() + source[len(mark):]
+
+
+def write_staged(rows: list[dict[str, str]]) -> int:
+    """Write each row's `stage` copy whose bytes differ; the number written."""
+    written = 0
+    for row in rows:
+        data = stage(Path(row["source"]).read_bytes(), row["named"])
+        copy = Path(row["copy"])
+        if copy.is_file() and copy.read_bytes() == data:
+            continue
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_bytes(data)
+        written += 1
+    return written
 
 
 def categories_of(unit: str, categories: list[dict[str, Any]]) -> list[str]:
@@ -860,8 +864,11 @@ def main(argv: list[str]) -> int:
         compiled = [Path(line) for line in Path(argv[1]).read_text(encoding="utf-8").splitlines() if line.strip()]
         write_views([(obj / c.relative_to(src), c, view / c.relative_to(src)) for c in compiled])
         return 0
-    print("usage: python -m zkit.build depfile FILE OBJECT | sha1 FILE EXPECTED STAMP | views LIST SRC OBJ VIEW",
-          file=sys.stderr)
+    if len(argv) == 2 and argv[0] == "rooted":  # MANIFEST: configure's list of `stage` copies
+        write_staged(json.loads(Path(argv[1]).read_text(encoding="utf-8")))
+        return 0
+    print("usage: python -m zkit.build depfile FILE OBJECT | sha1 FILE EXPECTED STAMP | views LIST SRC OBJ VIEW | "
+          "rooted MANIFEST", file=sys.stderr)
     return 2
 
 

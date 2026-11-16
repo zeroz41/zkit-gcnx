@@ -91,42 +91,15 @@ def _rel(path: Path, base: Path) -> str:
         return str(path)
 
 
-def _rooted(argv: list[str], workdir: Path, source: Path) -> tuple[int, int] | None:
-    """A command compiling from another folder (clang's `-working-directory`, the build's `source_root`): the
-    indices of that folder and of the source as it names it, which reads as the original's path."""
-    if "-working-directory" not in argv[:-1]:
-        return None
-    folder_index = argv.index("-working-directory") + 1
-    folder = workdir / argv[folder_index]
-    for index, arg in enumerate(argv):
-        if index != folder_index and not arg.startswith("-") and (folder / arg).resolve() == source.resolve():
-            return folder_index, index
-    return None
-
-
-def plain_command(argv: list[str], workdir: Path, source_arg: str) -> list[str]:
-    """A rooted command (`_rooted`) as an ordinary one, for a compile whose `__FILE__` does not matter: from the
-    working directory, the source as src/ names it."""
-    rooted = _rooted(argv, workdir, workdir / source_arg)
-    if rooted is None:
-        return argv
-    folder, source = rooted
-    return [source_arg if i == source else a for i, a in enumerate(argv) if i not in (folder - 1, folder)]
-
-
 def _restage(argv: list[str], source_arg: str, staged: Path, out_dir: Path, source_dir: Path,
-             workdir: Path, rooted: tuple[int, int] | None = None,
-             includes: list[Path] | None = None) -> tuple[list[str], Path]:
+             workdir: Path, includes: list[Path] | None = None) -> tuple[list[str], Path]:
     """The unit's command, compiling `staged` into `out_dir` with `includes` (header copies that stand in for the
-    tree's) and then the unit's own folder searched first. A rooted command (`_rooted`) compiles from `out_dir`
-    instead, where `staged` has the source's path, so the candidate's `__FILE__` is the unit's; its other paths are
-    absolute."""
+    tree's) and then the unit's own folder searched first."""
     mwcc = any("mwcc" in Path(a).name.lower() for a in argv[:3])
     out: list[str] = []
     skip = False
     replaced = False
     expected = out_dir / (staged.stem + ".o")
-    place = (lambda path: str(path.resolve())) if rooted else (lambda path: _rel(path, workdir))
     for index, arg in enumerate(argv):
         if skip:
             skip = False
@@ -136,21 +109,14 @@ def _restage(argv: list[str], source_arg: str, staged: Path, out_dir: Path, sour
         if arg in DEP_ARGS:
             skip = True
             continue
-        if rooted and index == rooted[0]:
-            out.append(str(out_dir.resolve()))
-            continue
-        if rooted and index == rooted[1]:
-            out.append(arg)
-            replaced = True
-            continue
         if arg == "-o" and index + 1 < len(argv):
-            out += ["-o", place(out_dir if mwcc else expected)]
+            out += ["-o", _rel(out_dir if mwcc else expected, workdir)]
             skip = True
             continue
         if arg.startswith("-o") and len(arg) > 2 and not mwcc:
-            out.append(f"-o{place(expected)}")
+            out.append(f"-o{_rel(expected, workdir)}")
             continue
-        if not rooted and (arg == source_arg or Path(arg).as_posix() == Path(source_arg).as_posix()):
+        if arg == source_arg or Path(arg).as_posix() == Path(source_arg).as_posix():
             out.append(_rel(staged, workdir))
             replaced = True
             continue
@@ -159,31 +125,37 @@ def _restage(argv: list[str], source_arg: str, staged: Path, out_dir: Path, sour
         raise ValueError("Could not find the unit's source in its compile command")
     # Header copies, then the unit's folder, so its quoted includes resolve as they do in the tree.
     search = []
-    for folder in [place(path) for path in includes or []] + [place(source_dir)]:
+    for folder in [_rel(path, workdir) for path in [*(includes or []), source_dir]]:
         search += ["-i", folder] if mwcc else [f"-I{folder}"]
     first_flag = next((i for i, a in enumerate(out) if a.startswith("-")), len(out))
     return out[:first_flag] + search + out[first_flag:], expected
+
+
+def _original_name(project: Project, target: str, root: Path, source: Path) -> str | None:
+    """The name a zkit build's `source_root` gives the unit compiled from `source` (build.original_name)."""
+    from . import build
+    config = build.settings(project.target(target))
+    try:
+        unit = source.resolve().relative_to((root / "src").resolve()).as_posix()
+    except ValueError:
+        return None
+    return build.original_name(build.unit_settings(config, unit), unit) if config else None
 
 
 def _compile(project: Project, target: str, unit: dict, text: str, work: Path,
              includes: list[Path] | None = None) -> tuple[Path | None, str, str]:
     """Compile `text` in `work` with the unit's exact command, `includes` searched before the tree's headers:
     (the object or None, the command, its messages)."""
+    from . import build
     argv, workdir, source_arg = compile_command(project, target, unit)
     root = project.root(project.target(target)["repository"])
     source_path = root / ((unit.get("metadata") or {}).get("source_path") or _planned_source(project, target, unit))
-    rooted = _rooted(argv, workdir, source_path)
-    # same basename: static initializer names embed it; a rooted command's whole path: `__FILE__` is it
-    staged = work / argv[rooted[1]] if rooted else work / source_path.name
+    staged = work / source_path.name   # same basename: static initializer names embed it
     staged.parent.mkdir(parents=True, exist_ok=True)
-    staged.write_text(text, encoding="utf-8")
-    command, expected = _restage(argv, source_arg, staged, work, source_path.parent, workdir, rooted, includes)
-    cwd = workdir
-    if rooted:   # from the folder itself: clang's -working-directory would make `__FILE__` absolute
-        at = command.index("-working-directory")
-        cwd = Path(command[at + 1])
-        command = command[:at] + command[at + 2:]
-    result = subprocess.run(command, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+    named = _original_name(project, target, root, source_path)   # the build's `source_root`: as its copy reads
+    staged.write_bytes(build.stage(text.encode("utf-8"), named) if named else text.encode("utf-8"))
+    command, expected = _restage(argv, source_arg, staged, work, source_path.parent, workdir, includes)
+    result = subprocess.run(command, cwd=workdir, capture_output=True, text=True, encoding="utf-8",
                             errors="replace", timeout=300)
     built = expected if expected.is_file() else next(iter(work.glob("*.o")), None)
     message = (result.stdout + result.stderr).strip()
