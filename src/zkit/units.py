@@ -92,6 +92,7 @@ class Evidence:
     globals: set[tuple[int, int, str]] = field(default_factory=set)   # joins only a global's near users make
     inlined: set[tuple[int, int, str]] = field(default_factory=set)   # joins only another class's constructor
                                                                       # forming a table's address makes
+    ordered: list[tuple[int, int, str]] = field(default_factory=list)  # joins a pool out of code order makes
     toward: dict[tuple[int, int, str], int] = field(default_factory=dict)   # separation -> the place its
                                                                             # boundary takes among equal ones
 
@@ -185,7 +186,8 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     _initializer_ends(program, ev)
     _initializers_apart(program, ev)
     _start_up_object(program, ev)
-    ev.joins += _pools_out_of_order(program, local, copies + [r for r in ev.separations if r in ev.direct])
+    ev.ordered = _pools_out_of_order(program, local, copies + [r for r in ev.separations if r in ev.direct])
+    ev.joins += ev.ordered
     return ev
 
 
@@ -2829,6 +2831,11 @@ def check(program: Program, splits: list[tuple[str, str, int, int]], limit: int 
         homes = sorted({unit_of[i] for i in range(lo, hi + 1)} - {None})
         if len(homes) == 2:
             folds[tuple(homes)].append(because)
+    for lo, hi, because in ev.ordered:            # a pool out of order is local: every unit it spans is one
+        run = [u for u in unit_of[lo:hi + 1] if u is not None]
+        if len(set(run)) > 2:
+            for pair in {tuple(sorted(p)) for p in zip(run, run[1:]) if p[0] != p[1]}:
+                folds[pair].append(because)
     splits_needed: dict[str, list] = collections.defaultdict(list)
     apart: set[tuple[str, str]] = set()
     for lo, hi, because in ev.separations:

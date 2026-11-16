@@ -539,6 +539,22 @@ class CheckTests(unittest.TestCase):
                          [("g", [code.platform.text(code.functions[12].address), code.platform.text(code.functions[14].address)])])
 
 
+    def test_a_pool_out_of_order_folds_every_unit_it_spans(self):
+        """A pool out of code order joins 1-7 over a, b and c: a+b and b+c are folds; data joining d..f says only
+        that some boundary there is wrong."""
+        from unittest import mock
+        code = _Code(16)
+        code.objects, code.sections = [], []
+        splits = [(name, ".text", code.functions[lo].address, code.functions[hi].address + 0x40)
+                  for name, lo, hi in [("a", 0, 2), ("b", 3, 5), ("c", 6, 8), ("d", 9, 10), ("e", 11, 12),
+                                       ("f", 13, 15)]]
+        ordered = (1, 7, "the literal 0x9000 lies before 0x9010, whose users come first: one unit")
+        ev = units.Evidence({}, [ordered, (10, 14, "lbl_9100 (.sbss) is one unit's")], [], ordered=[ordered])
+        with mock.patch.object(units, "evidence", return_value=ev), \
+                mock.patch.object(units, "linker_code", return_value=set()):
+            result = units.check(code, splits)
+        self.assertEqual(sorted(r["units"] for r in result["folds"]), [["a", "b"], ["b", "c"]])
+
     def test_a_boundary_lies_between_two_static_initializers(self):
         """.ctors calls 3 and 9 (a symbol names only its first entry, not the section's others): a boundary lies in
         4..9, the code's own statement."""
