@@ -407,8 +407,9 @@ class UnitEvidenceTests(unittest.TestCase):
     def test_a_pool_out_of_code_order_is_one_unit_s(self):
         """GameCube: b's user 2 comes before a's 5, yet b lies after a: 2-5 is one unit (a unit compiled
         `-inline deferred` pools in reverse). Not past POOL_REACH functions (f at 30, e at 60) or POOL_BYTES of
-        pool (h, g), nor where two copies of one constant part the span; one function's own `.rodata` copy (i)
-        counts, a table two functions reach (k) does not. Another platform's pools say nothing."""
+        pool (h, g), nor where two copies of one constant part the span or past a file's static initializer; one
+        function's own `.rodata` copy (i) counts, a table two functions reach (k) does not. Another platform's pools
+        say nothing."""
         from zkit.platform import Switch
         def at(address, size=4, section=".sdata2"):
             return DataObject(address, size, f"lbl_{address:X}", section)
@@ -417,12 +418,16 @@ class UnitEvidenceTests(unittest.TestCase):
             at(0xA030, 4, ".rodata")
         local = {a: [5], b: [2], e: [60], f: [30], g: [80], h: [78], i: [90], j: [88], k: [100, 101], l: [99]}
         program = _Objects(list(local))
+        program.sections, program.function_index = [], {}
         program.refs = {n: [(0, o.address, "f32")] for n, o in enumerate([a, b, e, f, g, h, j, l])}
         program.refs[20] = [(0, i.address, "addr"), (4, k.address, "addr")]
         joins = units._pools_out_of_order(program, local)
         self.assertEqual([(lo, hi) for lo, hi, _ in joins], [(2, 5), (88, 90)])
         apart = [(3, 4, "two copies of one constant")]
         self.assertEqual([(lo, hi) for lo, hi, _ in units._pools_out_of_order(program, local, apart)], [(88, 90)])
+        program.sections, program.function_index = [(".ctors", 0xB000, 0xB004)], {0x8000: 3}   # 3 is a file's
+        program.read = lambda at, n: (0x8000).to_bytes(4, "big")                              # static initializer:
+        self.assertEqual([(lo, hi) for lo, hi, _ in units._pools_out_of_order(program, local)], [(88, 90)])  # its end
         program.platform = Switch()
         self.assertEqual(units._pools_out_of_order(program, local), [])
 

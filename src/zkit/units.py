@@ -459,10 +459,13 @@ def _pools_out_of_order(program: Program, local: dict[DataObject, list[int]],
     cites than one unit's. A class's named constant (a static member) loads like a literal and its other files'
     code cites it: an order no unit's pool explains where what the code states (`apart`: two copies of one
     constant, two files' static initializers) parts the code it would join is such a one, and so is a constant
-    whose own users it parts. One function's own `.rodata` copies (`_initializer_copies`) are as private."""
+    whose own users it parts, and one whose order would carry a file past its static initializer (the file's last
+    code but for its weak inline copies; its constants pool where they are declared, early). One function's own
+    `.rodata` copies (`_initializer_copies`) are as private as its literals."""
     if program.platform.name != "gamecube":
         return []
     pooled = (_pooled_literals(program, local) or set()) | _initializer_copies(program, local)
+    ends = _initializer_indexes(program)
     text = program.platform.text
     by_section: dict[str, list[DataObject]] = collections.defaultdict(list)
     for o in pooled:                                    # not a constant whose own users two copies part
@@ -475,7 +478,8 @@ def _pools_out_of_order(program: Program, local: dict[DataObject, list[int]],
         lows: list[DataObject] = []
         for high in sorted(objects, key=lambda o: o.address):
             last = local[high][-1]
-            end = bisect.bisect_right(firsts, last + POOL_REACH)
+            at = bisect.bisect_left(ends, last)             # no farther than the file's static initializer
+            end = bisect.bisect_right(firsts, min([last + POOL_REACH, *ends[at:at + 1]]))
             reach = [k for k in range(bisect.bisect_right(firsts, last), end)
                      if high.address - lows[k].address <= POOL_BYTES]
             if reach and not any(last < lo and hi <= firsts[reach[-1]] for lo, hi, _ in apart):
@@ -1012,13 +1016,18 @@ def _initializers_apart(program: Program, ev: Evidence) -> None:
     """The functions a `.ctors` table calls: a compiler gives a file one static initializer (CodeWarrior's
     `__sinit_<file>`, GCC's `_GLOBAL__sub_I_<file>`), so a boundary lies between any two. Not where in between:
     CodeWarrior emits a file's weak inline copies after its initializer."""
-    found = sorted({i for at in _table_entries(program, ".ctors")
-                    if (i := program.function_index.get(int.from_bytes(program.read(at, 4), "big"))) is not None})
+    found = _initializer_indexes(program)
     for a, b in zip(found, found[1:]):
         ev.separations.append((a + 1, b, f"{program.platform.text(program.functions[a].address)} and "
                                          f"{program.platform.text(program.functions[b].address)} are two files' "
                                          "static initializers"))
         ev.direct.add(ev.separations[-1])
+
+
+def _initializer_indexes(program: Program) -> list[int]:
+    """The function indexes a `.ctors` table calls (each a file's static initializer), in order."""
+    return sorted({i for at in _table_entries(program, ".ctors")
+                   if (i := program.function_index.get(int.from_bytes(program.read(at, 4), "big"))) is not None})
 
 
 def _constructed(program: Program, owner: dict[int, str]) -> dict[int, set[str]]:
