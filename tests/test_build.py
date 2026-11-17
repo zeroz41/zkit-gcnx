@@ -249,7 +249,8 @@ class ConfigureTests(unittest.TestCase):
         self.assertIn("build build/T/ok: sha1 build/T/link/main.dol", text)
         self.assertIn("default build/T/ok build/progress/index.html", text)
         # every build leaves the browsable page of its reports
-        self.assertIn("build build/progress/index.html: page | build/T/report.json", text)
+        self.assertIn("build build/progress/index.html build/progress/treemap.html: page | build/T/report.json",
+                      text.replace(" $\n    ", " "))
         self.assertIn(" report --out build/progress --targets t\n", text)
 
     def test_no_link_without_the_linker(self):

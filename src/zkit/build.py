@@ -34,6 +34,7 @@ from .project import Project
 
 NINJA = "build/build.ninja"
 PAGE = "build/progress/index.html"   # `zkit report`'s page of every report
+TREEMAP = "build/progress/treemap.html"   # and its treemap, beside it
 # The standard GameCube/Wii compiler bundle (tag 20251118), and
 # the SHA-256 measured on it: CodeWarrior for GameCube 1.0-3.0a5.2 and Wii.
 COMPILERS_URL = "https://files.decomp.dev/compilers_20251118.zip"
@@ -560,7 +561,7 @@ def configure(project: Project, repository: str | None = None, only: str | None 
         reported = [name for name in names if summary[name]["report"]]
         ninja.rule("page", _command(zkit) + " report --out build/progress --targets " + _command(reported),
                    description="PAGE $out")
-        ninja.build([PAGE], "page", implicit=groups["report"] + groups["link"])
+        ninja.build([PAGE, TREEMAP], "page", implicit=groups["report"] + groups["link"])
         groups["progress"] = [PAGE]
         defaults.append(PAGE)
     # A source added or removed changes its folder's time: ninja then reconfigures before building.

@@ -19,7 +19,8 @@ Most later repair work came from early shortcuts. Get these right before matchin
 4. Build the class graph and generate headers with bases and full virtual blocks before matching methods:
    `zkit classes --headers include/classes --prove`.
 5. Wire objdiff: `zkit delink --objdiff objdiff.json` writes every unit's target object and the project file, the
-   build writes `report.json` and the page (`build/progress/index.html`), `zkit report --readme` the README's
+   build writes `report.json` and the pages (`build/progress/index.html` and `treemap.html`; `zkit report --badges DIR`
+   adds shields.io badge data), `zkit report --readme` the README's
    progress table between its `<!-- progress -->` markers (never added; a project that publishes progress
    through CI badges has none and sets hygiene `progress_table: forbid`).
 6. `zkit build --download` fetches the compilers and tools the target's platform needs, pinned and hash-checked,

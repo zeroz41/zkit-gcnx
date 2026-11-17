@@ -501,6 +501,7 @@ def _escape(text: str) -> str:
 
 
 def write_page(project: Project, targets: list[str], out: Path, title: str | None = None) -> Path:
+    """index.html (the table by object and function) and treemap.html beside it, each linking the other."""
     reports = []
     for target in targets:
         path = report_path(project, target)
@@ -511,11 +512,231 @@ def write_page(project: Project, targets: list[str], out: Path, title: str | Non
     for label, report in reports:  # the page links each report it shows
         (out / f"{label}.json").write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")
     index = out / "index.html"
+    title = title or project.config.get("title") or project.config["id"]
     subtitle = project.config.get("subtitle") or " · ".join(
         f"{label} ({project.target(label).get('platform', 'gamecube')})" for label, _ in reports)
-    index.write_text(page(reports, title or project.config.get("title") or project.config["id"], subtitle,
-                          {label: single_module(project, label) for label, _ in reports}), encoding="utf-8")
+    modules = {label: single_module(project, label) for label, _ in reports}
+    index.write_text(page(reports, title, subtitle, modules), encoding="utf-8")
+    (out / "treemap.html").write_text(treemap_page(reports, title, subtitle, modules), encoding="utf-8")
     return index
+
+
+# The treemap page: every function and data section a tile sized by its bytes and coloured by how far it is
+# matched, inside its unit and the unit's folder.
+
+TREEMAP_WIDTH, TREEMAP_HEIGHT, TREEMAP_HEADER = 1600, 1000, 15
+CLASS_PLACEHOLDER = re.compile(r"^[A-Za-z_]\w*?__sub_[0-9A-Fa-f]+$")
+
+
+def treemap_state(match: float, linked: bool) -> int:
+    """0 linked, 1 matched, 2 near (90% or more), 3 partly (50% or more), 4 started, 5 not started."""
+    if match >= 100:
+        return 0 if linked else 1
+    return 2 if match >= 90 else 3 if match >= 50 else 4 if match > 0 else 5
+
+
+def naming_tier(name: str, display: str | None = None) -> int:
+    """0 a recovered name, 1 a placeholder in a named class or namespace (`Class__sub_ADDR`, `Scope::fn_ADDR()`),
+    2 a placeholder (`fn_ADDR`, `lbl_ADDR`, `@N`: score.placeholder)."""
+    from .score import placeholder
+    base = (display or name).split("(", 1)[0]
+    if "::" in base:
+        return 1 if placeholder(base.rsplit("::", 1)[1]) else 0
+    if CLASS_PLACEHOLDER.match(name):
+        return 1
+    return 2 if placeholder(name) or placeholder(base) else 0
+
+
+def treemap_areas(units: list[tuple[str, str]]) -> list[str]:
+    """The area of each (module, path below the module) unit: its folders, at most two levels deep, where a
+    folder that is the only entry of its parent (everything under one `src/`) does not count as a level. A unit
+    outside any folder is in its module's area; with several modules each area names its module."""
+    entries: dict[tuple[str, ...], set[str]] = {}
+    for module, path in units:
+        parts = path.split("/")
+        for depth in range(len(parts)):
+            entries.setdefault((module, *parts[:depth]), set()).add(parts[depth])
+    several = len({module for module, _ in units}) > 1
+    areas = []
+    for module, path in units:
+        kept: list[str] = []
+        levels = 0
+        for part in path.split("/")[:-1]:
+            if levels == 2:
+                break
+            branches = len(entries[(module, *kept)]) > 1
+            kept.append(part)
+            levels += branches
+        areas.append("/".join(([module] if several or not kept else []) + kept))
+    return areas
+
+
+def squarify(items: list[dict], x: float, y: float, w: float, h: float) -> None:
+    """Lay items (dicts with a positive "size", largest first) out in the rectangle as near-square tiles, rows
+    along its shorter side; sets each item's "rect" to (x, y, w, h)."""
+    total = sum(item["size"] for item in items)
+    if total <= 0 or w <= 0 or h <= 0:
+        for item in items:
+            item["rect"] = (x, y, 0, 0)
+        return
+    scale = w * h / total
+    start = 0
+    while start < len(items):
+        side = min(w, h)
+        end, row_area, worst = start, 0.0, float("inf")
+        smallest = largest = 0.0
+        while end < len(items):   # grow the row while its worst aspect ratio improves
+            area = items[end]["size"] * scale
+            low, high, whole = min(smallest or area, area), max(largest, area), row_area + area
+            ratio = max(side * side * high / (whole * whole), whole * whole / (side * side * low))
+            if end > start and ratio > worst:
+                break
+            smallest, largest, row_area, worst, end = low, high, whole, ratio, end + 1
+        thickness, offset = row_area / side, 0.0
+        for item in items[start:end]:
+            length = item["size"] * scale / thickness
+            item["rect"] = (x, y + offset, thickness, length) if w >= h else (x + offset, y, length, thickness)
+            offset += length
+        if w >= h:
+            x, w = x + thickness, w - thickness
+        else:
+            y, h = y + thickness, h - thickness
+        start = end
+
+
+def treemap_layout(units: list[dict]) -> dict[str, Any]:
+    """Nest each unit's tiles in it and the units in their areas. Every tile is
+    [x, y, w, h, state, tier, bytes, address, unit, name, linked, match]; `unit` indexes "units"."""
+    grouped: dict[str, list[dict]] = {}
+    for unit in units:
+        if unit["tiles"]:
+            grouped.setdefault(unit["area"], []).append({**unit, "size": sum(t["size"] for t in unit["tiles"])})
+    groups = sorted(({"name": name, "units": members, "size": sum(u["size"] for u in members)}
+                     for name, members in grouped.items()), key=lambda g: (-g["size"], g["name"]))
+    squarify(groups, 0, 0, TREEMAP_WIDTH, TREEMAP_HEIGHT)
+    names, unit_rects, tiles, areas = [], [], [], []
+    for group in groups:
+        x, y, w, h = group["rect"]
+        header = TREEMAP_HEADER if w > 60 and h > 3 * TREEMAP_HEADER else 0
+        group["units"].sort(key=lambda u: (-u["size"], u["name"]))
+        squarify(group["units"], x + 1, y + header, w - 2, h - header - 1)
+        counts = {"bytes": 0, "matched": 0, "linked": 0, "items": 0, "exact": 0, "placeholders": 0}
+        for unit in group["units"]:
+            unit_rects.append([round(v, 1) for v in unit["rect"]])
+            names.append(unit["name"])
+            unit["tiles"].sort(key=lambda t: (-t["size"], t["address"] if t["address"] is not None else -1))
+            squarify(unit["tiles"], *unit["rect"])
+            for t in unit["tiles"]:
+                tiles.append([*(round(v, 1) for v in t["rect"]), t["state"], t["tier"], t["size"], t["address"],
+                              len(names) - 1, t["name"], int(t["linked"]), round(t["match"], 2)])
+                counts["bytes"] += t["size"]
+                counts["items"] += 1
+                counts["matched"] += t["size"] if t["state"] < 2 else 0
+                counts["linked"] += t["size"] if t["linked"] else 0
+                counts["exact"] += t["state"] < 2
+                counts["placeholders"] += t["tier"] == 2
+        areas.append([group["name"], *(round(v, 1) for v in group["rect"]), counts])
+    return {"areas": areas, "units": names, "unit_rects": unit_rects, "tiles": tiles}
+
+
+def treemap_data(report: dict, single: str | None = None) -> dict[str, Any]:
+    """The code (a tile per function) and data (a tile per non-code section) treemaps of a report, its totals,
+    and where the tiles do not add up to them (`single`: the target's one module, as for the table)."""
+    code, data, places = [], [], []
+    for unit in report.get("units", []):
+        meta = unit.get("metadata") or {}
+        module, linked = module_of(unit, single), bool(meta.get("complete"))
+        name = str(unit.get("name", "")).replace("\\", "/").strip("/")
+        places.append((module, name[len(module) + 1:] if name.startswith(module + "/") else name))
+        functions, sections = [], []
+        for function in unit.get("functions") or []:
+            info, match = function.get("metadata") or {}, number(function.get("fuzzy_match_percent"))
+            address = info.get("virtual_address")
+            functions.append({"size": int(number(function.get("size"))), "match": match, "linked": linked,
+                              "name": str(info.get("demangled_name") or function.get("name", "")),
+                              "address": int(number(address)) if address is not None else None,
+                              "state": treemap_state(match, linked),
+                              "tier": naming_tier(str(function.get("name", "")), info.get("demangled_name"))})
+        for section in unit.get("sections") or []:
+            section_name, match = str(section.get("name", "")), number(section.get("fuzzy_match_percent"))
+            if is_code(section_name):
+                continue
+            address = (section.get("metadata") or {}).get("virtual_address")
+            sections.append({"size": int(number(section.get("size"))), "match": match, "linked": linked,
+                             "name": section_name, "address": int(number(address)) if address is not None else None,
+                             "state": treemap_state(match, linked), "tier": 0})
+        code.append({"name": places[-1][1], "tiles": [f for f in functions if f["size"] > 0]})
+        data.append({"name": places[-1][1], "tiles": [s for s in sections if s["size"] > 0]})
+    for area, unit_code, unit_data in zip(treemap_areas(places), code, data):
+        unit_code["area"] = unit_data["area"] = area
+    totals = measures(report.get("measures"))
+    layouts = {"code": treemap_layout(code), "data": treemap_layout(data)}
+    warnings = []   # the tiles must account for every counted byte; the page says so when they do not
+    for kind in ("code", "data"):
+        tiles = layouts[kind]["tiles"]
+        for key, summed in ((f"total_{kind}", sum(t[6] for t in tiles)),
+                            (f"matched_{kind}", sum(t[6] for t in tiles if t[4] < 2)),
+                            (f"complete_{kind}", sum(t[6] for t in tiles if t[10]))):
+            if summed != totals[key]:
+                warnings.append(f"{key}: report {totals[key]:,}, tiles {summed:,}")
+    functions = [t for unit in code for t in unit["tiles"]]
+    exact = sum(t["state"] < 2 for t in functions)
+    if (len(functions), exact) != (totals["total_functions"], totals["matched_functions"]):
+        warnings.append(f"functions: report {totals['matched_functions']:,} of {totals['total_functions']:,}, "
+                        f"tiles {exact:,} of {len(functions):,}")
+    return {"measures": totals, "layouts": layouts, "warnings": warnings,
+            "named": sum(t["tier"] == 0 for t in functions)}
+
+
+def treemap_page(reports: list[tuple[str, dict]], title: str, subtitle: str = "",
+                 modules: dict[str, str | None] | None = None) -> str:
+    """The self-contained treemap of one or more reports (labels such as target names), beside `page`'s table."""
+    payload = [{"label": label, **treemap_data(report, (modules or {}).get(label))} for label, report in reports]
+    data = json.dumps({"title": title, "subtitle": subtitle, "width": TREEMAP_WIDTH, "height": TREEMAP_HEIGHT,
+                       "reports": payload, "generated": datetime.now(timezone.utc).isoformat(timespec="seconds")},
+                      ensure_ascii=True, separators=(",", ":")).replace("<", "\\u003c")
+    template = resources.files("zkit").joinpath("treemap.html").read_text(encoding="utf-8")
+    return template.replace("__TITLE__", _escape(title)).replace("__DATA__", data)
+
+
+# shields.io endpoint badges (https://shields.io/badges/endpoint-badge) of a report's totals, for a README.
+
+def badge_color(percent: float) -> str:
+    for floor, color in ((100, "brightgreen"), (90, "green"), (75, "yellowgreen"), (50, "yellow"), (25, "orange")):
+        if percent >= floor:
+            return color
+    return "red"
+
+
+def badges(report: dict) -> dict[str, dict[str, Any]]:
+    """Each badge by its file name (without .json): code and data matched and linked, exact functions, linked
+    units."""
+    m = measures(report.get("measures"))
+
+    def badge(label: str, part: int, whole: int, count: bool = False) -> dict[str, Any]:
+        percent = 100 * part / whole if whole else 0.0
+        message = f"{percent:.2f}%" + (f" ({part:,} of {whole:,})" if count else "")
+        return {"schemaVersion": 1, "label": label, "message": message, "color": badge_color(percent)}
+
+    return {"code": badge("code matched", m["matched_code"], m["total_code"]),
+            "code-linked": badge("code linked", m["complete_code"], m["total_code"]),
+            "data": badge("data matched", m["matched_data"], m["total_data"]),
+            "data-linked": badge("data linked", m["complete_data"], m["total_data"]),
+            "functions": badge("functions matched", m["matched_functions"], m["total_functions"], True),
+            "units-linked": badge("units linked", m["complete_units"], m["total_units"], True)}
+
+
+def write_badges(project: Project, target: str, folder: Path) -> list[Path]:
+    """The target's badges as `<name>.json` files in `folder`, for a README's shields.io endpoint badges."""
+    path = report_path(project, target)
+    if not path.is_file():
+        raise ValueError(f"No report for {target} at {path}")
+    folder.mkdir(parents=True, exist_ok=True)
+    written = []
+    for name, badge in badges(load(path)).items():
+        written.append(folder / f"{name}.json")
+        written[-1].write_text(json.dumps(badge) + "\n", encoding="utf-8")
+    return written
 
 
 # The progress table in a decomp's README, between these markers.

@@ -448,15 +448,20 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--save", action="store_true", help="save the current report as a baseline")
     c.add_argument("--list", action="store_true", help="list saved baselines")
     c.add_argument("--check", action="store_true", help="with --since: exit 1 on any lost match, link or data")
-    c = add("report", help="Write a browsable offline HTML page from the objdiff reports (the build writes it too), "
-                           "and with --readme the progress table in the README")
-    c.add_argument("--out", type=Path, help="folder for index.html (default: build/progress in the repository)")
+    c = add("report", help="Write browsable offline HTML pages from the objdiff reports, a table and a treemap (the "
+                           "build writes them too), with --badges shields.io badge data, and with --readme the "
+                           "progress table in the README")
+    c.add_argument("--out", type=Path,
+                   help="folder for index.html and treemap.html (default: build/progress in the repository)")
     c.add_argument("--title", help="page title (default: the project's title or id)")
     c.add_argument("--targets", nargs="*", help="targets to include (default: every target with a report)")
     c.add_argument("--readme", nargs="?", type=Path, const=Path("README.md"),
                    help="also rewrite the progress table between <!-- progress --> and <!-- /progress --> in this "
                         "file (default: the repository's README.md); markers are never added, and a repository whose "
                         "hygiene sets progress_table: forbid is skipped")
+    c.add_argument("--badges", type=Path, metavar="DIR",
+                   help="also write shields.io endpoint badges (code, data, functions, code-linked, data-linked, "
+                        "units-linked .json) of the first target's report into this folder")
     c = add("quality", help="Decompiler debt left in the source (hand-mangled names, raw offsets, fake vtables, "
                             "temporaries, placeholder names), at the working tree or a revision")
     c.add_argument("repo", nargs="?")
@@ -1078,7 +1083,13 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         root = project.root(project.target(targets[0])["repository"])
         out = args.out.expanduser().resolve() if args.out else root / "build" / "progress"
         index = progress.write_page(project, targets, out, args.title)
-        result, said = {"index": str(index)}, f"wrote {index}"
+        treemap = index.with_name("treemap.html")
+        result, said = {"index": str(index), "treemap": str(treemap)}, f"wrote {index} and {treemap}"
+        if args.badges is not None:
+            folder = args.badges.expanduser().resolve()
+            written = progress.write_badges(project, targets[0], folder)
+            result["badges"] = {"path": str(folder), "target": targets[0], "files": [p.name for p in written]}
+            said += f"\nwrote {len(written)} badges of {targets[0]} to {folder}"
         if args.readme is not None:
             readme = args.readme.expanduser()
             readme = readme if readme.is_absolute() else root / readme

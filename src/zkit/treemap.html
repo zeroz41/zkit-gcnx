@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__ treemap</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#181b20;color:#eceff2;font:14px/1.5 system-ui,sans-serif}
+main{max-width:1640px;margin:auto;padding:24px}h1{font-size:24px;margin:0}p{margin:10px 0}.muted{color:#adb6c1}a{color:#9ec9f5}
+select,input{font:inherit;color:inherit;background:#242930;border:1px solid #454d58;border-radius:3px;padding:6px 9px}
+input:focus-visible,select:focus-visible{outline:2px solid #91c4fb;outline-offset:2px}
+.bars{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px 28px;margin:18px 0}
+.bar div{display:flex;justify-content:space-between;gap:8px;font-size:12px;color:#adb6c1;margin-bottom:3px}.bar b{color:#eceff2}
+.track{display:block;height:8px;background:#343b44;border-radius:4px;overflow:hidden}.track span{display:block;height:100%;border-radius:4px}
+.controls{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin:14px 0}label{display:grid;gap:3px;color:#adb6c1;font-size:12px}
+#search{min-width:260px}.legend{display:flex;gap:6px 16px;flex-wrap:wrap;font-size:12px;color:#adb6c1;margin:8px 0 12px}
+.legend i{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+canvas{display:block;width:100%;height:auto;border:1px solid #454d58;background:#0f1114}#warning{color:#eab968}
+#tip{position:fixed;pointer-events:none;background:#242930;border:1px solid #454d58;border-radius:4px;padding:7px 9px;font-size:12px;max-width:440px;overflow-wrap:anywhere;display:none;z-index:2}
+#tip b{display:block;color:#eceff2}#tip span{display:block;color:#adb6c1;font-family:ui-monospace,monospace}
+footer{margin-top:20px;color:#adb6c1;font-size:12px}
+@media(max-width:700px){main{padding:12px 16px}h1{font-size:21px}#search{min-width:0;width:100%}}
+</style></head><body><main>
+<h1 id="title"></h1>
+<p class="muted"><span id="subtitle"></span><a href="index.html">Table by unit and function</a></p>
+<div id="bars" class="bars"></div>
+<p id="warning"></p>
+<p class="muted" id="about"></p>
+<div class="controls">
+<label>Report<select id="report"></select></label>
+<label>Measure<select id="mode"><option value="code">Code</option><option value="data">Data</option></select></label>
+<label>Colour<select id="colour"><option value="state">Progress</option><option value="names">Progress and names</option></select></label>
+<label>Search<input id="search" type="search" placeholder="Function, section, unit or address"></label>
+<span id="found" class="muted"></span>
+</div>
+<div id="legend" class="legend"></div>
+<canvas id="canvas"></canvas>
+<div id="tip"></div>
+<footer id="footer"></footer>
+</main>
+<script type="application/json" id="data">__DATA__</script>
+<script>
+'use strict';
+const D=JSON.parse(document.getElementById('data').textContent),$=id=>document.getElementById(id);
+const fmt=n=>Number(n).toLocaleString('en-US'),pct=(n,d)=>d?(100*n/d).toFixed(2)+'%':'—';
+const hex=n=>n===null||n===undefined?'—':'0x'+Number(n).toString(16).toUpperCase().padStart(8,'0');
+const STATES=[['#3b984c','Linked'],['#8bc34a','Matched, not linked'],['#d2a922','90% or more'],['#9a6f12','50% to 90%'],['#5c4310','Started'],['#2c3139','Not started']];
+const NAMED=[['#3b984c','Matched, named'],['#a3b52b','Matched, placeholder in a class or namespace'],['#468bd2','Matched, placeholder name']];
+const canvas=$('canvas'),ctx=canvas.getContext('2d'),tip=$('tip');
+let R,M,L,mode=location.hash==='#data'?'data':'code',colour='state',hits=null,scale=1;
+function bars(){$('bars').replaceChildren();
+  for(const[label,part,whole,count,c]of[['Code matched',M.matched_code,M.total_code,0,'#3b984c'],['Code linked',M.complete_code,M.total_code,0,'#2f7d3e'],
+    ['Functions matched',M.matched_functions,M.total_functions,1,'#3b984c'],['Data matched',M.matched_data,M.total_data,0,'#d2a922'],
+    ['Data linked',M.complete_data,M.total_data,0,'#9a7a1a'],['Units linked',M.complete_units,M.total_units,1,'#2f7d3e'],
+    ['Functions named',R.named,M.total_functions,1,'#468bd2']]){
+    const bar=document.createElement('div'),top=document.createElement('div'),name=document.createElement('span'),value=document.createElement('b'),track=document.createElement('span'),fill=document.createElement('span');
+    bar.className='bar';track.className='track';name.textContent=label+(count?' ('+fmt(part)+' of '+fmt(whole)+')':'');value.textContent=pct(part,whole);
+    fill.style.width=(whole?100*part/whole:0)+'%';fill.style.background=c;track.append(fill);top.append(name,value);bar.append(top,track);$('bars').append(bar);}
+  $('warning').textContent=R.warnings.length?'The tiles do not add up to the report: '+R.warnings.join('; '):'';}
+function palette(){return mode==='code'&&colour==='names'?[...NAMED,...STATES.slice(2)]:STATES;}
+function fill(t){if(t[4]<2&&mode==='code'&&colour==='names')return NAMED[t[5]][0];return STATES[t[4]][0];}
+function describe(t){return (t[4]<2?'matched':t[11].toFixed(2)+'% match')+(t[10]?', linked':', not linked');}
+function legend(){const l=$('legend');l.textContent='';for(const[c,n]of palette()){const s=document.createElement('span'),i=document.createElement('i');i.style.background=c;s.append(i,n);l.append(s);}
+  $('about').textContent=mode==='code'?'One tile per function, sized by its bytes, inside its current unit and that unit\'s folder.':'One tile per data section (.data, .rodata, .bss, …), sized by its bytes, inside its current unit and that unit\'s folder.';}
+function header(a){const c=a[5],kind=mode==='code'?' fns':' sections';
+  return a[0]+' — '+pct(c.matched,c.bytes)+' matched · '+pct(c.linked,c.bytes)+' linked · '+fmt(c.exact)+'/'+fmt(c.items)+kind+(mode==='code'&&c.placeholders?' · '+fmt(c.placeholders)+' unnamed':'');}
+function draw(){
+  const ratio=window.devicePixelRatio||1,width=canvas.clientWidth;scale=width/D.width;
+  canvas.width=Math.round(width*ratio);canvas.height=Math.round(D.height*scale*ratio);canvas.style.height=(D.height*scale)+'px';
+  ctx.setTransform(ratio*scale,0,0,ratio*scale,0,0);ctx.fillStyle='#0f1114';ctx.fillRect(0,0,D.width,D.height);
+  for(const t of L.tiles){ctx.globalAlpha=hits&&!hits.has(t)?0.12:1;ctx.fillStyle=fill(t);ctx.fillRect(t[0],t[1],t[2],t[3]);}
+  ctx.globalAlpha=1;ctx.strokeStyle='rgba(15,17,20,.6)';ctx.lineWidth=0.6/scale;
+  for(const r of L.unit_rects)if(r[2]*scale>4&&r[3]*scale>4)ctx.strokeRect(r[0],r[1],r[2],r[3]);
+  const text=Math.min(10.5,12*scale);ctx.strokeStyle='#0f1114';ctx.lineWidth=2/scale;ctx.font=(text/scale)+'px system-ui,sans-serif';ctx.textBaseline='top';
+  for(const a of L.areas){const[,x,y,w,h]=a;ctx.strokeRect(x,y,w,h);if(text>=7&&w*scale>60&&h>45){ctx.fillStyle='#0f1114';ctx.fillRect(x,y,w,15);ctx.fillStyle='#d5dae0';ctx.save();ctx.beginPath();ctx.rect(x,y,w,15);ctx.clip();ctx.fillText(header(a),x+3,y+2);ctx.restore();}}
+}
+function at(e){const r=canvas.getBoundingClientRect(),x=(e.clientX-r.left)/scale,y=(e.clientY-r.top)/scale;
+  for(const t of L.tiles)if(x>=t[0]&&x<t[0]+t[2]&&y>=t[1]&&y<t[1]+t[3])return['tile',t];
+  for(const a of L.areas)if(x>=a[1]&&x<a[1]+a[3]&&y>=a[2]&&y<a[2]+a[4])return['area',a];return null;}
+canvas.addEventListener('mousemove',e=>{const hit=at(e);if(!hit){tip.style.display='none';return;}
+  tip.textContent='';const b=document.createElement('b'),a=document.createElement('span'),u=document.createElement('span');
+  if(hit[0]==='tile'){const t=hit[1];b.textContent=t[9];a.textContent=hex(t[7])+' · '+fmt(t[6])+' bytes · '+describe(t);u.textContent=L.units[t[8]];}
+  else{b.textContent=hit[1][0];a.textContent=header(hit[1]).slice(hit[1][0].length+3);}
+  tip.append(b,a,u);tip.style.display='block';const w=tip.offsetWidth,h=tip.offsetHeight;
+  tip.style.left=Math.max(8,Math.min(e.clientX+14,innerWidth-w-8))+'px';tip.style.top=(e.clientY+h+22>innerHeight?e.clientY-h-10:e.clientY+14)+'px';});
+canvas.addEventListener('mouseleave',()=>tip.style.display='none');
+function search(){const q=$('search').value.trim().toLowerCase();
+  if(!q){hits=null;$('found').textContent='';return;}const address=/^0x[0-9a-f]+$/.test(q)?parseInt(q,16):null;
+  hits=new Set(L.tiles.filter(t=>address!==null?t[7]!==null&&address>=t[7]&&address<t[7]+t[6]:t[9].toLowerCase().includes(q)||L.units[t[8]].toLowerCase().includes(q)));
+  $('found').textContent=fmt(hits.size)+(mode==='code'?' functions':' sections');}
+function setMode(m){mode=m;L=R.layouts[mode];$('mode').value=mode;$('colour').disabled=mode!=='code';search();legend();draw();}
+function pick(i){R=D.reports[i];M=R.measures;bars();setMode(mode);}
+$('title').textContent=D.title+' treemap';$('subtitle').textContent=D.subtitle?D.subtitle+' · ':'';
+$('footer').textContent='Generated '+D.generated+' from objdiff\'s report';
+D.reports.forEach((r,i)=>{const o=document.createElement('option');o.value=i;o.textContent=r.label;$('report').append(o);});
+$('report').addEventListener('change',e=>pick(Number(e.target.value)));
+$('mode').addEventListener('change',e=>{history.replaceState(null,'',e.target.value==='data'?'#data':location.pathname+location.search);setMode(e.target.value);});
+$('colour').addEventListener('change',e=>{colour=e.target.value;legend();draw();});
+$('search').addEventListener('input',()=>{search();draw();});
+addEventListener('resize',draw);if(D.reports.length)pick(0);
+</script></body></html>

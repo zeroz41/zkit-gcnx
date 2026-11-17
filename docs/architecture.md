@@ -179,7 +179,14 @@ compiles a candidate outside the tree with its unit's exact build command. `prog
 matched and linked code and data bytes, exact functions and units, and changes keyed by address so a rename or a
 fold is not a regression; `report.html` is a self-contained page of the same, which every build writes to
 `build/progress/index.html` beside a copy of each report it shows, titled by the manifest's `title` and
-`subtitle`; a target with one module (a Switch `main`) is browsed by source folder. `zkit report --readme` writes
+`subtitle`; a target with one module (a Switch `main`) is browsed by source folder. `treemap.html` is written
+beside it, each page linking the other: every function and data section is a tile sized by its bytes and coloured by
+how far it matches (linked, matched, 90%, 50%, started, not started; or, for matched code, whether it is still a
+placeholder name), inside its unit and that unit's first two folder levels, with a warning when the tiles do not add
+up to the report. Both pages embed their data as JSON whose `<` is escaped, and set every name as text, so names
+from an untrusted build cannot inject markup. `zkit report --badges DIR` also writes shields.io endpoint JSON of the
+first target's report (`code`, `data`, `functions`, `code-linked`, `data-linked`, `units-linked`), coloured from red
+below 25% to bright green at 100%. `zkit report --readme` writes
 a small table of the totals between `<!-- progress -->` markers in the decomp's README (it never adds them: a README without markers is left alone, and a repository whose hygiene sets
 `progress_table: forbid` is skipped and fails `zkit hygiene` if a table appears).
 

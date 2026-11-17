@@ -22,7 +22,7 @@ td small{display:block}.meter{display:block;height:4px;background:var(--track);m
 details{margin-top:18px;color:var(--muted)}footer{margin-top:20px;color:var(--muted);font-size:12px}a{color:var(--link)}
 @media(max-width:700px){main{padding:12px}.card strong{font-size:18px}#search{min-width:170px}}
 </style></head><body><main>
-<h1 id="title"></h1><p id="subtitle" class="muted"></p>
+<h1 id="title"></h1><p class="muted"><span id="subtitle"></span><a href="treemap.html">Treemap</a></p>
 <div class="controls">
 <label>Report<select id="report"></select></label>
 <label>Module<select id="module"></select></label>
@@ -113,7 +113,7 @@ function pick(i){R=D.reports[i];units=R.units;selected=null;page=0;
  const mods=[...new Set(units.map(u=>u.module))].sort();$('module').replaceChildren(el('option','All modules',{value:''}),...mods.map(m=>el('option',m,{value:m})));
  const cats=R.summary.categories;$('category').replaceChildren(el('option','All categories',{value:''}),...cats.map(c=>el('option',c.name,{value:c.id})));
  $('category').disabled=!cats.length;render();}
-$('title').textContent=D.title;$('subtitle').textContent=D.subtitle||'';
+$('title').textContent=D.title;$('subtitle').textContent=D.subtitle?D.subtitle+' · ':'';
 D.reports.forEach((r,i)=>$('report').append(el('option',r.label,{value:i})));$('report').onchange=()=>pick(Number($('report').value));
 for(const id of['module','category'])$(id).onchange=()=>{selected=null;page=0;render();};
 for(const id of['metric','view','filter'])$(id).onchange=()=>{metric=$('metric').value;view=$('view').value;filter=$('filter').value;page=0;render();};

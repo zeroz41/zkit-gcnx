@@ -112,7 +112,8 @@ Clean up the decomp source in large proven steps. Use zkit-clean-source. Finish 
 | `zkit probe <unit> test.cpp` | compile an experiment with the unit's exact command and read its code |
 | `zkit compiled 0x80012345` | your built function against the original |
 | `zkit progress` | how much is matched and linked |
-| `zkit report --readme` | the browsable progress page, and the progress table between your README's `<!-- progress -->` markers |
+| `zkit report --readme` | the browsable progress pages (a table by unit and function, and a treemap of every function and data section), and the progress table between your README's `<!-- progress -->` markers |
+| `zkit report --badges DIR` | also shields.io endpoint badges of the first target: `code.json`, `data.json`, `functions.json`, `code-linked.json`, `data-linked.json`, `units-linked.json` |
 | `zkit build` | build, check and relink the project |
 | `zkit extract [folder]` | Switch: take the original executable out of the game's `.nsp`/`.xci` files (with your `prod.keys`); `zkit build` does it by itself when they sit in the original's folder or one above it |
 | `zkit gate` | what to run before you stop |

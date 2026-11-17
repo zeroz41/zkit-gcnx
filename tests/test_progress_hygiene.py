@@ -141,6 +141,119 @@ class ProgressTests(unittest.TestCase):
             self.assertTrue(index.read_text(encoding="utf-8").startswith("<!doctype html>"))
             self.assertEqual(json.loads((root / "out/t.json").read_text(encoding="utf-8")), self.before)
 
+    def test_treemap_beside_the_table_and_badges(self):
+        """`zkit report` writes treemap.html beside index.html, each linking the other, and --badges the first
+        target's shields.io endpoint badges."""
+        from zkit.cli import build_parser, run
+        counts = {"total_code": "1000", "matched_code": "1000", "complete_code": "900", "total_data": "400",
+                  "matched_data": "300", "complete_data": "200", "total_functions": 4, "matched_functions": 1,
+                  "total_units": 3, "complete_units": 0}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "build").mkdir()
+            (root / "build/report.json").write_text(json.dumps({**self.before, "measures": counts}), encoding="utf-8")
+            (root / "build/other.json").write_text(json.dumps(self.before), encoding="utf-8")
+            manifest = root / "p.json"
+            manifest.write_text(json.dumps({"schema_version": 1, "id": "prog", "repositories": {
+                "decomp": {"root": ".", "role": "decomp"}}, "targets": {
+                "t": {"repository": "decomp", "module": "main", "report": "build/report.json"},
+                "u": {"repository": "decomp", "module": "main", "report": "build/other.json"}}}), encoding="utf-8")
+            data, said = run(build_parser().parse_args(["--project", str(manifest), "report", "--out",
+                                                        str(root / "site"), "--badges", str(root / "site/badges")]))
+            index, treemap = Path(data["index"]), Path(data["treemap"])
+            self.assertEqual((index.parent, treemap.name), (root / "site", "treemap.html"))
+            self.assertIn('<a href="treemap.html">', index.read_text(encoding="utf-8"))
+            page = treemap.read_text(encoding="utf-8")
+            self.assertTrue(page.startswith("<!doctype html>"))
+            self.assertIn('<a href="index.html">', page)
+            self.assertNotIn("<script src", page)   # self-contained, offline
+            shown = json.loads(page.split('id="data">')[1].split("</script>")[0])
+            self.assertEqual([r["label"] for r in shown["reports"]], ["t", "u"])   # every target, as the table
+            self.assertEqual((data["badges"]["target"], said.count("badges of t")), ("t", 1))
+            badges = {p.stem: json.loads(p.read_text(encoding="utf-8")) for p in (root / "site/badges").iterdir()}
+        self.assertEqual({name: (b["label"], b["message"], b["color"]) for name, b in badges.items()}, {
+            "code": ("code matched", "100.00%", "brightgreen"), "code-linked": ("code linked", "90.00%", "green"),
+            "data": ("data matched", "75.00%", "yellowgreen"), "data-linked": ("data linked", "50.00%", "yellow"),
+            "functions": ("functions matched", "25.00% (1 of 4)", "orange"),
+            "units-linked": ("units linked", "0.00% (0 of 3)", "red")})
+        self.assertEqual({b["schemaVersion"] for b in badges.values()}, {1})
+        self.assertEqual((progress.badge_color(99.999), progress.badge_color(24.99)), ("green", "red"))
+        self.assertEqual(progress.badges({"units": []})["code"]["message"], "0.00%")   # nothing to count
+
+    def test_treemap_tiles_of_a_small_report(self):
+        """A tile per function and per data section, sized by its bytes, coloured by match state and naming, in
+        its unit and that unit's folder below the module; the tiles add up to the report."""
+        small = report([("main/game/obj/a", "f__1AFv", 0x80001000, 0x20, 100.0),
+                        ("main/game/obj/a", "fn_80001020", 0x80001020, 0x10, 95.0),
+                        ("main/game/b", "B__sub_80002000", 0x80002000, 0x30, 40.0),
+                        ("main/c", "g", 0x80003000, 0x8, 0.0)],
+                       [("main/game/obj/a", ".data", 0x80100000, 0x40, 100.0),
+                        ("main/game/obj/a", ".text", 0x80001000, 0x30, 90.0),
+                        ("main/game/b", ".bss", 0x80100040, 0x10, 0.0)], linked={"main/game/obj/a"})
+        small["units"][0]["functions"][0]["metadata"]["demangled_name"] = "A::f()"
+        small["measures"].update(complete_code="48", complete_data="64", total_units=3, complete_units=1,
+                                 total_code="104", total_data="80")
+        data = progress.treemap_data(small)
+        self.assertEqual((data["warnings"], data["named"]), ([], 2))
+        code, sections = data["layouts"]["code"], data["layouts"]["data"]
+        tiles = {t[9]: (t[4], t[5], t[6], t[7], code["units"][t[8]], t[10], t[11]) for t in code["tiles"]}
+        self.assertEqual(tiles, {
+            "A::f()": (0, 0, 0x20, 0x80001000, "game/obj/a", 1, 100.0),             # linked
+            "fn_80001020": (2, 2, 0x10, 0x80001020, "game/obj/a", 1, 95.0),        # 90% or more, placeholder
+            "B__sub_80002000": (4, 1, 0x30, 0x80002000, "game/b", 0, 40.0),        # started, in a named class
+            "g": (5, 0, 0x8, 0x80003000, "c", 0, 0.0)})                            # not started
+        self.assertEqual(sorted((t[9], t[4], t[6]) for t in sections["tiles"]), [(".bss", 5, 0x10), (".data", 0, 0x40)])
+        self.assertEqual([(a[0], a[5]["bytes"], a[5]["matched"], a[5]["linked"], a[5]["items"], a[5]["placeholders"])
+                          for a in code["areas"]], [("game", 48, 0, 0, 1, 0), ("game/obj", 48, 32, 48, 2, 1),
+                                                    ("main", 8, 0, 0, 1, 0)])   # by size, then name
+        for t in code["tiles"] + sections["tiles"]:   # inside the canvas, with an area proportional to the bytes
+            self.assertTrue(0 <= t[0] and 0 <= t[1] and t[0] + t[2] <= 1600.1 and t[1] + t[3] <= 1000.1, t)
+        biggest = max(code["tiles"], key=lambda t: t[6])
+        smallest = min(code["tiles"], key=lambda t: t[6])
+        self.assertGreater(biggest[2] * biggest[3], smallest[2] * smallest[3])
+        small["measures"]["matched_code"] = "0"
+        self.assertEqual(progress.treemap_data(small)["warnings"], ["matched_code: report 0, tiles 32"])
+
+    def test_treemap_areas_and_naming_on_both_platforms(self):
+        """Folders at most two levels below the module, a folder alone in its parent not counting; several
+        modules name theirs. Placeholders: CodeWarrior and Itanium, in a class or not."""
+        self.assertEqual(progress.treemap_areas([
+            ("main", "app/game/gf/menu/a"), ("main", "app/game/b"), ("main", "libs/l/src/c"), ("main", "libs/m/d"),
+            ("main", "u")]), ["app/game/gf", "app/game", "libs/l", "libs/m", "main"])
+        self.assertEqual(progress.treemap_areas([("main", "src/x/a"), ("main", "src/y/b")]), ["src/x", "src/y"])
+        self.assertEqual(progress.treemap_areas([("main", "a/x"), ("rel", "b/y"), ("rel", "z")]),
+                         ["main/a", "rel/b", "rel"])
+        tiers = {("fn_80001000", None): 2, ("lbl_80001000", None): 2, ("@123", None): 2,
+                 ("Class__sub_80001000", None): 1, ("update__7TObjectFv", "TObject::update()"): 0,
+                 ("_Z13fn_7100001000v", "fn_7100001000()"): 2, ("_ZN1A13fn_7100001000Ev", "A::fn_7100001000()"): 1,
+                 ("_ZN1A6updateEv", "A::update()"): 0, ("_GLOBAL__sub_I_a.cpp", None): 0}
+        self.assertEqual({key: progress.naming_tier(*key) for key in tiers}, tiers)
+        bare = report([("app/menu/a", "_ZN1A1fEv", 0x7100001000, 0x20, 100.0), ("unit_7100002000", "fn_7100002000",
+                                                                             0x7100002000, 0x10, 0.0)], [])
+        for unit in bare["units"]:   # a Switch report: no module in the units
+            unit["metadata"].pop("module_name")
+        layout = progress.treemap_data(bare, "main")["layouts"]["code"]
+        self.assertEqual(([a[0] for a in layout["areas"]], layout["units"]),
+                         (["app/menu", "main"], ["app/menu/a", "unit_7100002000"]))
+
+    def test_treemap_escapes_names(self):
+        """Names come from untrusted builds and the page is published: none can close the data's script."""
+        hostile = "f</script><b>x</b><!--"
+        evil = report([("main/</script><b>", hostile, 0x80001000, 0x20, 100.0)],
+                      [("main/</script><b>", ".data</script>", 0x80100000, 0x8, 0.0)])
+        page = progress.treemap_page([("T</script>", evil)], "Game </script><b>")
+        self.assertIn("<title>Game &lt;/script&gt;&lt;b&gt; treemap</title>", page)
+        body = page.split('id="data">')[1]
+        self.assertEqual(body.count("</script>"), 2)   # the data's own end and the code's
+        embedded = body.split("</script>")[0]
+        self.assertNotIn("<", embedded)
+        shown = json.loads(embedded)
+        self.assertEqual((shown["title"], shown["reports"][0]["label"]), ("Game </script><b>", "T</script>"))
+        layouts = shown["reports"][0]["layouts"]
+        self.assertEqual((layouts["code"]["tiles"][0][9], layouts["code"]["units"], layouts["data"]["tiles"][0][9]),
+                         (hostile, ["</script><b>"], ".data</script>"))
+        self.assertNotIn("innerHTML", page)   # names reach the page only as text
+
     def test_page_shows_where_report_totals_differ_from_its_units(self):
         counts = {"total_code": "48", "matched_code": "32", "total_functions": 2, "matched_functions": 1}
         consistent = {"version": 2, "measures": dict(counts), "units": [
