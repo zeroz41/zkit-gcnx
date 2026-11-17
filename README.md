@@ -115,6 +115,8 @@ Clean up the decomp source in large proven steps. Use zkit-clean-source. Finish 
 | `zkit report --readme` | the browsable progress pages (a table by unit and function, and a treemap of every function and data section), and the progress table between your README's `<!-- progress -->` markers |
 | `zkit report --badges DIR` | also shields.io endpoint badges of the first target: `code.json`, `data.json`, `functions.json`, `code-linked.json`, `data-linked.json`, `units-linked.json` |
 | `zkit build` | build, check and relink the project |
+| `zkit ci check --base main` | the pull request gate: build, nothing matched or linked lost against the latest saved baseline (or `--baseline FILE`), no decompiler leftovers in the added lines, no files that must not be committed; `--out FILE` keeps the result |
+| `zkit ci comment FILE` / `zkit ci report --sha SHA --out FILE` | for CI: the result as a pull request comment, and the report a trusted run kept for a commit (see [CI](docs/ci.md)) |
 | `zkit extract [folder]` | Switch: take the original executable out of the game's `.nsp`/`.xci` files (with your `prod.keys`); `zkit build` does it by itself when they sit in the original's folder or one above it |
 | `zkit gate` | what to run before you stop |
 

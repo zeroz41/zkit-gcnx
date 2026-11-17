@@ -190,6 +190,23 @@ below 25% to bright green at 100%. `zkit report --readme` writes
 a small table of the totals between `<!-- progress -->` markers in the decomp's README (it never adds them: a README without markers is left alone, and a repository whose hygiene sets
 `progress_table: forbid` is skipped and fails `zkit hygiene` if a table appears).
 
+### Continuous integration
+
+`ci.py` is the pull request gate and the two pieces a CI needs around it, so a project's workflows stay a few
+lines each ([CI](ci.md) has them). `zkit ci check --base REV` builds (`zkit build --download-build-tools`, whose
+output it keeps), compares the report with a baseline the way `zkit progress --check` does, runs `zkit check` on the
+lines added since `REV` and keeps only its errors, and runs `zkit hygiene --only files`; it passes only when the
+build ran and passed and no check failed, and `--out` writes the result as JSON: each check's outcome and the tail of
+its output, the six totals before and after, the counts of gained, lost and renamed functions, and up to twenty
+lost functions by name and address. `zkit ci comment` turns that file into a pull request comment behind a hidden
+marker, so a workflow updates its own comment in place; every value from the file is escaped (table pipes, markup,
+mentions, link brackets, fences), the commit and run link are checked against strict patterns, and a missing or
+unreadable file is a failed run. `zkit ci report --sha` downloads the report a trusted run kept for a commit, so the
+baseline of a pull request and the progress pages need no rebuild: an artifact counts only when it is named after
+the commit's tree (`report-<tree>`) and comes from a successful run of the CI workflow on a pull request whose head
+was merged as that commit, or of the progress workflow on the default branch at that commit. A pull request's own
+runs cannot supply it, and the token goes only to the GitHub API, never to the storage the download redirects to.
+
 ### The index and the evidence tools
 
 `index.py` keeps one incremental SQLite database per project in zkit's cache: functions (from the objdiff report,
@@ -262,10 +279,10 @@ natively, port for a native rewrite) are the rules agents follow; the skills tel
   guesses a name, a boundary or a behavior.
 - **Measured against truth.** Structure recovery is scored against fully matched units and real symbol maps, and
   against what the tools zkit replaces produce; a change that scores worse does not ship.
-- **Read-only by default.** Only `handoff`, `report`, `delink`, `link`, `analyze`, `objects --save` and
-  `cache --prune` write, and only to zkit's own folders or the folder named (`link` runs the project's linker
+- **Read-only by default.** Only `handoff`, `report`, `delink`, `link`, `analyze`, `objects --save`,
+  `ci --out` and `cache --prune` write, and only to zkit's own folders or the folder named (`link` runs the project's linker
   there; on Switch it also marks the units it proves in the report). Builds, banking and emulators stay with each repo's own tools and the user's permission model.
-- **Downloads on request, pinned, per platform.** Only `--download` uses the network. Each tool is pinned to a
+- **Downloads on request, pinned, per platform.** Only `--download` and `ci report` (the GitHub API) use the network. Each tool is pinned to a
   hash or commit, and a target fetches only the tools its platform runs (GameCube: CodeWarrior, wibo, binutils,
   m2c, decomp-permuter; Switch: LLVM and the project's own clang; both: objdiff-cli). A new tool is added to the
   platform that uses it, never to every project.

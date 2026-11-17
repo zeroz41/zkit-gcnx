@@ -478,6 +478,28 @@ def build_parser() -> argparse.ArgumentParser:
     c = add("contract", help="Print the toolkit's rules for a decomp, a source port (the decomp's code compiled "
                               "natively against a native library) or a native rewrite (port); no project needed")
     c.add_argument("kind", choices=["decomp", "source-port", "port"])
+    c = add("ci", help="Pull request checks for CI: the gate (build, nothing lost, no decompiler leftovers added, no "
+                       "files that must not be committed), its pull request comment, and the report of a trusted run")
+    ci_sub = c.add_subparsers(dest="action", required=True)
+    s = ci_sub.add_parser("check", parents=[common], help="Run the gate and write its result")
+    s.add_argument("--base", required=True, help="git revision the pull request is based on (lint and files look "
+                                                 "at what was added since it)")
+    s.add_argument("--baseline", help="report or saved baseline to compare with (default: the latest saved "
+                                      "baseline, `zkit progress --save`)")
+    s.add_argument("--out", type=Path, help="write the result here as JSON (for `zkit ci comment`)")
+    s = ci_sub.add_parser("comment", parents=[common], help="Render a gate result as a pull request comment "
+                                                            "(no project needed; a missing result is a failed run)")
+    s.add_argument("result", type=Path, help="the result file `zkit ci check --out` wrote")
+    s.add_argument("--sha", default="", help="the commit that was checked")
+    s.add_argument("--run-url", default="", help="the CI run to link")
+    s.add_argument("--marker", default=None, help="hidden first line that identifies the comment to update")
+    s = ci_sub.add_parser("report", parents=[common], help="Download the report a trusted run kept for a commit "
+                                                           "(no project needed; GITHUB_TOKEN or GH_TOKEN)")
+    s.add_argument("--sha", required=True, help="the commit whose report to fetch")
+    s.add_argument("--out", type=Path, required=True, help="where to write report.json")
+    s.add_argument("--repo", help="owner/name (default: GITHUB_REPOSITORY)")
+    s.add_argument("--ci-workflow", default=".github/workflows/ci.yml")
+    s.add_argument("--progress-workflow", default=".github/workflows/progress.yml")
     c = add("commit-msg", help="Check a commit message file against the repo's commit rules (the commit-msg hook)")
     c.add_argument("file", type=Path)
     c = add("cites", help="Native citations that resolve to nothing in the target")
@@ -640,6 +662,13 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from importlib import resources
         text = resources.files("zkit").joinpath(f"contracts/{args.kind}.md").read_text(encoding="utf-8")
         return {"kind": args.kind, "text": text}, text
+    if args.command == "ci" and args.action in ("comment", "report"):
+        from . import ci
+        if args.action == "comment":
+            text = ci.comment(ci.read_result(args.result), args.sha, args.run_url, args.marker or ci.MARKER)
+            return {"markdown": text}, text.rstrip("\n")
+        data = ci.report(args.sha, args.out.expanduser().resolve(), args.repo, args.ci_workflow, args.progress_workflow)
+        return data, data["message"]
     if args.command == "cache":
         from .index import cache_inventory, prune_cache
         if args.prune:
@@ -1075,6 +1104,13 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             return data, render.delta(data)
         data = progress.progress(project, target)
         return data, render.progress(data)
+    if command == "ci":
+        from . import ci
+        if target is None:
+            raise ValueError("The project has no targets")
+        out = args.out.expanduser().resolve() if args.out else None
+        data = ci.check(project, target, args.baseline, args.base, out=out)
+        return data, ci.render_check(data)
     if command == "report":
         from . import progress
         targets = args.targets or [t for t, c in project.config.get("targets", {}).items() if c.get("report")]

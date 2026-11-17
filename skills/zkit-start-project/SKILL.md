@@ -22,7 +22,8 @@ Most later repair work came from early shortcuts. Get these right before matchin
    build writes `report.json` and the pages (`build/progress/index.html` and `treemap.html`; `zkit report --badges DIR`
    adds shields.io badge data), `zkit report --readme` the README's
    progress table between its `<!-- progress -->` markers (never added; a project that publishes progress
-   through CI badges has none and sets hygiene `progress_table: forbid`).
+   through CI badges has none and sets hygiene `progress_table: forbid`). For CI, `zkit ci check|comment|report`
+   are the pull request gate, its comment and the trusted baseline (docs/ci.md in zkit has the workflows).
 6. `zkit build --download` fetches the compilers and tools the target's platform needs, pinned and hash-checked,
    into `build/` (never committed). It never fetches another platform's tools; don't download any by hand.
 7. `zkit init <repo>` writes the project file with strict hygiene and quality gates; `zkit install git-hook
