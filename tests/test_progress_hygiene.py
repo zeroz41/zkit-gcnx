@@ -350,6 +350,22 @@ class HygieneTests(unittest.TestCase):
         self.assertEqual(result["files"]["history"][0]["path"], "AGENTS.md")
         self.assertFalse(result["ok"])
 
+    def test_any_identity_takes_other_people_s_commits_but_not_ai_ones(self):
+        (self.root / "docs/arch.md").write_text("Run tools/build.py twice.\n", encoding="utf-8")
+        git(self.root, "commit", "-q", "-am", "Explain the build", author="Other Person <other@example.org>")
+        self.assertFalse(hygiene.commits(self.project, "game")["problems"] == [])
+        manifest = json.loads((self.root / "p.json").read_text(encoding="utf-8"))
+        manifest["repositories"]["game"]["hygiene"]["identity"] = "any"
+        (self.root / "p.json").write_text(json.dumps(manifest), encoding="utf-8")
+        project = Project.load(self.root / "p.json")
+        result = hygiene.commits(project, "game")
+        self.assertEqual((result["identity"], result["problems"]), ("any", []))
+        (self.root / "docs/arch.md").write_text("Run tools/build.py once.\n", encoding="utf-8")
+        git(self.root, "commit", "-q", "-am", "Explain the build again", author="Claude <noreply@anthropic.com>")
+        problems = hygiene.commits(project, "game")["problems"]
+        self.assertEqual(len(problems), 1)
+        self.assertIn("AI identity", problems[0]["problems"][0])
+
     def test_commit_message_hook(self):
         good = hygiene.message(self.project, "game", "Match the enemy update\n# comment from git\n")
         bad = hygiene.message(self.project, "game", "Fix\n\nWhy it changed.\n\nCo-Authored-By: Codex <noreply@openai.com>\n")

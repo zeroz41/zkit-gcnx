@@ -40,8 +40,11 @@ ORIGINAL_FILES = ("*.dol", "*.rel", "*.iso", "*.gcm", "*.rvz", "*.wbfs", "*.ciso
                   "*.xci", "*.nca", "*.keys", "prod.keys", "title.keys", "*.elf", "*.szs", "*.arc", "*.afs",
                   "*.bfsar", "*.sarc")
 
+ANY_IDENTITY = "any"
+
 DEFAULTS: dict[str, Any] = {
-    "identity": None,           # "Name <email>"; default: the repository's git config
+    "identity": None,           # "Name <email>", or "any" for a repository that takes other people's
+                                # commits; default: the repository's git config
     "subject_max": 72,
     "body": False,              # commit bodies allowed?
     "agent_docs": "forbid",     # or "allow" for a private working repository
@@ -70,6 +73,10 @@ def _git(root: Path, *args: str) -> str:
 
 
 def _identity(root: Path, configured: str | None) -> str | None:
+    """The identity every commit must carry, or None when any identity will do (AI identities are still
+    refused)."""
+    if configured == ANY_IDENTITY:
+        return None
     if configured:
         return configured
     try:
@@ -138,12 +145,13 @@ def commits(project: Project, repo: str, revisions: str | None = None, limit: in
     rules = policy(project, repo)
     root = project.root(repo)
     wanted = _identity(root, rules["identity"])
+    shown = ANY_IDENTITY if rules["identity"] == ANY_IDENTITY else wanted
     args = ["log", "--format=%H%x1f%an <%ae>%x1f%cn <%ce>%x1f%s%x1f%b%x1e"]
     args += [revisions] if revisions else [f"-{limit}"]
     try:
         raw = _git(root, *args)
     except ValueError:
-        return {"identity": wanted, "checked": 0, "problems": [], "note": "no commits in range"}
+        return {"identity": shown, "checked": 0, "problems": [], "note": "no commits in range"}
     problems, checked = [], 0
     for record in raw.split("\x1e"):
         record = record.strip("\n")
@@ -154,7 +162,7 @@ def commits(project: Project, repo: str, revisions: str | None = None, limit: in
         found = judge(rules, wanted, subject, body, {"author": author, "committer": committer})
         if found:
             problems.append({"commit": sha[:10], "subject": subject[:100], "problems": found})
-    return {"identity": wanted, "checked": checked, "problems": problems}
+    return {"identity": shown, "checked": checked, "problems": problems}
 
 
 def _tracked(root: Path) -> list[str]:
