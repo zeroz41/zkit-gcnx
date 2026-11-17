@@ -25,8 +25,9 @@ executable's SHA-1, and `<orig>` its path in the repository.
 
 1. `actions/checkout` with `fetch-depth: 0`. The checkout cleans the workspace, so nothing an earlier run left
    in `build/` is used.
-2. Link the original executable from the runner's read-only folder to `<orig>` and check it:
-   `echo "<sha1>  <orig>" | sha1sum -c -`.
+2. Copy the original executable from the runner's read-only folder to `<orig>` and check it:
+   `install -D -m 0444 /opt/decomp-ci/orig/... <orig>`, then `echo "<sha1>  <orig>" | sha1sum -c -`. A symlink
+   does not work, because zkit refuses links that lead out of the repository.
 3. Baseline: `zkit ci report --sha "$BASE_SHA" --out "$RUNNER_TEMP/baseline.json"`, where `BASE_SHA` is
    `github.event.pull_request.base.sha`. When there is none, check out the base commit, build it, copy its
    report, and check out the merge commit again.
@@ -62,7 +63,7 @@ merged.
   site/badges` and `actions/upload-pages-artifact` with `path: site`.
 - `wait` (`ubuntu-latest`, only when `reuse` found nothing): `sleep 600`. A batch of merges then cancels
   down to one build.
-- `build` (`[self-hosted, <label>]`, after `wait`, or straight away on a manual run): link and check the
+- `build` (`[self-hosted, <label>]`, after `wait`, or straight away on a manual run): copy and check the
   executable, build, write the same site, keep the report as `report-<tree>` for the next pull request's
   baseline, and upload the pages artifact.
 - `deploy` (`ubuntu-latest`, `pages: write`, `id-token: write`, environment `github-pages`):
