@@ -1297,6 +1297,11 @@ def delta(data: dict) -> str:
     for key in ("exact_data_lost", "linked_data_lost", "data_coverage_lost"):
         for row in data.get(key, [])[:8]:
             out.append(f"  {key}: {row['module']} {row['section']} {row['address']} +{row['size']}")
+    moved = data.get("padding_moved") or []
+    if moved:
+        out.append(f"  alignment padding moved (not data, not a loss): {len(moved)} range(s), "
+                   f"{sum(r['size'] for r in moved if r['moved'] == 'left')} B left, "
+                   f"{sum(r['size'] for r in moved if r['moved'] == 'joined')} B joined")
     if data.get("renamed"):
         out.append(f"  {len(data['renamed'])} function(s) renamed at the same address")
     return "\n".join(out)

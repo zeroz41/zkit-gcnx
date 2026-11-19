@@ -6,6 +6,7 @@ address, so renames, folds and splits never look like a loss, and a real loss al
 
 from __future__ import annotations
 
+import bisect
 import gzip
 import json
 import re
@@ -13,7 +14,7 @@ import time
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .project import Project
 
@@ -196,9 +197,35 @@ def _lost(old: dict, new: dict) -> list[dict]:
     return [{"module": m, "section": s, "address": address_text(a), "size": b - a} for m, s, a, b in out]
 
 
-def compare(before: dict, after: dict, single: str | None = None) -> dict[str, Any]:
+def alignment_padding(program) -> Callable[[str, int, int], bool]:
+    """Whether [start, end) of a section is the zero padding that aligns what follows it: shorter than the
+    alignment its end has (8 to 32 bytes), with no symbol starting inside and every byte zero (a zero-initialized
+    section's always are). A split or a fold moves such bytes out of every unit's object, so they leave the report
+    without being data."""
+    starts = sorted({o.address for o in program.objects} | {o.address for o in program.labels} |
+                    {f.address for f in program.functions})
+
+    def padding(section: str, start: int, end: int) -> bool:
+        size, alignment = end - start, min(end & -end, 32)
+        if alignment < 8 or not 0 < size < alignment or program.section_of(start) != section:
+            return False
+        first = bisect.bisect_left(starts, start)
+        if first < len(starts) and starts[first] < end:
+            return False
+        if "bss" in section:                               # .bss, .sbss, .sbss2: zero-initialized
+            return True
+        try:
+            return not any(program.read(start, size))
+        except ValueError:
+            return False
+    return padding
+
+
+def compare(before: dict, after: dict, single: str | None = None,
+            padding: Callable[[str, int, int], bool] | None = None) -> dict[str, Any]:
     """What changed between two reports, by original address (in the target's one module when `single` names
-    it). `failures` lists every loss."""
+    it). `failures` lists every loss. With `padding` (`alignment_padding`), alignment padding that left or joined
+    the report is listed under `padding_moved` instead: not a loss, and the totals may change by it."""
     old, new = _functions(before, single=single), _functions(after, single=single)
     old_exact = {k for k, f in old.items() if number(f.get("fuzzy_match_percent")) == 100}
     new_exact = {k for k, f in new.items() if number(f.get("fuzzy_match_percent")) == 100}
@@ -219,6 +246,24 @@ def compare(before: dict, after: dict, single: str | None = None) -> dict[str, A
                           _data_ranges(after, single=single, recorded=recorded))
     linked_data_lost = _lost(_data_ranges(before, linked_only=True, single=single, recorded=recorded),
                              _data_ranges(after, linked_only=True, single=single, recorded=recorded))
+    padding_moved: list[dict] = []
+    padding_delta = 0
+    excused = {"matched_data": 0, "complete_data": 0}       # padding bytes that left exact / linked ranges
+    if padding is not None:
+        def is_padding(row: dict) -> bool:
+            start = int(row["address"], 16)
+            return not row["module"].startswith("module") and padding(row["section"], start, start + row["size"])
+
+        joined = [r for r in _lost(_data_ranges(after, single=single, recorded=recorded),
+                                   _data_ranges(before, single=single, recorded=recorded)) if is_padding(r)]
+        left = [r for r in coverage_lost if is_padding(r)]
+        padding_moved = [{**r, "moved": "left"} for r in left] + [{**r, "moved": "joined"} for r in joined]
+        padding_delta = sum(r["size"] for r in joined) - sum(r["size"] for r in left)
+        excused["matched_data"] = sum(r["size"] for r in exact_data_lost if is_padding(r))
+        excused["complete_data"] = sum(r["size"] for r in linked_data_lost if is_padding(r))
+        exact_data_lost = [r for r in exact_data_lost if not is_padding(r)]
+        coverage_lost = [r for r in coverage_lost if not is_padding(r)]
+        linked_data_lost = [r for r in linked_data_lost if not is_padding(r)]
     failures = []
     if old_exact - new_exact:
         failures.append(f"{len(old_exact - new_exact)} exact function(s) lost their match")
@@ -233,14 +278,15 @@ def compare(before: dict, after: dict, single: str | None = None) -> dict[str, A
     if linked_data_lost:
         failures.append(f"{sum(r['size'] for r in linked_data_lost)} bytes of linked data are no longer linked")
     for key in ("matched_code", "matched_data", "complete_code", "complete_data", "matched_functions"):
-        if metrics[key]["delta"] < 0:
+        if metrics[key]["delta"] + excused.get(key, 0) < 0:
             failures.append(f"{key} fell by {-metrics[key]['delta']}")
     if recorded:   # the original's data, not the objects' padding between a unit's pieces of a section
         original = [sum(b - a for rows in _data_ranges(r, single=single, recorded=True).values() for a, b in rows)
                     for r in (before, after)]
         metrics["original_data"] = {"before": original[0], "after": original[1], "delta": original[1] - original[0]}
     for key in ("total_code", "original_data" if recorded else "total_data", "total_functions"):
-        if metrics[key]["delta"]:
+        if metrics[key]["delta"] and not (key.endswith("_data") and padding_moved
+                                          and metrics[key]["delta"] == padding_delta):
             failures.append(f"{key} changed by {metrics[key]['delta']:+d}: the split or target changed; "
                             "compare reports of the same configuration")
     renamed = [{"module": k[0], "address": address_text(k[1]), "before": old[k]["name"], "after": new[k]["name"]}
@@ -252,7 +298,8 @@ def compare(before: dict, after: dict, single: str | None = None) -> dict[str, A
             "newly_linked": rows(new_linked.keys() - old_linked.keys(), new_linked),
             "unlinked": rows(old_linked.keys() - new_linked.keys(), old_linked),
             "exact_data_lost": exact_data_lost, "data_coverage_lost": coverage_lost,
-            "linked_data_lost": linked_data_lost, "renamed": renamed, "failures": failures,
+            "linked_data_lost": linked_data_lost, "padding_moved": padding_moved, "renamed": renamed,
+            "failures": failures,
             "ok": not failures}
 
 
@@ -331,7 +378,12 @@ def baseline(project: Project, target: str, which: str | None = None) -> tuple[d
 def since(project: Project, target: str, which: str | None = None) -> dict[str, Any]:
     meta, before = baseline(project, target, which)
     after = load(report_path(project, target))
-    result = compare(before, after, single_module(project, target))
+    try:                                                   # the original's bytes and symbols tell padding
+        from .program import Program
+        padding = alignment_padding(Program.from_project(project, target))
+    except Exception:                                      # noqa: BLE001 - no original at hand: judge as before
+        padding = None
+    result = compare(before, after, single_module(project, target), padding)
     result["baseline"] = meta
     result["report_age_h"] = round((time.time() - report_path(project, target).stat().st_mtime) / 3600, 2)
     return result

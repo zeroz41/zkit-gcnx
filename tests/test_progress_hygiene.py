@@ -119,6 +119,39 @@ class ProgressTests(unittest.TestCase):
         self.assertIn("original_data changed by -16: the split or target changed; compare reports of the same "
                       "configuration", delta["failures"])
 
+    def test_alignment_padding_moving_out_of_the_report_is_no_loss(self):
+        """A split at an 8-aligned start leaves the zero word before it in no unit's object: it and total_data's
+        change are padding, not lost data. A range a symbol starts in, or with a non-zero byte, is still a loss."""
+        class Obj:
+            def __init__(self, address):
+                self.address = address
+
+        class Original:
+            objects, labels, functions = [Obj(0x80100000), Obj(0x80100008), Obj(0x80200000), Obj(0x80200008)], [], []
+
+            def section_of(self, address):
+                return ".data" if address < 0x80200000 else ".sbss2"
+
+            def read(self, address, size):
+                return bytes(size) if address != 0x80100030 else b"\\x01" * size
+
+        padding = progress.alignment_padding(Original())
+        before = report([], [("main/a", ".data", 0x80100000, 0x40, 100.0), ("main/b", ".sbss2", 0x80200000, 0x20, 0.0)],
+                        linked={"main/a"})
+        after = report([], [("main/a", ".data", 0x80100000, 0x4, 100.0), ("main/c", ".data", 0x80100008, 0x38, 100.0),
+                            ("main/b", ".sbss2", 0x80200000, 0x4, 0.0), ("main/d", ".sbss2", 0x80200008, 0x18, 0.0)],
+                       linked={"main/a", "main/c"})
+        self.assertFalse(progress.compare(before, after)["ok"])           # without the original: a false loss
+        delta = progress.compare(before, after, padding=padding)
+        self.assertTrue(delta["ok"], delta["failures"])
+        self.assertEqual([(r["address"], r["size"], r["moved"]) for r in delta["padding_moved"]],
+                         [("0x80100004", 4, "left"), ("0x80200004", 4, "left")])
+        named = report([], [("main/a", ".data", 0x80100000, 0x4, 100.0), ("main/c", ".data", 0x80100010, 0x30, 100.0),
+                            ("main/b", ".sbss2", 0x80200000, 0x20, 0.0)], linked={"main/a", "main/c"})
+        delta = progress.compare(before, named, padding=padding)         # 0x80100008 starts a symbol: data
+        self.assertFalse(delta["ok"])
+        self.assertEqual([r["address"] for r in delta["data_coverage_lost"]], ["0x80100004"])
+
     def test_summary_page_and_baselines(self):
         summary = progress.summary(self.before)
         self.assertEqual(summary["modules"][0]["measures"]["complete_units"], 1)
