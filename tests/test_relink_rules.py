@@ -293,6 +293,41 @@ class UnitEvidenceTests(unittest.TestCase):
         units._header_spellings(code, ev, code.strings())
         self.assertFalse(ev.separations)
 
+    def test_headers_cited_through_two_project_folders_are_two_units(self):
+        """2 and 9 cite two headers through two projects' folders (lib/a/proj, lib/b/proj: two projects' compiles):
+        a boundary lies between them, where the code leaves 2's namespace (na:: for nb:: at 6). 4's climb out of
+        lib/a/src, a folder holding a file 1 cites, is an including file's own `#include "../k.h"`, and 7's path
+        is relative: neither names a project. One project's folder both ways, or a module not clang's, says
+        nothing."""
+        code = _Code(12)
+        from zkit.program import Function
+        code.functions = [Function(f.address, f.size, f"_ZN2n{'a' if i < 6 else 'b'}3f{i:02d}Ev")   # na::f00()..
+                          for i, f in enumerate(code.functions)]
+        strings = {0x8000: "D:/lib/a/proj/../../inc/h.h", 0x8040: "D:/lib/b/proj/../../inc\\b/g.h",
+                   0x8080: "D:/lib/a/src/x.h", 0x80c0: "D:/lib/a/src/../inc/k.h", 0x8100: "../../inc/r.h"}
+        code.strings = lambda: strings
+        code.refs = {1: [(0, 0x8080, "addr")], 2: [(0, 0x8000, "addr")], 4: [(0, 0x80c0, "addr")],
+                     7: [(0, 0x8100, "addr")], 9: [(0, 0x8040, "addr")]}
+        code.users = lambda: {}
+        ev = units.Evidence({}, [], [])
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            units._file_evidence(code, ev)
+            cuts = [c.position for c in units.boundaries(code, ev)]
+        self.assertEqual([r[:2] for r in sorted(ev.direct)], [(3, 9)])
+        self.assertIn("two projects' compiles", next(iter(ev.direct))[2])
+        self.assertEqual(cuts, [6])
+        strings[0x8040] = "d:/lib/A/proj/../../inc/b/g.h"
+        ev = units.Evidence({}, [], [])
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            units._file_evidence(code, ev)
+        self.assertFalse(ev.separations)
+        from zkit.platform import GameCube
+        strings[0x8040] = "D:/lib/b/proj/../../inc\\b/g.h"
+        code.platform = GameCube()
+        ev = units.Evidence({}, [], [])
+        units._header_spellings(code, ev, code.strings())
+        self.assertFalse(ev.separations)
+
     def test_files_whose_citations_interleave_are_one_unit(self):
         """a.cpp cites 2, 6 and 8 around b.cpp's 4: b.cpp is compiled inside a.cpp, one unit named after the
         file citing most, its other build's name too; c.cpp after them is its own."""

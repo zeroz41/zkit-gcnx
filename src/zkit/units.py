@@ -1184,7 +1184,8 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
 def _header_spellings(program: Program, ev: Evidence, files: dict[int, str]) -> None:
     """Switch (clang): a compile names a file by the path it first opened it by, so one unit spells each header it
     cites one way; one header cited under two spellings (another project's include folder, another including
-    file's folder) is two units, and a boundary lies between two functions citing it spelled differently."""
+    file's folder) is two units, and a boundary lies between two functions citing it spelled differently. Two
+    headers cited through two projects' folders (`_project_folders`) are two units the same way."""
     if program.platform.name != "switch":
         return
     citers: dict[str, set[tuple[int, str]]] = collections.defaultdict(set)
@@ -1199,6 +1200,8 @@ def _header_spellings(program: Program, ev: Evidence, files: dict[int, str]) -> 
         for (a, spelled_a), (b, spelled_b) in zip(ordered, ordered[1:]):
             if b > a and spelled_a != spelled_b:
                 rows.add((a + 1, b, f"{spelled_a} then {spelled_b}: one header spelled two ways"))
+    spelled = {row[:2] for row in rows}
+    rows |= {row for row in _project_folders(program, files) if row[:2] not in spelled}
     if not rows:
         return
     # Two spellings are two projects' or folders' compiles: where the code between leaves the first citer's
@@ -1218,6 +1221,36 @@ def _header_spellings(program: Program, ev: Evidence, files: dict[int, str]) -> 
             leaving = next((p for p in range(lo, hi + 1) if space.get(p, first) != first), None)
             if leaving is not None:
                 ev.toward[row] = leaving
+
+
+CLIMB = re.compile(r"(?:^|[/\\])\.\.(?:[/\\]|$)")
+
+
+def _project_folders(program: Program, files: dict[int, str]) -> set[tuple[int, int, str]]:
+    """Separations between two functions citing headers through two projects' folders. A build whose include
+    folders are given from its project's folder spells a header it reaches through one from that folder
+    (`D:/lib/a/proj/../../inc/h.h`), and one unit is one project's compile: two functions citing headers through
+    two such folders are in two units. A folder is a project's only where it is a full path holding none of the
+    module's cited files: a climb out of one that does is an including file's own `#include "../h.h"`."""
+    holding: set[str] = set()
+    for path in files.values():
+        folder = _normalized(path).casefold().rpartition("/")[0]
+        while folder and folder not in holding:
+            holding.add(folder)
+            folder = folder.rpartition("/")[0]
+    through: set[tuple[int, str]] = set()
+    for index, rows in program.refs.items():
+        for _, address, kind in rows:
+            path = files.get(address)
+            if kind != "addr" or path is None or not HEADER.search(path) or not (climb := CLIMB.search(path)):
+                continue
+            folder = _normalized(path[:climb.start()]).casefold()
+            top = folder.partition("/")[0]
+            if (DRIVE.match(top) or path.startswith(("/", "\\"))) and folder != top and folder not in holding:
+                through.add((index, folder))
+    ordered = sorted(through)
+    return {(a + 1, b, f"headers cited through {folder_a} then {folder_b}: two projects' compiles")
+            for (a, folder_a), (b, folder_b) in zip(ordered, ordered[1:]) if b > a and folder_a != folder_b}
 
 
 def _included(ev: Evidence, several: dict[int, set[str]] | None = None) -> dict[str, str]:
