@@ -494,7 +494,7 @@ def _pools_out_of_order(program: Program, local: dict[DataObject, list[int]],
         for lo, hi, _ in apart:
             if all(joined[p] for p in range(lo, hi + 1)):
                 out = [j for j in out if j[1] < lo or j[0] >= hi]
-    return out
+    return sorted(out)                                  # in code order, whatever order the sections came in
 
 
 def _initializer_copies(program: Program, local: dict[DataObject, list[int]]) -> set[DataObject]:
