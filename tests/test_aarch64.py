@@ -32,6 +32,25 @@ class RegisterUseTests(unittest.TestCase):
                              (reads, writes), hex(word))
         self.assertEqual(set(aarch64.register_use(0x94000000)[1]), aarch64.CALL_CLOBBERED)   # bl
 
+    def test_atomics_read_their_operands_and_write_the_register_given_the_old_value(self):
+        cases = {
+            0xB8210040: ({1, 2}, {0}),             # ldadd w1, w0, [x2]
+            0xF8E300A4: ({3, 5}, {4}),             # ldaddal x3, x4, [x5]
+            0xB8268107: ({6, 8}, {7}),             # swp w6, w7, [x8]
+            0xB8BFC149: ({10}, {9}),               # ldapr w9, [x10]
+            0xB82B019F: ({11, 12}, set()),         # stadd w11, [x12]
+            0x88AD7DEE: ({13, 14, 15}, {13}),      # cas w13, w14, [x15]
+            0xC8F0FE51: ({16, 17, 18}, {16}),      # casal x16, x17, [x18]
+            0x48207C82: ({0, 1, 2, 3, 4}, {0, 1}),  # casp x0, x1, x2, x3, [x4]
+            0x88DFFCC5: ({6}, {5}),                # ldar w5, [x6]
+            0x889FFD07: ({7, 8}, set()),           # stlr w7, [x8]
+            0x885FFD49: ({10}, {9}),               # ldaxr w9, [x10]
+            0x880BFDAC: ({12, 13}, {11}),          # stlxr w11, w12, [x13]
+        }
+        for word, (reads, writes) in cases.items():
+            self.assertEqual(tuple(map(set, aarch64.register_use(word))), (reads, writes), hex(word))
+            self.assertEqual(set(aarch64.written(word)) - {31}, writes, hex(word))
+
     def test_argument_reads_follow_every_path_and_stop_at_calls(self):
         # cbz x1, else; ldr w0, [x2]; ret; else: mov w0, wzr; ret
         self.assertEqual(aarch64.argument_reads([0xB4000061, 0xB9400040, 0xD65F03C0, 0x2A1F03E0, 0xD65F03C0], 0),

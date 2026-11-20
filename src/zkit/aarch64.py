@@ -11,14 +11,23 @@ from dataclasses import dataclass
 def written(word: int) -> tuple[int, ...]:
     """General registers an instruction writes (approximate but conservative: when unsure, its rd field).
 
-    Branches and stores write nothing (bl/blr clobber is handled by callers); loads write rt (pairs also rt2);
-    every data-processing instruction writes rd."""
+    Branches and stores write nothing (bl/blr clobber is handled by callers) except a store exclusive's status;
+    loads write rt (pairs also rt2), atomics the register given the old value; every data-processing instruction
+    writes rd."""
     group = word >> 25 & 0xF
     if group in (0b1010, 0b1011):                                   # branches, exceptions, system
         return ()
     if group & 0b0101 == 0b0100:                                    # loads and stores
         if word >> 26 & 1:                                          # SIMD/FP registers: not general registers
             return ()
+        if word & 0x3F200C00 == 0x38200000:                         # atomic memory ops (ldadd, swp, ldapr): rt
+            return (word & 31,)                                     # gets the old value
+        if word & 0x3FA07C00 == 0x08A07C00:                         # cas: rs gets the old value
+            return (word >> 16 & 31,)
+        if word & 0xBFA07C00 == 0x08207C00:                         # casp: the rs pair
+            return (word >> 16 & 31, (word >> 16 & 31) + 1)
+        if word & 0x3FC00000 == 0x08000000:                         # store exclusive writes its status register
+            return (word >> 16 & 31,)
         pair = word & 0x38000000 == 0x28000000
         load = bool(word >> 22 & 1)
         if word & 0x3B000000 in (0x18000000, 0x19000000):           # literal loads (and prefetch)
@@ -546,6 +555,12 @@ def _load_store(word: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
     reg = (lambda r: (V + r,)) if vector else (lambda r: _g(r))
     if word & 0x3B000000 == 0x18000000:                                 # load literal (and prfm literal)
         return (), (() if not vector and word >> 30 == 3 else reg(rt))
+    if word & 0x3F200C00 == 0x38200000:                                 # atomic memory ops (ldadd, swp, ldapr):
+        return _g(rn, rm), _g(rt)                                       # rs is the operand, rt gets the old value
+    if word & 0x3FA07C00 == 0x08A07C00:                                 # cas: compares rs, stores rt, rs gets
+        return _g(rn, rm, rt), _g(rm)                                   # the old value
+    if word & 0xBFA07C00 == 0x08207C00:                                 # casp: register pairs
+        return _g(rn, rm, rm + 1, rt, rt + 1), _g(rm, rm + 1)
     if word & 0x3F000000 == 0x08000000:                                 # exclusive, acquire/release
         load = word >> 22 & 1
         pair = word >> 21 & 1
