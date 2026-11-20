@@ -376,7 +376,63 @@ ABS64, PREL32 = 257, 261
 LD_PREL_LO19, ADR_PREL_LO21, ADR_PREL_PG_HI21, ADD_ABS_LO12_NC = 273, 274, 275, 277
 LDST8, JUMP26, CALL26, LDST16, LDST32, LDST64, LDST128 = 278, 282, 283, 284, 285, 286, 299
 ADR_GOT_PAGE, LD64_GOT_LO12_NC = 311, 312
+ADR_PREL_PG_HI21_NC = 276
 LDST = {0: LDST8, 1: LDST16, 2: LDST32, 3: LDST64, 4: LDST128}
+NOP = 0xD503201F
+# The bits of its instruction each relocation fills, as `code_relocations` clears them (an assembler leaves them
+# zero): a branch's offset, an adrp's or adr's immediate, a literal load's offset, a low 12 bits' field.
+FILLS = {CALL26: 0x03FFFFFF, JUMP26: 0x03FFFFFF, ADR_PREL_LO21: 0x60FFFFE0, ADR_PREL_PG_HI21: 0x60FFFFE0,
+         ADR_GOT_PAGE: 0x60FFFFE0, LD_PREL_LO19: 0x00FFFFE0, ADD_ABS_LO12_NC: 0x003FFC00,
+         LD64_GOT_LO12_NC: 0x003FFC00, **{kind: 0x003FFC00 for kind in LDST.values()}}
+
+
+def object_kind(kind: int) -> int | None:
+    """An object's relocation type as `code_relocations` names what it finds in linked code (None: one it does
+    not find there)."""
+    kind = ADR_PREL_PG_HI21 if kind == ADR_PREL_PG_HI21_NC else kind
+    return kind if kind in FILLS else None
+
+
+def assembled(word: int, offset: int, size: int) -> int | None:
+    """The kind `code_relocations` gives an instruction at `offset` of a function `size` bytes long whose
+    reference an assembler resolved itself, leaving the object no relocation: every adrp, adr, literal load and
+    call is relocated in linked code, and a branch out of the function."""
+    if word & 0x7C000000 == 0x14000000:
+        if word >> 31:
+            return CALL26
+        return JUMP26 if not 0 <= offset + _sign(word & 0x03FFFFFF, 26) * 4 < size else None
+    if word & 0x9F000000 == 0x90000000:
+        return ADR_PREL_PG_HI21
+    if word & 0x9F000000 == 0x10000000:
+        return ADR_PREL_LO21
+    if word & 0x3B000000 == 0x18000000:
+        return LD_PREL_LO19
+    return None
+
+
+def unrelaxed(words: list[int], kinds: dict[int, int]) -> list[int]:
+    """Undo in place what a linker's relaxations may have made of an address's two instructions, so the same code
+    compares equal unlinked, linked by a linker that relaxes and by one that does not: an adjacent GOT load of
+    one register (`adrp xN, :got:s` then `ldr xN, [xN, :got_lo12:s]`, which lld turns into `adrp xN, s` + `add
+    xN, xN, :lo12:s` for a symbol the module defines) and a `nop` + `adr xN, s` (what lld turns that pair into for
+    a target within a MiB) both become the `adrp` + `add`, all three giving xN the address of s. `words` are
+    cleared as `code_relocations` leaves them, `kinds` holds the relocation kind of each relocated word by
+    index. Returns the indexes of the pairs' first words."""
+    out = []
+    for index in range(len(words) - 1):
+        first, second = words[index], words[index + 1]
+        if kinds.get(index) == ADR_GOT_PAGE and kinds.get(index + 1) == LD64_GOT_LO12_NC \
+                and first & 0x9F000000 == 0x90000000 and second & 0xFFC00000 == 0xF9400000 \
+                and second & 31 == first & 31 == second >> 5 & 31:
+            register = first & 31
+        elif first == NOP and kinds.get(index + 1) == ADR_PREL_LO21 and second & 0x9F000000 == 0x10000000:
+            register = second & 31
+        else:
+            continue
+        words[index], words[index + 1] = 0x90000000 | register, 0x91000000 | register << 5 | register
+        kinds[index], kinds[index + 1] = ADR_PREL_PG_HI21, ADD_ABS_LO12_NC
+        out.append(index)
+    return out
 
 
 @dataclass

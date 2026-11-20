@@ -123,5 +123,48 @@ class RelocationTests(unittest.TestCase):
                                                    aarch64.ADR_GOT_PAGE, aarch64.LD64_GOT_LO12_NC])
 
 
+class ObjectCodeTests(unittest.TestCase):
+    def test_an_objects_relocations_are_named_as_linked_code_finds_them(self):
+        """An object's `adrp` relocation without an overflow check is the page relocation linked code shows; a
+        data relocation is never one `code_relocations` finds in code."""
+        self.assertEqual(aarch64.object_kind(aarch64.ADR_PREL_PG_HI21_NC), aarch64.ADR_PREL_PG_HI21)
+        self.assertEqual(aarch64.object_kind(aarch64.CALL26), aarch64.CALL26)
+        self.assertEqual(aarch64.object_kind(aarch64.LD64_GOT_LO12_NC), aarch64.LD64_GOT_LO12_NC)
+        self.assertIsNone(aarch64.object_kind(aarch64.ABS64))
+
+    def test_what_an_assembler_resolved_is_what_a_linker_relocates(self):
+        """An assembler resolves a call or an address within its own section and leaves the object no relocation
+        for it: such a call, adrp, adr or literal load is still relocated in linked code, a branch only when it
+        leaves the function."""
+        cases = {0x94000003: aarch64.CALL26,               # bl +12
+                 0x14000002: None,                         # b +8, inside the 16 bytes
+                 0x14000010: aarch64.JUMP26,               # b +0x40, past the end
+                 0x17FFFFFF: aarch64.JUMP26,               # b -4, before the start
+                 0x90000000: aarch64.ADR_PREL_PG_HI21,     # adrp x0
+                 0x10000001: aarch64.ADR_PREL_LO21,        # adr x1
+                 0x58000002: aarch64.LD_PREL_LO19,         # ldr x2, literal
+                 0x18000002: aarch64.LD_PREL_LO19,         # ldr w2, literal
+                 0x91000000: None}                         # add x0, x0, #0
+        for word, kind in cases.items():
+            self.assertEqual(aarch64.assembled(word, 0, 16), kind, hex(word))
+
+    def test_relaxed_address_pairs_take_one_form(self):
+        """A GOT load of one register (`adrp x8` + `ldr x8, [x8]`) and a `nop` + `adr x3` (what lld makes of an
+        `adrp` + `add` near its target) both read as `adrp` + `add`, as cleared; a GOT load into another register
+        than its page's, or with an instruction between its two, is left alone."""
+        nop = aarch64.NOP
+        words = [0x90000008, 0xF9400108, nop, 0x10000003, 0x90000008, 0xF9400109, 0x90000008, nop, 0xF9400108]
+        kinds = {0: aarch64.ADR_GOT_PAGE, 1: aarch64.LD64_GOT_LO12_NC, 3: aarch64.ADR_PREL_LO21,
+                 4: aarch64.ADR_GOT_PAGE, 5: aarch64.LD64_GOT_LO12_NC, 6: aarch64.ADR_GOT_PAGE,
+                 8: aarch64.LD64_GOT_LO12_NC}
+        self.assertEqual(aarch64.unrelaxed(words, kinds), [0, 2])
+        self.assertEqual(words, [0x90000008, 0x91000108, 0x90000003, 0x91000063, 0x90000008, 0xF9400109,
+                                 0x90000008, nop, 0xF9400108])
+        self.assertEqual(kinds, {0: aarch64.ADR_PREL_PG_HI21, 1: aarch64.ADD_ABS_LO12_NC,
+                                 2: aarch64.ADR_PREL_PG_HI21, 3: aarch64.ADD_ABS_LO12_NC,
+                                 4: aarch64.ADR_GOT_PAGE, 5: aarch64.LD64_GOT_LO12_NC, 6: aarch64.ADR_GOT_PAGE,
+                                 8: aarch64.LD64_GOT_LO12_NC})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -39,7 +39,10 @@ update that changed a function's parameters changed its name, which no donor has
 On the Switch a shape clears what `aarch64.code_relocations` relocates (calls and branches out of the function,
 adrp pages and the low halves paired with them, adr and literal loads), and a class table is an Itanium `_ZTV`
 object: offset-to-top and typeinfo, then one pointer per slot, read through the module's relocations. A
-module's import stubs are named by what they import in every build, so a call to one agrees by name.
+module's import stubs are named by what they import in every build, so a call to one agrees by name. clang's
+objects shape the same way, and the address pairs a linker may relax (lld turns a GOT load into `adrp` + `add`,
+and that into `nop` + `adr` for a near target) take one form in every build (`unrelaxed`), so compiled source
+names a module that linker made.
 """
 
 from __future__ import annotations
@@ -61,7 +64,7 @@ from . import ppc
 from .platform import platform_name
 from .program import CODE_SECTIONS, Function, Program
 
-VERSION = 4
+VERSION = 5
 MINIMUM_WORDS = 16       # a shorter shape proves nothing alone: copies and setters repeat in every game
 CONFIRMING = 2           # agreed references a shorter one needs (one is a thin wrapper of a call any game makes)
 MINIMUM_STRINGS = 12     # characters of referenced text a string-set match needs
@@ -235,16 +238,34 @@ def image_shape(program: Program, function: Function, sda: dict[int, int] | None
         return None
     if not words:
         return None
-    if program.platform.name == "switch":
+    switch = program.platform.name == "switch"
+    if switch:
         from . import aarch64
-        found, cleared = aarch64.code_relocations(words, function.address, program.image.pointers)
+        found, cleared = aarch64.code_relocations(words, function.address, program.image.pointers,
+                                                  got=getattr(program.image, "tables", {}).get(".got"))
     else:
         found, cleared = ppc.code_relocations(words, function.address, program.sda if sda is None else sda,
                                               program.in_image)
     masked = [cleared.get(function.address + 4 * i, word) for i, word in enumerate(words)]
     references = [((r.offset - function.address) // 4 * 4, r.kind, r.target) for r in found]
+    if switch:
+        references = unrelaxed(masked, references)
     return Shape(function.address, 4 * len(words), digest(masked, ((o, k) for o, k, _ in references)), references,
                  struct.pack(f"<{len(masked)}I", *masked))
+
+
+def unrelaxed(words: list[int], references: list[tuple]) -> list[tuple]:
+    """AArch64 code's words and (byte offset, kind, what it refers to) references with every pair a linker may
+    relax in one form (`aarch64.unrelaxed`); the pair's first word refers to what its second does."""
+    from . import aarch64
+    kinds = {offset // 4: kind for offset, kind, _ in references}
+    pairs = aarch64.unrelaxed(words, kinds)
+    if not pairs:
+        return references
+    what = {offset // 4: x for offset, _, x in references}
+    for index in pairs:
+        what[index] = what.get(index + 1)
+    return [(4 * index, kinds[index], what.get(index)) for index in sorted(kinds)]
 
 
 def small_data(program: Program) -> dict[int, int]:
@@ -447,13 +468,16 @@ def add_program(donor: Donor, program: Program, units: list[tuple[int, int, str]
 
 
 def add_object(donor: Donor, elf, unit: str = "") -> None:
-    """Every function a relocatable PowerPC object defines (CodeWarrior's, or a delinker's), its virtual
-    tables' slots and the sizes of the data its functions name."""
+    """Every function a relocatable object defines (a PowerPC one, CodeWarrior's or a delinker's, or an AArch64
+    one), its virtual tables' slots and the sizes of the data its functions name."""
     from .elf import SHT_NOBITS
     rows: dict[int, list] = collections.defaultdict(list)
     for symbol in elf.symbols:
         if symbol.kind in ("func", "object") and 0 < symbol.section < 0xFF00:
             rows[symbol.section].append(symbol)
+    if elf.machine == "aarch64":
+        _add_aarch64_object(donor, elf, unit, rows)
+        return
     for index, symbols in rows.items():
         section = elf.sections[index]
         data = elf.data(section)
@@ -487,6 +511,98 @@ def add_object(donor: Donor, elf, unit: str = "") -> None:
                                    donor.name, weak=symbol.bind == "weak"))
         _neighbours(found, order)
         donor.signatures += found
+
+
+ITANIUM_DATA = ("_ZTI", "_ZTS", "_ZTV", "_ZTT")     # typeinfo, its name, a class table, a VTT: never a slot's code
+
+
+def _add_aarch64_object(donor: Donor, elf, unit: str, rows: dict[int, list]) -> None:
+    """`add_object` for clang's AArch64 objects. A function is cleared where its relocations fill it, and where
+    the assembler filled in what a linker relocates (`aarch64.assembled`), so its shape is the linked code's; the
+    pairs a linker relaxes take one form on both sides (`unrelaxed`). A reference through a section symbol (a
+    file-local function or variable) names the symbol it falls in. The object's functions, its code sections
+    (one per function with -ffunction-sections) in order, are its layout; an inline or a template instance has
+    no place in it and no unit, the link keeping whichever unit's copy comes first, and its weak data is
+    marked weak as an original's is."""
+    from . import aarch64
+    from .elf import SHT_NOBITS
+    held = {index: sorted(symbols, key=lambda s: s.value) for index, symbols in rows.items()}
+
+    def token(reloc) -> tuple | None:
+        symbol = elf.symbols[reloc.symbol] if reloc.symbol < len(elf.symbols) else None
+        if symbol is not None and symbol.kind == "section":
+            for holder in held.get(symbol.section, ()):
+                if holder.value <= reloc.addend < holder.value + max(holder.size, 1) and not unnamed(holder.name):
+                    named = key(holder.name, holder.bind, unit)
+                    if holder.kind == "object" and holder.size:
+                        donor.sizes[named] = holder.size
+                    return ("n", named, reloc.addend - holder.value)
+        named = _object_token(elf, reloc, unit, donor.sizes)
+        if symbol is not None and symbol.kind == "object" and symbol.bind == "weak" and named and named[0] == "n" \
+                and named[1] not in donor.weak:
+            donor.weak.append(named[1])
+        return named
+    order, found = [], []
+    for index in sorted(held):
+        section = elf.sections[index]
+        if section.type == SHT_NOBITS:
+            continue
+        data = elf.data(section)
+        relocations = elf.relocations(section)
+        for symbol in held[index]:
+            named = None if unnamed(symbol.name) else key(symbol.name, symbol.bind, unit)
+            if symbol.kind == "object" and named and symbol.name.startswith("_ZTV") and symbol.size >= 24:
+                slots: list[str | None] = [None] * ((symbol.size - 16) // 8)
+                for r in relocations:
+                    at = r.offset - symbol.value - 16
+                    if r.type == aarch64.ABS64 and 0 <= at < 8 * len(slots) and not at % 8:
+                        found_token = token(r)
+                        if found_token and found_token[0] == "n" and not found_token[2] \
+                                and not display(found_token[1]).startswith(ITANIUM_DATA):
+                            slots[at // 8] = found_token[1]
+                donor.tables[named] = slots
+            if symbol.kind != "func" or not symbol.size:
+                continue
+            weak = symbol.bind == "weak"
+            order.append(None if weak else named)
+            if not named:
+                continue
+            body = data[symbol.value:symbol.value + symbol.size]
+            words = list(struct.unpack(f"<{len(body) // 4}I", body[:len(body) // 4 * 4]))
+            references: dict[int, tuple] = {}
+            relocated = set()
+            for r in relocations:
+                if not symbol.value <= r.offset < symbol.value + 4 * len(words):
+                    continue
+                at = (r.offset - symbol.value) // 4
+                relocated.add(at)
+                kind = aarch64.object_kind(r.type)
+                if kind is not None:
+                    words[at] &= ~aarch64.FILLS[kind] & 0xFFFFFFFF
+                    references[at] = (kind, token(r))
+            for at, word in enumerate(words):
+                kind = None if at in relocated else aarch64.assembled(word, 4 * at, 4 * len(words))
+                if kind is not None:
+                    words[at] &= ~aarch64.FILLS[kind] & 0xFFFFFFFF
+                    references[at] = (kind, None)
+            shaped = unrelaxed(words, [(4 * at, kind, what) for at, (kind, what) in sorted(references.items())])
+            found.append(Signature(named, 4 * len(words), digest(words, ((o, k) for o, k, _ in shaped)),
+                                   tuple(Reference(o, k, t) for o, k, t in shaped), "" if weak else unit, donor.name,
+                                   weak=weak))
+    _neighbours(found, order)
+    donor.signatures += found
+
+
+def compiled_unit(elf, path: str) -> str:
+    """An AArch64 object's unit: its place among the objects (`path`) named after the source file it says it
+    was compiled from (its file symbol's last component), as a project's splits name it: a build names its
+    objects its own way."""
+    path = path.replace("\\", "/")
+    source = next((s.name for s in elf.symbols if s.kind == "file" and s.name), None)
+    if not source:
+        return path
+    name = re.split(r"[/\\]", source)[-1]
+    return f"{path.rsplit('/', 1)[0]}/{name}" if "/" in path else name
 
 
 def _object_token(elf, reloc, unit: str, sizes: dict[str, int]) -> tuple | None:
@@ -596,6 +712,9 @@ def build(name: str, image: Path | None = None, symbols: Path | None = None, map
         if elf.machine == "ppc" and elf.type == 1:
             add_object(donor, elf, unit)
             donor.platform = "gamecube"
+        elif elf.machine == "aarch64" and elf.type == 1:
+            add_object(donor, elf, compiled_unit(elf, unit))
+            donor.platform = "switch"
     donor.sources += [str(p) for p in objects]
     if not donor.signatures:
         raise ValueError(f"No named functions found for {name}")
@@ -1819,9 +1938,7 @@ def build_project(project, target: str, name: str, complete: bool = False) -> Do
         donor.sources.append(f"{project.config['id']}:{target}")
         return donor
     from .elf import Elf
-    if platform_name(config) == "switch":
-        raise ValueError("Signatures from compiled objects read PowerPC objects only; build a Switch donor from its "
-                         "original (without --complete)")
+    switch = platform_name(config) == "switch"
     if not config.get("report"):
         raise ValueError(f"Target {target} has no objdiff report to say which units are complete")
     proven = complete_units(project.file(config["repository"], config["report"]), config.get("module"))
@@ -1832,8 +1949,9 @@ def build_project(project, target: str, name: str, complete: bool = False) -> Do
         if path is None or not path.is_file() or not any(p == source or p == unit or unit.endswith("/" + p)
                                                          for p in proven):
             continue
-        add_object(donor, Elf.load(path), source)
-    donor.platform = "gamecube"
+        elf = Elf.load(path)
+        add_object(donor, elf, compiled_unit(elf, unit) if switch else source)
+    donor.platform = "switch" if switch else "gamecube"
     donor.sources.append(f"{project.config['id']}:{target} complete units")
     return donor
 

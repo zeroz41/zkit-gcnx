@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from zkit import cli, delink, ppc, signatures
+from zkit import aarch64, cli, delink, ppc, signatures
 from zkit.elf import Elf
 from zkit.platform import GameCube, Switch
 from zkit.program import Program
@@ -351,6 +351,29 @@ for old, new in (("x * 5 + g_counter", "x * 6 - g_counter"), ("x * 21 + 4", "x *
     SWITCH_TARGET = SWITCH_TARGET.replace(old, new)
 
 
+# one file as clang compiles it for lld to link with relaxations: GOT loads of a near and a far variable (past
+# over a MiB of another), a call to a file-local function, a class table, an inline with a static
+COMPILED = """int g_counter = 3;
+int g_gap[300000];
+int g_beyond = 0;
+int *where() { return &g_counter; }
+int *beyond() { return &g_beyond; }
+void fill(int i, int v) { g_gap[i] = v; }
+__attribute__((noinline)) static int helper(int x) { return x * 9 - g_counter; }
+int user(int x) { return helper(x) + helper(x + 1) * 3; }
+struct Shape { virtual ~Shape(); virtual int area() const; int w, h; };
+Shape::~Shape() {}
+int Shape::area() const { return w * h + g_counter; }
+Shape *make() { return new Shape(); }
+__attribute__((noinline)) inline int &tally() { static int s_tally = 5; return s_tally; }
+int bump(int x) { return tally() += x * 3; }
+__attribute__((noinline)) int callee(int x) { return x * 5 + g_counter; }
+int caller(int *v, int n) { int t = 0; for (int i = 0; i < n; i++) t += callee(v[i]) * (i ^ 0x55) + v[i] * 7 + g_counter;
+  return t * 3 + n + g_beyond; }
+"""
+RELAXING = {"flags": ("-ffunction-sections", "-fdata-sections"), "link": ("-pie",)}
+
+
 # two functions an update changed, one between them it dropped and one it added
 GAP_DONOR = """int first(int *v, int n) { int t = 1; for (int i = 0; i < n; i++) t = t * 31 + (v[i] >> 2) - i;
   for (int i = n - 1; i >= 0; i--) t ^= v[i] * (i + 3); return t ^ 0x1234; }
@@ -404,15 +427,17 @@ class SwitchSignatureTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def module(self, stem: str, source: str, hide: bool) -> tuple[Path, Path, dict[str, int]]:
-        """A linked module and a symbols.txt of it (placeholders where `hide`); the address of every name."""
+    def module(self, stem: str, source: str, hide: bool, flags: tuple = ("-fvisibility=hidden",),
+               link: tuple = ("-shared", "--no-relax")) -> tuple[Path, Path, dict[str, int]]:
+        """A linked module (its object beside it) and a symbols.txt of it (placeholders where `hide`); the
+        address of every name."""
         import subprocess
         (self.root / f"{stem}.cpp").write_text(source, encoding="utf-8")
-        subprocess.run(["clang++", "--target=aarch64-none-elf", "-fPIC", "-fvisibility=hidden", "-O2",
-                        "-fno-exceptions", "-fno-rtti", "-ffreestanding", "-c", str(self.root / f"{stem}.cpp"),
+        subprocess.run(["clang++", "--target=aarch64-none-elf", "-fPIC", *flags, "-O2", "-fno-exceptions",
+                        "-fno-rtti", "-ffreestanding", "-c", str(self.root / f"{stem}.cpp"),
                         "-o", str(self.root / f"{stem}.o")], check=True, capture_output=True)
         elf = self.root / f"{stem}.elf"
-        subprocess.run(["ld.lld", "-shared", "--no-relax", "--unresolved-symbols=ignore-all", "-o", str(elf),
+        subprocess.run(["ld.lld", *link, "--unresolved-symbols=ignore-all", "-o", str(elf),
                         str(self.root / f"{stem}.o")], check=True, capture_output=True)
         linked = Elf.load(elf)
         lines, where = [], {}
@@ -805,6 +830,41 @@ class SwitchSignatureTests(unittest.TestCase):
         self.assertEqual((units["_Z6sharedi"], units["_Z4useri"]), ("", "lib.cpp"))
         weak = {s.key: s.weak for s in donor.signatures}
         self.assertEqual((weak["_Z6sharedi"], weak["_Z4useri"]), (True, False))   # and a name keeps its binding
+
+    def test_a_compiled_object_shapes_as_its_relaxed_link(self):
+        """clang's object of a file and lld's relaxing link of it: every function the object defines has the shape
+        of its linked code, though lld made one GOT load `adrp` + `add` and the near ones `nop` + `adr`; a call to
+        a file-local function names it through its section; a class table's slots are its virtuals; the object
+        is its source file's unit in its folder, but an inline has no unit and its static is weak. Read blind,
+        the link takes the object's names."""
+        elf, symbols, at = self.module("target", COMPILED, hide=False, **RELAXING)
+        folder = self.root / "objects" / "game"
+        folder.mkdir(parents=True)
+        shutil.copy(self.root / "target.o", folder / "built.o")
+        donor = signatures.build("compiled", objects=[self.root / "objects"])
+        self.assertEqual(donor.platform, "switch")
+        program = Program.from_symbols(Switch(), elf, symbols)
+        functions = {f.name: f for f in program.functions}
+        words = lambda name: Switch().words(program.image, at[name], functions[name].size)
+        self.assertEqual(words("_Z5wherev")[0], aarch64.NOP)                      # relaxed twice
+        self.assertEqual(words("_Z6beyondv")[1] & 0xFF800000, 0x91000000)         # relaxed once: an add
+        compiled = {signatures.display(s.key): s for s in donor.signatures}
+        self.assertEqual(set(compiled), set(functions))
+        for name, signature in compiled.items():
+            self.assertEqual(signature.shape, signatures.image_shape(program, functions[name]).shape, name)
+        unit = "game/target.cpp"
+        self.assertEqual({r.token for r in compiled["_Z4useri"].references},
+                         {("n", signatures.key("_ZL6helperi", "local", unit), 0)})
+        self.assertEqual(donor.tables["_ZTV5Shape"], ["_ZN5ShapeD1Ev", "_ZN5ShapeD0Ev", "_ZNK5Shape4areaEv"])
+        self.assertEqual({s.unit for name, s in compiled.items() if name != "_Z5tallyv"}, {unit})
+        self.assertEqual((compiled["_Z5tallyv"].unit, compiled["_Z5tallyv"].weak), ("", True))
+        self.assertEqual(donor.weak, ["_ZZ5tallyvE7s_tally"])
+        built = Elf.load(folder / "built.o")
+        self.assertEqual(signatures.compiled_unit(built, "game\\built.o"), unit)
+        self.assertEqual(signatures.compiled_unit(built, "built.o"), "target.cpp")
+        elf, symbols, at = self.module("target", COMPILED, hide=True, **RELAXING)
+        found = {p.address: p for p in signatures.propose(Program.from_symbols(Switch(), elf, symbols), [donor])}
+        self.assertEqual((found[at["_Z6callerPii"]].name, found[at["_Z6callerPii"]].unit), ("_Z6callerPii", unit))
 
     def test_cache_keeps_the_layout(self):
         elf, symbols, _ = self.module("donor", SWITCH_DONOR, hide=False)
