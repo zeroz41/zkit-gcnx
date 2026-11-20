@@ -574,6 +574,85 @@ class SwitchBuildTests(unittest.TestCase):
             self.assertIn("first_difference", alone)
             self.assertFalse(any(u["metadata"].get("complete") for u in json.loads(report.read_text())["units"]))
 
+    def test_a_relaxing_link_matches_and_links(self):
+        """A module whose linker relaxed address pairs (lld without --no-relax): the GOT load of a symbol the
+        module defines became adrp+add, and every adrp+add of a near symbol became nop+adr; the GOT load of an
+        import stayed. With `build.relax` the compiled units equal their target objects function by function,
+        the report agrees, and the link rebuilds the module byte for byte; without it the diff sees the
+        relaxed loads as differences."""
+        from zkit import nxlink
+        from zkit.elf import Elf
+        # scaled's GOT load of g_counter is parted by the scheduler, so lld keeps .text's every GOT load of it; in
+        # a section of its own an adjacent pair is relaxed twice, to adrp + add, then to nop + adr
+        a_cpp = A_CPP + ('__attribute__((section(".text.where"))) int *where() { return &g_counter; }\n'
+                         "extern int g_imported;\nint imported() { return g_imported; }\n")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in (("a.cpp", a_cpp), ("b.cpp", B_CPP)):
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, str(root / name), "-o", str(root / name.replace(".cpp", ".o"))],
+                               check=True, capture_output=True)
+            subprocess.run([LLD, "-shared", "--unresolved-symbols=ignore-all", "-o", str(root / "main.elf"),
+                            str(root / "a.o"), str(root / "b.o")], check=True, capture_output=True)
+            result = new.new(root / "main.elf", root / "game", game_id="test")
+            game, manifest = root / "game", Path(result["manifest"])
+            linked = Elf.load(game / "orig/test/main.elf")
+            at = {s.name: s.value for s in linked.symbols if s.name}
+            code = linked.data(linked.section(".text"))
+            words = [int.from_bytes(code[i:i + 4], "little") for i in range(0, len(code), 4)]
+            relaxed = [i for i in range(1, len(words)) if words[i - 1] == 0xD503201F and words[i] & 0x9F000000
+                       == 0x10000000]
+            self.assertEqual(len(relaxed), 3, "lld relaxed where's g_counter, the string and the table")
+            base = linked.section(".text").address
+            for name in ("_Z6scaledi", "_Z4bothi", "_Z8importedv"):   # GOT loads kept: an adrp, its ldr later
+                self.assertTrue(any(words[(at[name] - base) // 4 + i] & 0x9F000000 == 0x90000000 for i in range(6)),
+                                name)
+            rodata = linked.section(".rodata").address
+            (game / "config/test/splits.txt").write_text(
+                f"a.cpp:\n\t.text start:{at['_Z6scaledi']:#x} end:{at['_Z6helperi']:#x}\n"
+                f"\t.rodata.str1.1 start:{rodata:#x} end:{rodata + 13:#x}\n\n"
+                f"b.cpp:\n\t.text start:{at['_Z6helperi']:#x} end:{at['_Z6helperi'] + 36:#x}\n"
+                f"\t.rodata.cst16 start:{at['_ZL5table']:#x} end:{at['_ZL5table'] + 16:#x}\n"
+                f"\t.data start:{at['g_counter']:#x} end:{at['g_counter'] + 4:#x}\n", encoding="utf-8")
+            (game / "src/a.cpp").write_text(a_cpp, encoding="utf-8")
+            (game / "src/b.cpp").write_text(B_CPP, encoding="utf-8")
+            data = json.loads(manifest.read_text())
+            data["targets"]["test"]["build"].update(compiler=CLANG, cflags=[f for f in FLAGS if f != "-c"])
+
+            def diffs(relax: bool) -> dict:
+                data["targets"]["test"]["build"]["relax"] = relax
+                manifest.write_text(json.dumps(data), encoding="utf-8")
+                project = Project.load(manifest)
+                build.build(project, quiet=True)
+                imports = objects.relaxed_imports(project, "test")
+                self.assertEqual(imports, {"g_imported"} if relax else None)
+                return {unit: objects.unit_diff(game / f"build/test/obj/{unit}.o", game / f"build/test/src/{unit}.o",
+                                                imports=imports) for unit in ("a", "b")}
+
+            plain = diffs(False)
+            self.assertLess(plain["a"]["exact"], plain["a"]["total"], "relaxed loads differ without build.relax")
+            for unit, diff in diffs(True).items():
+                self.assertEqual((diff["exact"], diff["compiled_only"]), (diff["total"], []), (unit, diff))
+            self.assertEqual((game / "build/test/obj/imports.txt").read_text().split(), ["g_imported"])
+            report = game / "build/test/report.json"
+            if OBJDIFF:
+                measures = json.loads(report.read_text())["measures"]
+                self.assertEqual(measures["matched_code"], measures["total_code"])
+            units = []
+            for unit in ("a", "b"):
+                functions = [{"name": s.name, "size": str(s.size), "fuzzy_match_percent": 100.0,
+                              "metadata": {"virtual_address": str(at[s.name])}}
+                             for s in Elf.load(game / f"build/test/src/{unit}.o").symbols
+                             if s.kind == "func" and s.name in at]
+                size = sum(int(f["size"]) for f in functions)
+                units.append({"name": unit, "functions": functions, "sections": [{"name": ".data", "size": "4"}],
+                              "measures": {"total_code": str(size), "matched_code": str(size), "total_data": "4"},
+                              "metadata": {"source_path": f"src/{unit}.cpp"}})
+            report.write_text(json.dumps({"units": units, "measures": {}}), encoding="utf-8")
+            done = nxlink.link(Project.load(manifest), "test", game / "build/test/link")
+            self.assertTrue(done["identical"], done)
+            self.assertEqual(done["linked_units"], ["a.cpp", "b.cpp"], done["not_linked"])
+
     def test_a_renamed_symbol_reaches_the_target_objects(self):
         """The target objects take their function names from symbols.txt, also once a report exists: the index
         reads the report, which the objects themselves wrote, so a name the file changes must come from the file."""

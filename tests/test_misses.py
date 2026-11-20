@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_build import A_CPP, B_CPP, NINJA  # noqa: E402
+from test_build import A_CPP, B_CPP, NINJA, OBJDIFF  # noqa: E402
 from test_delink import CLANG, FLAGS, LLD  # noqa: E402
 from zkit import build, candidate, misses, new  # noqa: E402
 from zkit.project import Project  # noqa: E402
@@ -47,7 +47,8 @@ class MissesTests(unittest.TestCase):
         data = json.loads(manifest.read_text())
         data["targets"]["test"]["build"].update(compiler=CLANG, cflags=[f for f in FLAGS if f != "-c"])
         manifest.write_text(json.dumps(data), encoding="utf-8")
-        self.assertTrue(build.build(Project.load(manifest), quiet=True)["ok"])
+        # with objdiff-cli the build links too, and the tree's wrong scaled keeps the link from being identical
+        self.assertEqual(build.build(Project.load(manifest), quiet=True)["ok"], not OBJDIFF)
         # objdiff's report of the tree (written here: the test needs no objdiff): scaled differs, the rest match
         functions = [{"name": name, "size": "4", "fuzzy_match_percent": 50.0 if name == "_Z6scaledi" else 100.0,
                       "metadata": {"virtual_address": str(at[name])}}

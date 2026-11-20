@@ -60,6 +60,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
 # What `zkit new` writes for a game's own choices, to confirm or change with its first matched functions: a release
 # build, without exceptions or RTTI.
 STARTING_CFLAGS = {"gamecube": [], "switch": ["-O3", "-fno-exceptions", "-fno-rtti", "-std=gnu++17"]}
+IMPORTS = "imports.txt"   # beside the target objects of a `relax` target: the module's imported names, one a line
 UNIT_KEYS = {"compiler", "cflags", "extra_cflags", "includes", "compiler_version", "source_root", "clang_plugins",
              "compiler_download"}
 PLUGINS = Path(__file__).parent / "clang_plugins"   # zkit's clang pass plugins (build.clang_plugins)
@@ -490,8 +491,10 @@ def configure(project: Project, repository: str | None = None, only: str | None 
             notes.append("no `sha1` pinned for the original: the build cannot tell a wrong revision")
         if objects:
             symbols = [_relative(project.file(repository, target["symbols"]), root)] if target.get("symbols") else []
+            # a target whose linker relaxed address pairs: the delink also lists the module's imports (`views`)
+            imports = [f"{paths.obj}/{IMPORTS}"] if config.get("relax") else []
             ninja.build(objects[:1], "delink", [_relative(splits, root), _relative(original, root), *symbols, stamp],
-                        order=checked, implicit_outputs=objects[1:],
+                        order=checked, implicit_outputs=objects[1:] + imports,
                         variables={"target": name, "splits": _command([_relative(splits, root)]),
                                    "outdir": _command([paths.obj])})
         ninja.lines.append("")
@@ -534,7 +537,8 @@ def configure(project: Project, repository: str | None = None, only: str | None 
             if config["platform"] == "switch" and compiled:
                 # The report compares each compiled object as the link keeps it (`views`): objdiff's project file
                 # for it beside the views, objdiff.json itself left on the compiled objects for every other reader.
-                measured, compared = root / paths.view / "objdiff.json", _views(ninja, paths, sorted(sources))
+                measured = root / paths.view / "objdiff.json"
+                compared = _views(ninja, paths, sorted(sources), bool(config.get("relax")))
                 _write(measured, write_objdiff(measured, root, units, sources, paths, target.get("module") or name,
                                                target.get("categories"), base=paths.view))
             ninja.build([report], "report", implicit=[_relative(measured, root), *objects, *compared,
@@ -758,23 +762,28 @@ def categories_of(unit: str, categories: list[dict[str, Any]]) -> list[str]:
             if any(fnmatch.fnmatchcase(unit, p + "*" if p.endswith("/") else p) for p in c.get("paths", []))]
 
 
-def _views(ninja: Ninja, paths: Layout, units: list[str]) -> list[str]:
-    """One edge writes each compiled unit's view (`write_views`) from its compiled and target objects."""
+def _views(ninja: Ninja, paths: Layout, units: list[str], relax: bool = False) -> list[str]:
+    """One edge writes each compiled unit's view (`write_views`) from its compiled and target objects (and, for a
+    target whose linker relaxed address pairs, the module's imports the delink lists)."""
     views = [f"{paths.view}/{stem(u)}.o" for u in units]
+    imports = [f"{paths.obj}/{IMPORTS}"] if relax else []
     ninja.build(views, "views", [f"{paths.src}/{stem(u)}.o" for u in units],
-                implicit=[f"{paths.obj}/{stem(u)}.o" for u in units], variables={
-                    "list": _command([f"{paths.view}.rsp"]), "folders": _command([paths.src, paths.obj, paths.view])})
+                implicit=[f"{paths.obj}/{stem(u)}.o" for u in units] + imports, variables={
+                    "list": _command([f"{paths.view}.rsp"]),
+                    "folders": _command([paths.src, paths.obj, paths.view, *imports])})
     return views
 
 
-def write_views(rows: list[tuple[Path, Path, Path]]) -> int:
+def write_views(rows: list[tuple[Path, Path, Path]], imports: set[str] | None = None) -> int:
     """Each compiled object as the link keeps it, for the report: COMDAT groups of data whose signature its unit's
     target object does not define are the copy another unit owns (`elf.without_foreign_data`), so a weak inline
     static or template vtable that the link deduplicates is not scored as this unit's data. objdiff has no switch
     for it: it combines a unit's .bss.* / .data.* sections and pairs data by name, else by each symbol's offset
-    and size, so an extra copy shifts or outnumbers the unit's own. Writes a view only when its bytes change;
-    returns how many it wrote."""
-    from .elf import Elf, without_foreign_data
+    and size, so an extra copy shifts or outnumbers the unit's own. With `imports` (a target whose linker relaxed
+    address pairs, `relax`: the module's imported names), each GOT load the linker turned into `adrp` + `add` is
+    written so (`elf.with_got_loads_relaxed`). Writes a view only when its bytes change; returns how many it
+    wrote."""
+    from .elf import Elf, with_got_loads_relaxed, without_foreign_data
     written = 0
     for target, compiled, view in rows:
         raw = compiled.read_bytes()
@@ -782,6 +791,8 @@ def write_views(rows: list[tuple[Path, Path, Path]]) -> int:
             elf = Elf.load(target)
             owned = {s.name for s in elf.symbols if 0 < s.section < 0xFF00 and s.kind not in ("section", "file")}
             raw = without_foreign_data(raw, owned)[0]
+        if imports is not None:
+            raw = with_got_loads_relaxed(raw, imports)[0]
         if view.is_file() and view.read_bytes() == raw:
             continue
         view.parent.mkdir(parents=True, exist_ok=True)
@@ -1034,16 +1045,17 @@ def main(argv: list[str]) -> int:
         return 0
     if len(argv) == 4 and argv[0] == "sha1":
         return check_sha1(Path(argv[1]), argv[2], Path(argv[3]))
-    if len(argv) == 5 and argv[0] == "views":   # LIST: the compiled objects under SRC, one per line
-        src, obj, view = (Path(a) for a in argv[2:])
+    if len(argv) in (5, 6) and argv[0] == "views":   # LIST: the compiled objects under SRC, one per line;
+        src, obj, view = (Path(a) for a in argv[2:5])    # IMPORTS: the module's imported names (`relax`)
         compiled = [Path(line) for line in Path(argv[1]).read_text(encoding="utf-8").splitlines() if line.strip()]
-        write_views([(obj / c.relative_to(src), c, view / c.relative_to(src)) for c in compiled])
+        imports = set(Path(argv[5]).read_text(encoding="utf-8").split()) if len(argv) == 6 else None
+        write_views([(obj / c.relative_to(src), c, view / c.relative_to(src)) for c in compiled], imports)
         return 0
     if len(argv) == 2 and argv[0] == "rooted":  # MANIFEST: configure's list of `stage` copies
         write_staged(json.loads(Path(argv[1]).read_text(encoding="utf-8")))
         return 0
-    print("usage: python -m zkit.build depfile FILE OBJECT | sha1 FILE EXPECTED STAMP | views LIST SRC OBJ VIEW | "
-          "rooted MANIFEST", file=sys.stderr)
+    print("usage: python -m zkit.build depfile FILE OBJECT | sha1 FILE EXPECTED STAMP | "
+          "views LIST SRC OBJ VIEW [IMPORTS] | rooted MANIFEST", file=sys.stderr)
     return 2
 
 

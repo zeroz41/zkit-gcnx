@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import aarch64
 from .elf import SHT_NOBITS, Elf, Section, Symbol
 from .project import Project
 
@@ -45,6 +46,7 @@ LD_PREL_LO19, ADR_PREL_LO21, ADR_PREL_PG_HI21, ADR_PREL_PG_HI21_NC, ADD_ABS_LO12
 LDST8, TSTBR14, CONDBR19, JUMP26, CALL26 = 278, 279, 280, 282, 283
 LDST16, LDST32, LDST64, LDST128 = 284, 285, 286, 299
 ADR_GOT_PAGE, LD64_GOT_LO12_NC = 311, 312
+RELAXED = {(ADR_GOT_PAGE, LD64_GOT_LO12_NC), (ADR_PREL_PG_HI21, ADD_ABS_LO12_NC)}  # pairs lld may relax
 PAGE = {ADR_PREL_PG_HI21, ADR_PREL_PG_HI21_NC, ADR_GOT_PAGE}
 LO12 = {ADD_ABS_LO12_NC: 0, LDST8: 0, LDST16: 1, LDST32: 2, LDST64: 3, LDST128: 4, LD64_GOT_LO12_NC: 3}
 GOT = {ADR_GOT_PAGE, LD64_GOT_LO12_NC}
@@ -205,6 +207,8 @@ class Linker:
         self.imported: dict[str, list[int]] = collections.defaultdict(list)    # import -> slots
         for slot, name in self.module.imports.items():
             self.imported[name].append(slot)
+        from .build import settings
+        self.relax = bool((settings(self.config) or {}).get("relax"))   # the original's linker relaxed pairs
 
     # reading the original
 
@@ -539,32 +543,42 @@ def _covers(linker: Linker, span: tuple[int, int], name: str) -> bool:
 
 
 def _relocate(linker: Linker, obj: _Object, item: Placed, placed: dict, result: UnitLink) -> list:
-    """Resolve and apply the relocations of one placed section; returns sections it newly placed."""
+    """Resolve and apply the relocations of one placed section; returns sections it newly placed. A target whose
+    linker relaxed address pairs (`relax`) gets lld's relaxations of the section's code (`aarch64.relaxed_pairs`;
+    its relocations in offset order, the order an assembler lists them in)."""
     elf, section = obj.elf, item.section
     if section.type == SHT_NOBITS:
         return []
     relocations = elf.relocations(section)
-    groups = collections.defaultdict(list)    # (symbol index, addend) -> original hints of its sites
-    for r in relocations:
+    relaxing = linker.relax and bool(section.flags & SHF_EXECINSTR)
+    hints, direct = _hints(linker, item, relocations, relaxing)
+    groups = collections.defaultdict(list)    # (symbol index, addend) -> what the original's code reaches it at
+    for index, r in enumerate(relocations):     # (a GOT load's site reaches the slot, not the symbol)
+        if (r.type in PAGE or r.type in LO12 or r.type in BRANCH) and hints[index] is not None \
+                and (r.type not in GOT or index in direct):
+            groups[(r.symbol, r.addend)].append(hints[index])
+    new, values = [], {}
+    for index, r in enumerate(relocations):
         pc = item.address + r.offset
-        if r.type in PAGE or r.type in LO12 or r.type in BRANCH:
-            hint = original_reaches(linker.word(pc), r.type, pc)
-            if hint is not None:
-                groups[(r.symbol, r.addend)].append(hint)
-    new = []
-    for r in relocations:
-        pc = item.address + r.offset
-        symbol = elf.symbols[r.symbol]
-        if r.type == ABS64:
-            pointee = linker.module.pointers.get(pc)
-            hint = ("address", pointee) if pointee is not None else None
-        else:
-            hint = original_reaches(linker.word(pc), r.type, pc) if r.type not in PC_RELATIVE else None
         try:
-            value, newly = _value(linker, obj, symbol, r, pc, hint, groups[(r.symbol, r.addend)], placed, result)
+            value, newly = _value(linker, obj, elf.symbols[r.symbol], r, pc, hints[index],
+                                  groups[(r.symbol, r.addend)], placed, result, index in direct)
             new += newly
+            values[index] = value
+        except ValueError as error:
+            result.problems.append(f"{_where(obj, item, r.offset)}: {error}")
+            item.resolved = False
+    pairs = _relaxations(linker, elf, item, relocations, values) if relaxing else {}
+    for index, form in pairs.items():
+        _relax(item, relocations[index], relocations[index + 1], values[index], form)
+    paired = {i for index in pairs for i in (index, index + 1)}
+    for index, r in enumerate(relocations):
+        if index in paired or index not in values:
+            continue
+        symbol, value = elf.symbols[r.symbol], values[index]
+        try:
             if r.type in GOT:
-                slot = _got_slot(linker, symbol, value, hint)
+                slot = _got_slot(linker, symbol, value, hints[index])
                 if slot is None:
                     raise ValueError(f"no GOT slot holding {_label(linker, symbol, value)} where the original "
                                      "loads one")
@@ -576,10 +590,72 @@ def _relocate(linker: Linker, obj: _Object, item: Placed, placed: dict, result: 
     return new
 
 
+def _hints(linker: Linker, item: Placed, relocations: list, relaxing: bool) -> tuple[list, set[int]]:
+    """What the original says each relocation's site reaches, and which GOT relocations' sites reach the symbol
+    itself, not its slot: on a relaxing target, the pairs its linker relaxed (`nop` + `adr s`, and a GOT load
+    made `adrp s` + `add`) reach s with both instructions."""
+    hints: list = []
+    for r in relocations:
+        pc = item.address + r.offset
+        if r.type == ABS64:
+            pointee = linker.module.pointers.get(pc)
+            hints.append(("address", pointee) if pointee is not None else None)
+        else:
+            hints.append(original_reaches(linker.word(pc), r.type, pc) if r.type not in PC_RELATIVE else None)
+    direct: set[int] = set()
+    for index in range(len(relocations) - 1) if relaxing else ():
+        first, second = relocations[index], relocations[index + 1]
+        if second.offset != first.offset + 4 or (first.type, second.type) not in RELAXED:
+            continue
+        pc = item.address + first.offset
+        adrp, low = linker.word(pc), linker.word(pc + 4)
+        if adrp == aarch64.NOP and low & 0x9F000000 == aarch64.ADR:
+            reached = pc + 4 + _signed(((low >> 5 & 0x7FFFF) << 2) | (low >> 29 & 3), 21)
+            hints[index] = hints[index + 1] = ("address", reached)
+        elif first.type == ADR_GOT_PAGE and aarch64.relaxable_add(adrp, low):
+            hints[index], hints[index + 1] = ("page", page_of(adrp, pc)), ("low", lo12_of(low, ADD_ABS_LO12_NC))
+        else:
+            continue
+        direct |= {index, index + 1}
+    return hints, direct
+
+
+def _relaxations(linker: Linker, elf: Elf, item: Placed, relocations: list, values: dict[int, int]) -> dict:
+    """lld's relaxed pairs of a placed code section, its relocations resolved to `values` (-1: an import)."""
+    def word(offset: int) -> int:
+        return struct.unpack_from("<I", item.data, offset)[0]
+
+    def binds_locally(index: int) -> bool:
+        symbol = elf.symbols[relocations[index].symbol]
+        if index not in values or index + 1 not in values or symbol.section == 0xFFF1 or symbol.kind == "10":
+            return False                  # absolute (position-independent code keeps its GOT load) or an ifunc
+        if symbol.bind == "local":
+            return True
+        return values[index] != -1 and symbol.name not in linker.imported       # an import is preemptible
+
+    def near(index: int) -> bool:
+        return index in values and aarch64.adr_reaches(values[index], item.address + relocations[index].offset)
+    return aarch64.relaxed_pairs(relocations, word, binds_locally, near)
+
+
+def _relax(item: Placed, first, second, value: int, form: str) -> None:
+    """Write a pair as lld relaxes it: `adrp xN, s` + `add xN, xN, :lo12:s`, or `nop` + `adr xN, s`."""
+    register = struct.unpack_from("<I", item.data, first.offset)[0] & 31
+    pc = item.address + second.offset
+    if form == "adr":
+        words = (aarch64.NOP, patch(aarch64.ADR | register, ADR_PREL_LO21, value, pc))
+    else:
+        words = (patch(0x90000000 | register, ADR_PREL_PG_HI21, value, pc - 4),
+                 patch(0x91000000 | register << 5 | register, ADD_ABS_LO12_NC, value, pc))
+    struct.pack_into("<II", item.data, first.offset, *words)
+
+
 def _value(linker: Linker, obj: _Object, symbol: Symbol, r, pc: int, hint, hints: list, placed: dict,
-           result: UnitLink):
+           result: UnitLink, direct: bool = False):
     """S + A for a relocation (for a GOT relocation, the address the slot must hold, or -1 for an import's), and
-    the sections it placed."""
+    the sections it placed. `direct`: a GOT relocation whose original site reaches the symbol, not its slot (a
+    relaxed pair), so the original's references place it as they do any other."""
+    got = r.type in GOT and not direct
     elf = obj.elf
     if 0 < symbol.section < 0xFF00:
         target = elf.sections[symbol.section]
@@ -589,7 +665,7 @@ def _value(linker: Linker, obj: _Object, symbol: Symbol, r, pc: int, hint, hints
             return placed[key].address + offset, []
         if target.flags & SHF_MERGE:
             piece = _piece(elf, target, offset)
-            hints = hints if r.type not in GOT else []
+            hints = hints if not got else []
             if r.type == ABS64:
                 hints = [("address", linker.module.pointers[pc])] if pc in linker.module.pointers else []
             address = linker.literal(piece, hints)
@@ -604,7 +680,7 @@ def _value(linker: Linker, obj: _Object, symbol: Symbol, r, pc: int, hint, hints
         if symbol.section in obj.discarded:
             raise ValueError(f"{symbol.name or target.name} is in {obj.discarded[symbol.section]}'s group, which "
                              "the link kept from another unit, and the symbols do not name it")
-        if _placeable(target) and obj.whole and r.type not in GOT:
+        if _placeable(target) and obj.whole and not got:
             # a section no name places, reached from placed code: where the original's references reach
             if r.type == ABS64 and hint is not None:
                 hints = [hint]            # a table slot: the word the module's loader writes there

@@ -166,5 +166,63 @@ class ObjectCodeTests(unittest.TestCase):
                                  8: aarch64.LD64_GOT_LO12_NC})
 
 
+class RelaxerTests(unittest.TestCase):
+    """lld's AArch64Relaxer (LLVM 23), rule for rule, on one input section's relocations."""
+    GOT, LD64 = aarch64.ADR_GOT_PAGE, aarch64.LD64_GOT_LO12_NC
+    PAGE, ADD = aarch64.ADR_PREL_PG_HI21, aarch64.ADD_ABS_LO12_NC
+    WORDS = {0x00: 0x90000008, 0x04: 0xF9400108,                        # adrp x8 + ldr x8, [x8]: s1
+             0x10: 0x90000009, 0x14: 0xD503201F, 0x18: 0xF9400129,      # s2's load, parted by a nop
+             0x20: 0x90000009, 0x24: 0xF9400129,                        # s2 again, adjacent
+             0x30: 0x9000000C, 0x34: 0xF940018C,                        # s3, an import
+             0x40: 0x9000000A, 0x44: 0x9100014A,                        # adrp x10 + add x10, x10: s4
+             0x50: 0x9000000B, 0x54: 0x9100216B}                        # s5 + 8
+
+    def relocations(self, order):
+        from zkit.elf import Relocation
+        table = {0x00: (self.GOT, 1, 0), 0x04: (self.LD64, 1, 0), 0x10: (self.GOT, 2, 0), 0x18: (self.LD64, 2, 0),
+                 0x20: (self.GOT, 2, 0), 0x24: (self.LD64, 2, 0), 0x30: (self.GOT, 3, 0), 0x34: (self.LD64, 3, 0),
+                 0x40: (self.PAGE, 4, 0), 0x44: (self.ADD, 4, 0), 0x50: (self.PAGE, 5, 8), 0x54: (self.ADD, 5, 8)}
+        return [Relocation(offset, *table[offset]) for offset in order]
+
+    def pairs(self, relocations, near=None):
+        return {relocations[i].offset: form for i, form in aarch64.relaxed_pairs(
+            relocations, self.WORDS.__getitem__, lambda i: relocations[i].symbol != 3, near).items()}
+
+    def test_a_symbol_s_got_loads_in_a_section_relax_all_or_none(self):
+        """s1's adjacent GOT load becomes adrp + add, and nop + adr once its target is near; s2's adjacent load
+        stays, as its other load in the section is parted (before it or after it); the import's load stays; an
+        adrp + add with an addend is never relaxed."""
+        order = sorted(self.WORDS.keys() - {0x14})
+        self.assertEqual(self.pairs(self.relocations(order)), {0x00: "add"})
+        self.assertEqual(self.pairs(self.relocations(order), lambda i: True), {0x00: "adr", 0x40: "adr"})
+        self.assertEqual(self.pairs(self.relocations(order), lambda i: False), {0x00: "add"})
+        swapped = [0x00, 0x04, 0x20, 0x24, 0x10, 0x18, 0x30, 0x34]
+        self.assertEqual(self.pairs(self.relocations(swapped)), {0x00: "add"})
+        self.assertEqual(self.pairs(self.relocations([0x20, 0x24])), {0x20: "add"})   # alone in its section
+
+    def test_a_lone_load_or_a_narrow_load_keeps_the_symbol_s_got_loads(self):
+        """lld reads bit 31 of the load (its "sf" check): a byte load fails it."""
+        from zkit.elf import Relocation
+        alone = self.relocations([0x00, 0x04]) + [Relocation(0x60, self.LD64, 1, 0)]
+        self.assertEqual(self.pairs(alone), {})
+        narrow = dict(self.WORDS)
+        narrow[0x04] = 0x39400108                                       # ldrb w8, [x8]
+        relocations = self.relocations([0x00, 0x04])
+        self.assertEqual(aarch64.relaxed_pairs(relocations, narrow.__getitem__, lambda i: True), {})
+
+    def test_a_nop_and_adr_out_of_the_function_reads_as_the_pair_it_was(self):
+        """On a relaxing target `nop` + `adr x3, s` with s outside the function is the `adrp` + `add` lld made it
+        from, as cleared; an adr into the function (a jump table's base) stays an adr, as does every adr when
+        the target's linker did not relax."""
+        nop = aarch64.NOP
+        words = [nop, 0x10000803, nop, 0x10000024, 0xD65F03C0]        # adr x3, +0x100; adr x4, +4 (the ret)
+        found, cleared = aarch64.code_relocations(words, 0x1000, {}, relaxed=True)
+        self.assertEqual([(r.offset, r.kind, r.target) for r in found], [
+            (0x1000, self.PAGE, 0x1104), (0x1004, self.ADD, 0x1104), (0x100C, aarch64.ADR_PREL_LO21, 0x1010)])
+        self.assertEqual((cleared[0x1000], cleared[0x1004]), (0x90000003, 0x91000063))
+        found, _ = aarch64.code_relocations(words, 0x1000, {})
+        self.assertEqual([r.kind for r in found], [aarch64.ADR_PREL_LO21, aarch64.ADR_PREL_LO21])
+
+
 if __name__ == "__main__":
     unittest.main()

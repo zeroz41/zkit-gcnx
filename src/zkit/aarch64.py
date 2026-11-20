@@ -435,6 +435,89 @@ def unrelaxed(words: list[int], kinds: dict[int, int]) -> list[int]:
     return out
 
 
+# What lld's relaxations (its AArch64Relaxer, as of LLVM 23; `--no-relax` turns them off) make of an input
+# section's address pairs, rule for rule. lld walks the section's relocations in their order (an assembler's:
+# by offset) and looks at each one with the next:
+# - a GOT load `adrp xN, :got:s` + `ldr xN, [xN, :got_lo12:s]` (ADR_GOT_PAGE, then LD64_GOT_LO12_NC) becomes
+#   `adrp xN, s` + `add xN, xN, :lo12:s` when the pair is a candidate: the relocations patch adjacent
+#   instructions, name one symbol with addends 0, and that symbol binds in the module (defined there, not
+#   preemptible: every symbol a position-independent executable defines; never an import, an absolute symbol or
+#   an ifunc), the load any 64-bit load or store of the unsigned-offset encoding with the adrp's register as both
+#   its own registers, and s within 4 GiB of the adrp's page (always, in a module under 4 GiB). It is all or
+#   nothing per symbol and section: one GOT relocation of s that is not part of a candidate pair (a pair the
+#   scheduler parted, a page shared by two loads) keeps every GOT load of s in that section;
+# - an `adrp xN, s` + `add xN, xN, :lo12:s` (ADR_PREL_PG_HI21 + ADD_ABS_LO12_NC, adjacent, one symbol, addends
+#   0, one register throughout), and the pair the first rule made, becomes `nop` + `adr xN, s` when s is within a
+#   MiB of the add (adr reaches [-1 MiB, 1 MiB)).
+# The GOT slot stays in the GOT either way.
+ADR = 0x10000000
+
+
+def relaxable_got(adrp: int, load: int) -> bool:
+    """The instruction half of lld's GOT-load rule: an adrp, then a 64-bit unsigned-offset load or store whose
+    two registers are the adrp's."""
+    register = adrp & 31
+    return adrp & 0x9F000000 == 0x90000000 and load & 0x3B000000 == 0x39000000 and bool(load >> 31) \
+        and load & 31 == register == load >> 5 & 31
+
+
+def relaxable_add(adrp: int, add: int) -> bool:
+    """The instruction half of lld's adrp + add rule: an adrp, then a 64-bit add (immediate) of its register to
+    itself."""
+    register = adrp & 31
+    return adrp & 0x9F000000 == 0x90000000 and add & 0xFFC00000 == 0x91000000 \
+        and add & 31 == register == add >> 5 & 31
+
+
+def adr_reaches(target: int, pc: int) -> bool:
+    return -(1 << 20) <= target - pc < (1 << 20)
+
+
+def relaxed_pairs(relocations: list, word, binds_locally, near=None) -> dict[int, str]:
+    """The pairs lld relaxes in one input section, by the index of each pair's first relocation: "add" for a GOT
+    load it makes `adrp` + `add`, "adr" for a pair it makes `nop` + `adr`. `relocations` in the section's own
+    order (each with offset, type, symbol, addend; one symbol index per symbol), `word(offset)` the instruction a
+    relocation patches as the object holds it; by a relocation's index, `binds_locally(i)` whether its symbol
+    binds in the module and `near(i)` whether its target (S) is within adr's reach of the instruction it patches;
+    without `near` (addresses unknown) no pair becomes `nop` + `adr`."""
+    count = len(relocations)
+
+    def got_pair(index: int) -> bool:
+        return index + 1 < count and relocations[index].type == ADR_GOT_PAGE \
+            and relocations[index + 1].type == LD64_GOT_LO12_NC
+
+    def candidate(index: int) -> bool:
+        first, second = relocations[index], relocations[index + 1]
+        return second.offset == first.offset + 4 and second.symbol == first.symbol \
+            and first.addend == second.addend == 0 and relaxable_got(word(first.offset), word(second.offset)) \
+            and binds_locally(index)
+    unsafe, index = set(), 0
+    while index < count:                       # the symbols whose GOT loads this section keeps, every one
+        r = relocations[index]
+        if got_pair(index) and r.symbol not in unsafe and candidate(index):
+            index += 2
+            continue
+        if r.type in (ADR_GOT_PAGE, LD64_GOT_LO12_NC):
+            unsafe.add(r.symbol)
+        index += 1
+    out: dict[int, str] = {}
+    index = 0
+    while index + 1 < count:
+        first, second = relocations[index], relocations[index + 1]
+        if got_pair(index) and first.symbol not in unsafe:
+            out[index] = "adr" if near is not None and near(index + 1) else "add"
+            index += 2
+            continue
+        if first.type == ADR_PREL_PG_HI21 and second.type == ADD_ABS_LO12_NC and second.offset == first.offset + 4 \
+                and second.symbol == first.symbol and first.addend == second.addend == 0 \
+                and relaxable_add(word(first.offset), word(second.offset)) and near is not None and near(index + 1):
+            out[index] = "adr"
+            index += 2
+            continue
+        index += 1
+    return out
+
+
 @dataclass
 class Reloc:
     offset: int        # original address of the patched instruction or word
@@ -445,8 +528,12 @@ class Reloc:
 
 def code_relocations(words: list[int], start: int, pointers: dict[int, int],
                      resolved=lambda target: False, got: tuple[int, int] | None = None,
-                     imports: Collection[int] = ()) -> tuple[list[Reloc], dict[int, int]]:
+                     imports: Collection[int] = (), relaxed: bool = False) -> tuple[list[Reloc], dict[int, int]]:
     """Relocations of a function's instructions, and the cleared instruction words by address.
+
+    `relaxed`: the module's linker relaxed address pairs (lld's rules, `relaxed_pairs`). A `nop` + `adr xN, s`
+    whose s is not inside the function (where the adr of a jump table points) is what it made of `adrp xN, s` +
+    `add xN, xN, :lo12:s` for a near s, and is read as that pair, as the compiler wrote it.
 
     A 64-bit load through an adrp page is a GOT load (to the pointee) when it reads a relocated pointer inside
     `got`, the module's `.got` (start, end); any other load, of a pointer table's element in `.data` too, is a
@@ -485,8 +572,12 @@ def code_relocations(words: list[int], start: int, pointers: dict[int, int],
             continue
         if word & 0x9F000000 == 0x10000000:                                   # adr
             imm = _sign(((word >> 5 & 0x7FFFF) << 2) | (word >> 29 & 3), 21)
-            out.append(Reloc(pc, ADR_PREL_LO21, pc + imm))
-            cleared[pc] = word & ~((3 << 29) | (0x7FFFF << 5))
+            if relaxed and index and words[index - 1] == NOP and not start < pc + imm < end:
+                out += [Reloc(pc - 4, ADR_PREL_PG_HI21, pc + imm), Reloc(pc, ADD_ABS_LO12_NC, pc + imm)]
+                cleared[pc - 4], cleared[pc] = 0x90000000 | rd, 0x91000000 | rd << 5 | rd
+            else:
+                out.append(Reloc(pc, ADR_PREL_LO21, pc + imm))
+                cleared[pc] = word & ~((3 << 29) | (0x7FFFF << 5))
             pages.pop(rd, None)
             continue
         if word & 0x3B000000 == 0x18000000:                                   # ldr (literal)

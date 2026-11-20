@@ -189,7 +189,8 @@ def compare(project: Project, target: str, unit: dict, name: str, text: str, kee
         names = {s.name for s in Elf.load(built).symbols if s.kind == "func"}
         base = name if name in names else placeholder_partner(name, names)
         diff = objects.function_diff(root / unit["target_path"], built, name, base_name=base,
-                                     labels=objects.label_reader(project, target))
+                                     labels=objects.label_reader(project, target),
+                                     imports=objects.relaxed_imports(project, target))
         out.update(compiled=True, **{k: v for k, v in diff.items() if k not in ("target", "base")})
         if keep:
             keep.parent.mkdir(parents=True, exist_ok=True)
@@ -240,6 +241,7 @@ def check_unit(project: Project, target: str, query: str, candidate: Path,
     text = candidate.read_text(encoding="utf-8", errors="replace")
     out: dict[str, Any] = {"unit": unit["name"], "candidate": str(candidate)}
     labels = objects.label_reader(project, target)
+    imports = objects.relaxed_imports(project, target)
     with tempfile.TemporaryDirectory(prefix="zkit-try-unit-", dir=_scratch(project, target)) as work:
         built, command, message = _compile(project, target, unit, text, Path(work), includes)
         out["command"] = command
@@ -257,7 +259,7 @@ def check_unit(project: Project, target: str, query: str, candidate: Path,
                 rows.append({"function": symbol.name, "exact": False, "missing": True})
                 continue
             diff = objects.function_diff(root / unit["target_path"], built, symbol.name, base_name=base,
-                                         labels=labels)
+                                         labels=labels, imports=imports)
             rows.append({"function": symbol.name, "exact": bool(diff.get("exact")),
                          "differences": diff.get("differences"), "reloc_only": diff.get("reloc_only")})
         out["functions"] = rows
@@ -279,14 +281,14 @@ def check_unit(project: Project, target: str, query: str, candidate: Path,
                     row["exact"] = row["proven_by_link"] = True
             out["exact"] = sum(r["exact"] for r in rows)
         out["done"] = out["exact"] == len(rows) and not out["debt"] and out.get("link", {}).get("linked", True)
-    out["tree"] = _tree_delta(root, unit, rows, labels)
+    out["tree"] = _tree_delta(root, unit, rows, labels, imports)
     if keep_misses:
         from . import misses
         misses.record_unit_quietly(project, target, unit["name"], text, includes, rows, "unit", str(candidate))
     return out
 
 
-def _tree_delta(root: Path, unit: dict, rows: list[dict], labels) -> dict[str, Any] | None:
+def _tree_delta(root: Path, unit: dict, rows: list[dict], labels, imports=None) -> dict[str, Any] | None:
     """The candidate's functions against the tree's last build of the unit (its objdiff base object): which became
     identical and which no longer are. None when the tree has not built the unit."""
     from . import objects
@@ -301,7 +303,8 @@ def _tree_delta(root: Path, unit: dict, rows: list[dict], labels) -> dict[str, A
         name = row["function"]
         partner = name if name in names else structor_partner(name)
         if partner in names:
-            diff = objects.function_diff(root / unit["target_path"], base, name, base_name=partner, labels=labels)
+            diff = objects.function_diff(root / unit["target_path"], base, name, base_name=partner, labels=labels,
+                                         imports=imports)
             before = {"exact": bool(diff.get("exact")), "differences": diff.get("differences"),
                       "reloc_only": diff.get("reloc_only")}
         else:

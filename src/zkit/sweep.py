@@ -1470,22 +1470,23 @@ def _aligned(a: list[int], b: list[int]) -> tuple[int, frozenset]:
     return len(a) + len(b) - 2 * len(paired), frozenset(range(len(a))) - paired
 
 
-def score(original_path: Path, built_path: Path, name: str, labels=None, built_name: str | None = None) -> Score:
+def score(original_path: Path, built_path: Path, name: str, labels=None, built_name: str | None = None,
+          imports: set[str] | None = None) -> Score:
     """The `Score` of `name` compiled (built_path, as `built_name` when it is named differently there) against the
     original's object; relocated words compare by their opcode byte (what they reach is the link's to prove), and
     `objects.function_diff` decides identity."""
     import struct
     from . import objects
     from .elf import Elf
-    diff = objects.function_diff(original_path, built_path, name, built_name, labels=labels, limit=0)
+    diff = objects.function_diff(original_path, built_path, name, built_name, labels=labels, limit=0,
+                                 imports=imports)
     if diff.get("missing"):
         return FAILED
     if diff.get("exact"):
         return Score(True, 0, 0, 0)
     streams = []
     mask = REGISTERS
-    for path, wanted in ((original_path, name), (built_path, built_name or name)):
-        elf = Elf.load(path)
+    for elf, wanted in ((Elf.load(original_path), name), (objects.as_linked(built_path, imports), built_name or name)):
         if elf.endian == ">":
             mask = PPC_REGISTERS
         symbol = objects._find(elf, wanted)
@@ -1670,6 +1671,7 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
     root = project.root(project.target(target)["repository"])
     original = root / unit["target_path"]
     labels = objects.label_reader(project, target)
+    imports = objects.relaxed_imports(project, target)
     built_name = symbol or row["name"]
     if symbol:
         simple = _symbol_simple_name(symbol)
@@ -1707,7 +1709,7 @@ def sweep(project, target: str, query: str, candidate: Path, out: Path | None = 
     def evaluate(source: str) -> Score:
         with tempfile.TemporaryDirectory(dir=work_root) as work:
             built, _, _ = _compile(project, target, unit, source, Path(work), includes)
-            return FAILED if built is None else score(original, built, row["name"], labels, built_name)
+            return FAILED if built is None else score(original, built, row["name"], labels, built_name, imports)
 
     try:
         if not propose(text):

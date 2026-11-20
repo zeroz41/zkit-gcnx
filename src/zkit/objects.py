@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .elf import Elf, Relocation, Section, Symbol
+from .elf import Elf, Relocation, Section, Symbol, with_got_loads_relaxed
 from .project import Project
 
 # Sections that never carry the program: compiler notes, debug info, line tables, address-significance tables.
@@ -377,12 +377,43 @@ def label_reader(project: Project, target: str):
     return read
 
 
+def relaxed_imports(project: Project, target: str) -> set[str] | None:
+    """For a target whose linker relaxed address pairs (`build.relax`): the names the module imports, the only
+    symbols whose GOT loads it kept (`elf.with_got_loads_relaxed`); None for any other target."""
+    from .build import settings
+    from .delink import got_imports
+    from .inspect_dol import _dol
+    if not (settings(project.target(target)) or {}).get("relax"):
+        return None
+    return set(got_imports(_dol(project, target)).values())
+
+
+_RELAXED: dict[tuple, Elf] = {}
+
+
+def as_linked(path: Path, imports: set[str] | None) -> Elf:
+    """A compiled object as the link keeps its code: with `imports` (`relaxed_imports`), its GOT loads relaxed
+    (the last few kept: a unit's diff reads its object once per function)."""
+    if imports is None:
+        return Elf.load(path)
+    stat = path.stat()
+    key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size, frozenset(imports))
+    if key not in _RELAXED:
+        raw, changed = with_got_loads_relaxed(path.read_bytes(), imports)
+        while len(_RELAXED) >= 8:
+            _RELAXED.pop(next(iter(_RELAXED)))
+        _RELAXED[key] = Elf(raw, str(path)) if changed else Elf.load(path)
+    return _RELAXED[key]
+
+
 def function_diff(target_path: Path, base_path: Path, name: str, base_name: str | None = None,
-                  rename: dict[str, str] | None = None, limit: int = 24, labels=None) -> dict[str, Any]:
+                  rename: dict[str, str] | None = None, limit: int = 24, labels=None,
+                  imports: set[str] | None = None) -> dict[str, Any]:
     """Compare one function in the original's object with the compiled one. `labels` (`label_reader`) reads the
-    constants the original's object reaches only by a label another unit defines."""
+    constants the original's object reaches only by a label another unit defines; `imports` (`relaxed_imports`)
+    are a relaxing link's kept GOT loads."""
     rename = rename or {}
-    original, built = Elf.load(target_path), Elf.load(base_path)
+    original, built = Elf.load(target_path), as_linked(base_path, imports)
     a, b = _find(original, name), _find(built, base_name or name)
     out: dict[str, Any] = {"function": name, "target": str(target_path), "base": str(base_path),
                            "machine": original.machine}
@@ -437,7 +468,8 @@ def function_diff(target_path: Path, base_path: Path, name: str, base_name: str 
 GAP = re.compile(r"^gap_\d+_[0-9A-Fa-f]+_\w+$")  # the splitter's name for bytes no function claims
 
 
-def unit_diff(target_path: Path, base_path: Path, rename: dict[str, str] | None = None) -> dict[str, Any]:
+def unit_diff(target_path: Path, base_path: Path, rename: dict[str, str] | None = None,
+              imports: set[str] | None = None) -> dict[str, Any]:
     """Every function of a unit: exact, differing (with the count of differing words), or missing. A gap the
     splitter named (gap_03_80395908_text) that the compiled object lacks is padding, listed apart."""
     original, built = Elf.load(target_path), Elf.load(base_path)
@@ -445,7 +477,7 @@ def unit_diff(target_path: Path, base_path: Path, rename: dict[str, str] | None 
     rows, gaps = [], []
     for name in names:
         try:
-            result = function_diff(target_path, base_path, name, rename=rename, limit=0)
+            result = function_diff(target_path, base_path, name, rename=rename, limit=0, imports=imports)
         except ValueError as error:
             rows.append({"function": name, "error": str(error)})
             continue

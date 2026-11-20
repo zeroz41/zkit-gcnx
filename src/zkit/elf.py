@@ -222,3 +222,47 @@ def without_foreign_data(raw: bytes, owned: set[str]) -> tuple[bytes, list[str]]
             struct.pack_into(e + "II", out, base + 4, 0, 0)
             struct.pack_into(e + "H", out, base + 14, 0)
     return bytes(out), list(dict.fromkeys(discarded.values()))
+
+
+def with_got_loads_relaxed(raw: bytes, imports: set[str]) -> tuple[bytes, int]:
+    """The AArch64 object as a relaxing lld links it into a module that defines every symbol but `imports` (the
+    module's imported names): each GOT load lld turns into `adrp` + `add` (`aarch64.relaxed_pairs`, the rules
+    that need no addresses) written so, its two relocations then ADR_PREL_PG_HI21 + ADD_ABS_LO12_NC to the same
+    symbol, the instructions with cleared fields as an assembler writes them. The `nop` + `adr` a near target
+    then becomes depends on addresses: the original's objects take it back to `adrp` + `add`. Layout, symbols and
+    every other byte are unchanged. Returns the bytes and how many pairs changed (none: the same bytes, 0)."""
+    from . import aarch64
+    elf = Elf(raw)
+    if elf.machine != "aarch64" or elf.bits != 64:
+        return raw, 0
+    e, out, changed = elf.endian, bytearray(raw), 0
+    for rela in elf.sections:
+        if rela.type != SHT_RELA or not 0 < rela.info < len(elf.sections):
+            continue
+        code = elf.sections[rela.info]
+        if not code.flags & SHF_EXECINSTR or code.type == SHT_NOBITS:
+            continue
+        entries = [rela.offset + 24 * i for i in range(rela.size // 24)]
+        relocations = []
+        for at in entries:
+            offset, info, addend = struct.unpack_from(e + "QQq", raw, at)
+            relocations.append(Relocation(offset, info & 0xFFFFFFFF, info >> 32, addend))
+
+        def word(offset: int, code=code) -> int:
+            return struct.unpack_from(e + "I", raw, code.offset + offset)[0]
+
+        def binds_locally(index: int, relocations=relocations) -> bool:
+            r = relocations[index]
+            symbol = elf.symbols[r.symbol] if r.symbol < len(elf.symbols) else None
+            if symbol is None or symbol.section == 0xFFF1 or symbol.kind == "10":
+                return False              # absolute (position-independent code keeps its GOT load) or an ifunc
+            return symbol.bind == "local" or symbol.name not in imports   # an import is preemptible
+        for index in aarch64.relaxed_pairs(relocations, word, binds_locally):
+            first, second = relocations[index], relocations[index + 1]
+            register = word(first.offset) & 31
+            struct.pack_into(e + "I", out, code.offset + first.offset, 0x90000000 | register)
+            struct.pack_into(e + "I", out, code.offset + second.offset, 0x91000000 | register << 5 | register)
+            struct.pack_into(e + "Q", out, entries[index] + 8, first.symbol << 32 | aarch64.ADR_PREL_PG_HI21)
+            struct.pack_into(e + "Q", out, entries[index + 1] + 8, second.symbol << 32 | aarch64.ADD_ABS_LO12_NC)
+            changed += 1
+    return (bytes(out), changed) if changed else (raw, 0)

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import aarch64, ppc
+from .build import IMPORTS, settings
 from .project import Project
 
 
@@ -419,6 +420,7 @@ class Image:
     place: Callable[[str, int], int | None] | None = None   # section-relative splits and symbols (a REL)
     virtual: Callable[[int], int] | None = None             # the address objdiff shows, when not base + address
     imports: dict[int, str] = field(default_factory=dict)   # GOT slot -> the symbol another module defines there
+    relaxed: bool = False    # its linker relaxed address pairs (`build.relax`): `delink` lists the imports too
 
     def original(self, address: int) -> int:
         return self.virtual(address) if self.virtual else self.base + address
@@ -456,6 +458,13 @@ def _local(scope: str | None) -> str | None:
     return "local" if scope == "local" else None
 
 
+def got_imports(module) -> dict[int, str]:
+    """The Switch module's GOT slots the dynamic linker fills with another module's symbol, by slot."""
+    got = module.tables.get(".got")
+    return {slot: name for slot, name in module.imports.items()
+            if got and got[0] <= slot < got[1] and "+" not in name}
+
+
 def _switch(project: Project, target: str, platform) -> Image:
     from .bridge import _symbol_table
     from .index import connect, refresh
@@ -480,18 +489,19 @@ def _switch(project: Project, target: str, platform) -> Image:
     got = module.tables.get(".got")
     # a GOT slot the dynamic linker fills with another module's symbol (SDK or libc data): code loading it names
     # the import, as the compiler's GOT relocation does
-    imports = {slot: name for slot, name in module.imports.items()
-               if got and got[0] <= slot < got[1] and "+" not in name}
+    imports = got_imports(module)
+    relaxed = bool((settings(project.target(target)) or {}).get("relax"))
 
     def code(start: int, size: int, resolved) -> tuple[list, dict[int, int]]:
         found, cleared = aarch64.code_relocations(module.words(start, size), start, module.pointers, resolved,
-                                                 got, imports)
+                                                 got, imports, relaxed)
         return [(r.offset, r.kind, r.target, r.got) for r in found], cleared
 
     def pointers(start: int, end: int) -> list[tuple[int, int]]:
         return [(slot, pointee, "dynamic relocation") for slot, pointee in module.pointers.items()
                 if start <= slot and slot + 8 <= end]
-    return Image(AARCH64, platform.base, module.read, symbols, in_image, code, pointers, text, imports=imports)
+    return Image(AARCH64, platform.base, module.read, symbols, in_image, code, pointers, text, imports=imports,
+                 relaxed=relaxed)
 
 
 def _image(project: Project, target: str) -> Image:
@@ -772,6 +782,10 @@ def delink(project: Project, target: str, splits: Path, out_dir: Path, objdiff: 
         report.append(row)
     if objdiff is not None:
         write_objdiff(objdiff, report, compiled or out_dir.parent / "build")
+    if image.relaxed:   # what the views of compiled objects keep as GOT loads (`build.write_views`)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / IMPORTS).write_text("".join(f"{n}\n" for n in sorted(set(image.imports.values()))),
+                                       encoding="utf-8")
     return {"target": target, "units": report, "out": str(out_dir),
             "unassigned": len(outside),  # referenced addresses no unit's ranges cover: extend the splits
             **({"unassigned_examples": [image.text(a) for a in sorted(outside)[:20]]} if outside else {})}

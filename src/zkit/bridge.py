@@ -2060,7 +2060,8 @@ def compiled(project: Project, query: str, target: str | None = None, limit: int
             raise ValueError(f"Unit {name} has no compiled object in objdiff.json (no source for it yet)")
         if not (root / unit["base_path"]).is_file() or not (root / unit["target_path"]).is_file():
             raise ValueError(f"{unit['base_path']} or {unit['target_path']} is not built yet: build the project first")
-        data = objects.unit_diff(root / unit["target_path"], root / unit["base_path"])
+        data = objects.unit_diff(root / unit["target_path"], root / unit["base_path"],
+                                 imports=objects.relaxed_imports(project, target))
         data["unit"] = name
         return data | _compiled_age(root, unit)
     found = resolve(project, query, target, limit=2)
@@ -2077,7 +2078,8 @@ def compiled(project: Project, query: str, target: str | None = None, limit: int
     if not base_path.is_file():
         raise ValueError(f"{unit['base_path']} is not built yet: build the project first")
     data = objects.function_diff(target_path, base_path, row["name"], limit=limit,
-                                 labels=objects.label_reader(project, target))
+                                 labels=objects.label_reader(project, target),
+                                 imports=objects.relaxed_imports(project, target))
     data.update(unit=row["unit"], address=address_text(row["address"]), report_match=row["match"])
     if data.get("missing"):
         data["message"] = (f"the compiled object defines no function {row['name']}: not written yet, or written "

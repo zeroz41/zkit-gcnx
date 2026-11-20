@@ -159,6 +159,35 @@ class DelinkTests(unittest.TestCase):
         self.assertEqual(measures["matched_data"], measures["total_data"])
 
 
+@unittest.skipUnless(CLANG, "needs clang++")
+class RelaxedObjectTests(unittest.TestCase):
+    def test_a_compiled_object_s_got_loads_read_as_a_relaxing_link_keeps_them(self):
+        """`elf.with_got_loads_relaxed`: the adjacent GOT load of a symbol the module defines is written as
+        `adrp` + `add` with their two relocations, as lld relaxes it; an import's load stays, and so does every
+        other byte. With nothing to relax the bytes come back unchanged."""
+        from zkit import aarch64
+        from zkit.elf import with_got_loads_relaxed
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "w.cpp").write_text("extern int g_local, g_imported;\nint *where() { return &g_local; }\n"
+                                        "int *there() { return &g_imported; }\n", encoding="utf-8")
+            subprocess.run([CLANG, *FLAGS, str(root / "w.cpp"), "-o", str(root / "w.o")], check=True,
+                           capture_output=True)
+            raw = (root / "w.o").read_bytes()
+            relaxed, changed = with_got_loads_relaxed(raw, {"g_imported"})
+            self.assertEqual(changed, 1)
+            before, after = Elf(raw), Elf(relaxed)
+            text = after.section(".text")
+            kinds = [(after.symbols[r.symbol].name, r.type) for r in after.relocations(text)]
+            self.assertEqual(kinds, [("g_local", aarch64.ADR_PREL_PG_HI21), ("g_local", aarch64.ADD_ABS_LO12_NC),
+                                     ("g_imported", aarch64.ADR_GOT_PAGE), ("g_imported", aarch64.LD64_GOT_LO12_NC)])
+            code = after.data(text)
+            self.assertEqual(struct.unpack_from("<II", code, 0), (0x90000000, 0x91000000))   # adrp x0; add x0, x0
+            self.assertEqual(code[8:], before.data(before.section(".text"))[8:])
+            self.assertEqual(len(relaxed), len(raw))
+            self.assertEqual(with_got_loads_relaxed(raw, {"g_local", "g_imported"}), (raw, 0))
+
+
 class NoteTests(unittest.TestCase):
     def test_split_note_places_each_section_at_its_original_address(self):
         import struct
