@@ -357,8 +357,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="--download, but only what building needs: the compilers, wibo and objdiff-cli (not LLVM, "
                         "binutils, m2c or decomp-permuter, which only analysis uses)")
     c = add("extract", help="Switch: write each target's missing original (its `original` file, checked against its "
-                            "`sha1`) out of the game's packages (.nsp, .xci: the game and its updates), decrypted with "
-                            "prod.keys; `zkit build` does this by itself from the original's folder or one above it")
+                            "`sha1`) out of the game's packages (.nsp, .xci: the game and its updates; or .nup), "
+                            "decrypted with prod.keys; `zkit build` does this by itself from the original's folder or one above it")
     c.add_argument("sources", nargs="*", type=Path, help="packages, or folders searched with their subfolders "
                                                          "(default: the original's folder and those above it)")
     c.add_argument("--keys", type=Path, help="prod.keys (default: next to the packages, then ~/.switch and the "

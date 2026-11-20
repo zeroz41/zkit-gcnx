@@ -16,6 +16,7 @@ dependencies = [
   "psutil>=5.9; sys_platform != 'linux'",
   "pycparser>=2.21",  # m2c and decomp-permuter, which `zkit m2c` and `zkit permute` run with zkit's Python
   "toml>=0.10",  # read by decomp-permuter, which `zkit permute` runs with zkit's Python
+  "zstandard>=0.22; python_version < '3.14'",  # .nup packages' files (3.14 has compression.zstd)
 ]
 
 [project.optional-dependencies]

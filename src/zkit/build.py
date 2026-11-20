@@ -595,7 +595,7 @@ def _package_folders(root: Path, target: dict[str, Any], original: Path) -> tupl
 
 
 def _provide_original(root: Path, name: str, target: dict[str, Any], original: Path) -> str:
-    """A Switch original that is missing comes out of the game's packages (.nsp/.xci) where its target keeps them
+    """A Switch original that is missing comes out of the game's packages (.nsp/.xci/.nup) where its target keeps them
     (`_package_folders`), decrypted with prod.keys there or in the user's usual places (`nxpackage`)."""
     from . import nxpackage
     folders, recursive = _package_folders(root, target, original)
@@ -605,7 +605,7 @@ def _provide_original(root: Path, name: str, target: dict[str, Any], original: P
         where = _relative(folders[0] if recursive or len(folders) == 1 else folders[-2], root)
         why = "" if isinstance(error, nxpackage.NoPackages) and "compressed" not in str(error) else f" ({error})"
         raise ValueError(f"Target {name}: the original {target['original']} is missing: put the game's packages "
-                         f"(.nsp or .xci: the game and its update) and prod.keys in {where}/, or run `zkit extract "
+                         f"(.nsp or .xci: the game and its update, and prod.keys; or a .nup) in {where}/, or run `zkit extract "
                          f"<folder>`{why}") from None
     return f"extracted {target['original']} from {Path(done['package']).name}"
 

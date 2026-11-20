@@ -1,6 +1,6 @@
-"""Switch game packages (.nsp, .xci): the files in their program NCAs' partitions (the ExeFS: main, rtld, sdk, ...),
-decrypted with the user's prod.keys, and written where a target's `original` says when their SHA-1 matches. Only the
-headers and those partitions are read, so a multi-gigabyte package costs a few megabytes.
+"""Switch game packages (.nsp, .xci, .nup): the files in their program NCAs' partitions (the ExeFS: main, rtld, sdk,
+...), decrypted with the user's prod.keys (a .nup needs none), and written where a target's `original` says when their
+SHA-1 matches. Only the headers and those partitions are read, so a multi-gigabyte package costs a few megabytes.
 
 Formats, as switchbrew documents them:
 - NSP: a PFS0 ("PFS0", file count, string table size; 0x18-byte entries: data offset, size, name offset) holding
@@ -17,6 +17,14 @@ Formats, as switchbrew documents them:
 - Keys: content with a rights ID uses its ticket's title key (a common ticket: the first 16 bytes of the title key
   block, AES-ECB with titlekek_<rev>); content without one uses key 2 of the key area (AES-ECB with
   key_area_key_<application|ocean|system>_<rev>). <rev> is the key generation less one (0 for 0 and 1).
+- NUP: titles already decrypted, as a file tree (no NCAs, no keys). "NUP\x01" at 0; at 0x8 and 0x10 the table of
+  contents' offset and size, at 0x18 its SHA-256. The table: "TOC\x01", the title count (u32), then the directory
+  count, file count, string table offset (from the table) and size (u64s); from 0x30 a 0x40-byte record per title
+  (its ID first, u64); then 0x18-byte directory records (name offset and length in the string table, first child,
+  child count: u32s); then 0x50-byte file records (name offset and length: u32s; size, data offset, stored size:
+  u64s; at 0x20 the SHA-256 of its bytes; at 0x40 a u32, 1: stored as one zstd frame, 0: stored as is); then the
+  children, u32s: a directory's index, or the directory count plus a file's. The first directories are the
+  titles' roots, in title order, holding exefs/ (the ExeFS, as files) and romfs/.
 """
 
 from __future__ import annotations
@@ -28,10 +36,11 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-PACKAGE_SUFFIXES = (".nsp", ".xci")
+PACKAGE_SUFFIXES = (".nsp", ".xci", ".nup")
 COMPRESSED_SUFFIXES = (".nsz", ".xcz")
 KEY_FILE = "prod.keys"
 CHUNK = 4 << 20
+NUP, NUP_TOC = b"NUP\x01", b"TOC\x01"
 PROGRAM, PARTITION_FS, SHA256_BLOCKS = 0, 1, 2
 NO_ENCRYPTION, AES_CTR = 1, 3
 KEY_AREA_KEYS = ("application", "ocean", "system")
@@ -238,12 +247,93 @@ class Nca:
         return read
 
 
+# NUP.
+
+@dataclass(frozen=True)
+class NupFile:
+    title: str  # the title's ID, 16 hex digits
+    name: str
+    size: int
+    offset: int
+    stored: int  # its size in the package
+    sha256: bytes
+    compressed: bool
+
+
+def nup_exefs(read: Read) -> list[NupFile]:
+    """The ExeFS files of each title of a NUP, its table of contents checked against the header's SHA-256."""
+    head = read(0, 0x38)
+    if head[:4] != NUP:
+        raise ValueError("no NUP header")
+    at, size = struct.unpack_from("<QQ", head, 8)
+    if size > 1 << 30:
+        raise ValueError(f"its table of contents is {size:,} bytes: not one")
+    table = read(at, size)
+    if len(table) != size or hashlib.sha256(table).digest() != head[0x18:0x38] or table[:4] != NUP_TOC:
+        raise ValueError("its table of contents does not match its SHA-256")
+    titles, directories, files, names_at, names_size = struct.unpack_from("<I4Q", table, 4)
+    directories_at = 0x30 + 0x40 * titles
+    files_at = directories_at + 0x18 * directories
+    children_at = files_at + 0x50 * files
+    if children_at > names_at or names_at + names_size > size or titles > directories:
+        raise ValueError("its table of contents does not add up")
+
+    def named(record: int) -> str:
+        name_at, length = struct.unpack_from("<II", table, record)
+        return table[names_at + name_at:names_at + name_at + length].decode("utf-8", "replace")
+
+    def children(directory: int) -> list[int]:
+        first, count = struct.unpack_from("<II", table, directories_at + 0x18 * directory + 8)
+        return list(struct.unpack_from(f"<{count}I", table, children_at + 4 * first))
+
+    out = []
+    for title in range(titles):
+        title_id = f"{struct.unpack_from('<Q', table, 0x30 + 0x40 * title)[0]:016x}"
+        for exefs in (c for c in children(title) if c < directories and named(directories_at + 0x18 * c) == "exefs"):
+            for child in children(exefs):
+                if child < directories:
+                    continue
+                record = files_at + 0x50 * (child - directories)
+                size_, offset, stored = struct.unpack_from("<QQQ", table, record + 8)
+                out.append(NupFile(title_id, named(record), size_, offset, stored, table[record + 0x20:record + 0x40],
+                                   struct.unpack_from("<I", table, record + 0x40)[0] == 1))
+    return out
+
+
+def _zstd():
+    """A zstd decompressor taking one frame in pieces: the standard library's (3.14) or the zstandard package's."""
+    try:
+        from compression import zstd
+        return zstd.ZstdDecompressor()
+    except ImportError:
+        pass
+    try:
+        import zstandard
+    except ImportError as error:  # a dependency of zkit before 3.14; missing only from an install made without them
+        raise ValueError("reading .nup packages needs the `zstandard` package (pip install zstandard)") from error
+    return zstandard.ZstdDecompressor().decompressobj()
+
+
+def _nup_chunks(read: Read, item: NupFile) -> Iterator[bytes]:
+    """`item`'s bytes, checked against its size and SHA-256 at the end."""
+    decompressor, digest, total = _zstd() if item.compressed else None, hashlib.sha256(), 0
+    for at in range(0, item.stored, CHUNK):
+        data = read(item.offset + at, min(CHUNK, item.stored - at))
+        if decompressor:
+            data = decompressor.decompress(data)
+        digest.update(data)
+        total += len(data)
+        yield data
+    if total != item.size or digest.digest() != item.sha256:
+        raise ValueError(f"{item.name} of title {item.title} does not match its SHA-256")
+
+
 # Finding and writing files.
 
 @dataclass(frozen=True)
 class Found:
     package: Path
-    nca: str
+    nca: str  # the NCA, or a NUP's title ID
     section: int
     name: str
     size: int
@@ -262,12 +352,31 @@ def packages(sources: list[Path], recursive: bool = False) -> tuple[list[Path], 
     return usable, [p for p in dict.fromkeys(found) if p.suffix.lower() in COMPRESSED_SUFFIXES]
 
 
-def _program_files(package: Path, keys: Keys, file) -> Iterator[tuple[Nca, int, Read, Entry]]:
+Chunks = Callable[[], Iterator[bytes]]
+
+
+def _is_nup(package: Path) -> bool:
+    with package.open("rb") as file:
+        return file.read(4) == NUP
+
+
+def _program_files(package: Path, keys: Keys, file) -> Iterator[tuple[str, int, str, int, Chunks]]:
+    """(NCA or title, section, name, size, its bytes in chunks) of each file of the package's ExeFS (and logo)."""
     read = _file_reader(file)
+    if read(0, 4) == NUP:
+        try:
+            files = nup_exefs(read)
+        except ValueError as error:
+            raise ValueError(f"{package.name} is not a NUP ({error})") from None
+        for item in files:
+            yield item.title, 0, item.name, item.size, lambda item=item: _nup_chunks(read, item)
+        return
+    if not keys.paths:
+        raise ValueError(f"no {KEY_FILE} found: put it next to the packages, or in ~/.switch")
     try:
         entries = contents(read)
     except ValueError as error:
-        raise ValueError(f"{package.name} is not an NSP or XCI ({error})") from None
+        raise ValueError(f"{package.name} is not an NSP, XCI or NUP ({error})") from None
     if any(entry.name.lower().endswith(".ncz") for entry in entries):
         raise ValueError(f"{package.name} holds compressed NCAs (.ncz): decompress it first")
     tickets = dict(_ticket(read(e.offset, e.size)) for e in entries if e.name.lower().endswith(".tik"))
@@ -279,7 +388,8 @@ def _program_files(package: Path, keys: Keys, file) -> Iterator[tuple[Nca, int, 
             continue
         for section, section_read, files in nca.partitions():
             for item in files:
-                yield nca, section, section_read, item
+                yield nca.entry.name, section, item.name, item.size, \
+                    lambda section_read=section_read, item=item: _chunks(section_read, item)
 
 
 def _chunks(read: Read, entry: Entry) -> Iterator[bytes]:
@@ -291,27 +401,31 @@ def scan(package: Path, keys: Keys) -> list[Found]:
     """Every file in the package's program NCAs' partitions, with its SHA-1."""
     out = []
     with package.open("rb") as file:
-        for nca, section, read, entry in _program_files(package, keys, file):
+        for container, section, name, size, chunks in _program_files(package, keys, file):
             digest = hashlib.sha1()
-            for chunk in _chunks(read, entry):
+            for chunk in chunks():
                 digest.update(chunk)
-            out.append(Found(package, nca.entry.name, section, entry.name, entry.size, digest.hexdigest()))
+            out.append(Found(package, container, section, name, size, digest.hexdigest()))
     return out
 
 
 def write(found: Found, keys: Keys, destination: Path) -> None:
     """Write `found` to `destination` (through a temporary file, checked against its SHA-1)."""
     with found.package.open("rb") as file:
-        for nca, section, read, entry in _program_files(found.package, keys, file):
-            if (nca.entry.name, section, entry.name) != (found.nca, found.section, found.name):
+        for container, section, name, _, chunks in _program_files(found.package, keys, file):
+            if (container, section, name) != (found.nca, found.section, found.name):
                 continue
             destination.parent.mkdir(parents=True, exist_ok=True)
             partial = destination.with_name(destination.name + ".partial")
             digest = hashlib.sha1()
-            with partial.open("wb") as out:
-                for chunk in _chunks(read, entry):
-                    digest.update(chunk)
-                    out.write(chunk)
+            try:
+                with partial.open("wb") as out:
+                    for chunk in chunks():
+                        digest.update(chunk)
+                        out.write(chunk)
+            except BaseException:
+                partial.unlink(missing_ok=True)
+                raise
             if digest.hexdigest() != found.sha1:
                 partial.unlink()
                 raise ValueError(f"{found.package.name}: {found.name} read differently twice")
@@ -338,9 +452,9 @@ def provide(destination: Path, sha1: str | None, sources: list[Path], key_paths:
     folders = list(dict.fromkeys([path.parent for path in found] + [s for s in sources if s.is_dir()]))
     skipped = f" ({', '.join(p.name for p in compressed)}: compressed, decompress them first)" if compressed else ""
     if not found:
-        raise NoPackages("no .nsp or .xci in " + ", ".join(str(s) for s in sources) + skipped)
+        raise NoPackages("no .nsp, .xci or .nup in " + ", ".join(str(s) for s in sources) + skipped)
     keys = Keys(key_paths if key_paths is not None else key_files(folders))
-    if not keys.paths:
+    if not keys.paths and not any(_is_nup(package) for package in found):
         raise NotFound(f"no {KEY_FILE} found: put it next to the packages, or in ~/.switch")
     matches, problems = [], []
     for package in found:

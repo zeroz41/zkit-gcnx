@@ -117,7 +117,7 @@ Clean up the decomp source in large proven steps. Use zkit-clean-source. Finish 
 | `zkit build` | build, check and relink the project |
 | `zkit ci check --base main` | the pull request gate: build, nothing matched or linked lost against the latest saved baseline (or `--baseline FILE`), no decompiler leftovers in the added lines, no files that must not be committed; `--out FILE` keeps the result |
 | `zkit ci comment FILE` / `zkit ci report --sha SHA --out FILE` | for CI: the result as a pull request comment, and the report a trusted run kept for a commit (see [CI](docs/ci.md)) |
-| `zkit extract [folder]` | Switch: take the original executable out of the game's `.nsp`/`.xci` files (with your `prod.keys`); `zkit build` does it by itself when they sit in the original's folder or one above it |
+| `zkit extract [folder]` | Switch: take the original executable out of the game's `.nsp`/`.xci` files (with your `prod.keys`) or `.nup`; `zkit build` does it by itself when they sit in the original's folder or one above it |
 | `zkit gate` | what to run before you stop |
 
 `zkit --help` lists everything, and `zkit doctor` checks your setup and says how to fix what's missing.

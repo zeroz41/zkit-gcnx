@@ -115,6 +115,62 @@ def xci(path: Path, main: bytes) -> None:
     path.write_bytes(bytes(head) + root)
 
 
+def _zstd(data: bytes) -> bytes:
+    try:
+        from compression import zstd
+        return zstd.compress(data)
+    except ImportError:
+        import zstandard
+        return zstandard.ZstdCompressor().compress(data)
+
+
+def nup(path: Path, titles: list[tuple[int, list[tuple[str, bytes]]]]) -> None:
+    """A NUP of titles, each (ID, [(path under its root, bytes)]): every second file zstd-compressed."""
+    names = bytearray()
+    directories = [{"name": "", "children": []} for _ in titles]  # the roots first, in title order
+    files, blobs = [], []
+
+    def named(text: str) -> tuple[int, int]:
+        names.extend(text.encode())
+        return len(names) - len(text.encode()), len(text.encode())
+
+    for root, (_, tree) in enumerate(titles):
+        for where, body in tree:
+            parent = root
+            for part in where.split("/")[:-1]:
+                below = [c for kind, c in directories[parent]["children"] if kind == "d"
+                         and directories[c]["name"] == part]
+                if not below:
+                    directories.append({"name": part, "children": []})
+                    directories[parent]["children"].append(("d", len(directories) - 1))
+                    below = [len(directories) - 1]
+                parent = below[0]
+            compressed = len(files) % 2
+            blobs.append(_zstd(body) if compressed else body)
+            files.append((where.split("/")[-1], body, compressed))
+            directories[parent]["children"].append(("f", len(files) - 1))
+    children = []
+    directory_records = b""
+    for directory in directories:
+        directory_records += struct.pack("<6I", *named(directory["name"]), len(children), len(directory["children"]),
+                                         0, 0)
+        children += [c if kind == "d" else len(directories) + c for kind, c in directory["children"]]
+    file_names = [named(name) for name, _, _ in files]
+    head = 0x80
+    size = 0x30 + 0x40 * len(titles) + len(directory_records) + 0x50 * len(files) + 4 * len(children) + len(names)
+    offsets = [head + size + sum(map(len, blobs[:index])) for index in range(len(blobs))]
+    file_records = b"".join(struct.pack("<IIQQQ", *file_names[i], len(body), offsets[i], len(blobs[i])) +
+                            hashlib.sha256(body).digest() + struct.pack("<I", compressed) + bytes(12)
+                            for i, (_, body, compressed) in enumerate(files))
+    body = b"".join(struct.pack("<Q", title) + bytes(0x38) for title, _ in titles) + directory_records + \
+        file_records + struct.pack(f"<{len(children)}I", *children)
+    table = b"TOC\x01" + struct.pack("<I4Q", len(titles), len(directories), len(files), 0x30 + len(body), len(names)) + \
+        bytes(8) + body + names
+    assert len(table) == size
+    header = b"NUP\x01" + bytes(4) + struct.pack("<QQ", head, size) + hashlib.sha256(table).digest()
+    path.write_bytes(header + bytes(head - len(header)) + table + b"".join(blobs))
+
+
 def sha1(data: bytes) -> str:
     return hashlib.sha1(data).hexdigest()
 
@@ -169,6 +225,31 @@ class PackageTests(unittest.TestCase):
         nsp(self.root / "game.nsp", b"main")
         with self.assertRaisesRegex(nxpackage.NotFound, "no prod.keys found"):
             nxpackage.provide(self.root / "out/main", None, [self.root], [])
+
+    def test_a_nup_gives_its_titles_exefs_files_without_keys(self):
+        main, other = b"\x7fNSO new" * 4321, b"\x7fNSO dlc" * 99
+        nup(self.root / "game.nup", [(0x0100000000001000, [("exefs/main.npdm", b"META" + bytes(60)),
+                                                           ("exefs/main", main), ("romfs/data/a.bin", b"a" * 50)]),
+                                     (0x0100000000001001, [("romfs/b.bin", b"b"), ("exefs/main", other)])])
+        found = nxpackage.scan(self.root / "game.nup", nxpackage.Keys([]))
+        self.assertEqual([(f.nca, f.name, f.sha1) for f in found],
+                         [("0100000000001000", "main.npdm", sha1(b"META" + bytes(60))),
+                          ("0100000000001000", "main", sha1(main)), ("0100000000001001", "main", sha1(other))])
+        for wanted in (main, other):
+            out = self.root / "orig" / sha1(wanted) / "main"
+            nxpackage.provide(out, sha1(wanted), [self.root], [])
+            self.assertEqual(out.read_bytes(), wanted)
+        # A file whose bytes differ from its SHA-256 is never written.
+        data = bytearray((self.root / "game.nup").read_bytes())
+        data[data.index(b"META") + 1] ^= 1  # main.npdm, stored as is
+        (self.root / "bad.nup").write_bytes(bytes(data))
+        with self.assertRaisesRegex(ValueError, "does not match its SHA-256"):
+            nxpackage.scan(self.root / "bad.nup", nxpackage.Keys([]))
+        data = bytearray((self.root / "game.nup").read_bytes())
+        data[0x90] ^= 1  # in the table of contents
+        (self.root / "bad.nup").write_bytes(bytes(data))
+        with self.assertRaisesRegex(ValueError, "bad.nup is not a NUP .*table of contents"):
+            nxpackage.scan(self.root / "bad.nup", nxpackage.Keys([]))
 
     def test_keys_are_looked_for_by_the_packages_then_in_the_usual_places(self):
         home = self.root / "home"
@@ -257,7 +338,7 @@ class ProjectTests(unittest.TestCase):
             (root / "orig/v1/main").unlink()
             data = build.extract(project, None, None, [root / "nowhere"], keys)
             self.assertFalse(data["ok"])
-            self.assertIn("no .nsp or .xci", build.render_extract(data))
+            self.assertIn("no .nsp, .xci or .nup", build.render_extract(data))
 
 
 if __name__ == "__main__":
