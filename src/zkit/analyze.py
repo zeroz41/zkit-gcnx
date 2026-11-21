@@ -46,6 +46,8 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
     if program.platform.name != "gamecube":
         named += _slot_names(program, named)
         named = _thunk_offsets(program, named)
+    named = _unique(named, current)
+    if program.platform.name != "gamecube":
         symbols = {address: (name, "object", 0) for address, name in misplaced.items()}
         symbols |= {p.address: (p.name, "function" if p.kind == "function" else "object", 0) for p in named}
         sizes = {p.address: p.size for p in named if p.kind == "object" and p.size}
@@ -284,6 +286,18 @@ def _internal(name: str) -> bool:
             return False
         i += len(length.group()) + int(length.group())
     return False
+
+
+def _unique(named: list, current: dict[int, str]) -> list:
+    """One name, one function: a proposal whose name the base symbols (or an earlier proposal) already give another
+    address is left out. Which of the two is that function is for evidence about both to decide, not the order the
+    analyses ran in."""
+    owner = {name: address for address, name in current.items() if not _placeholder(name)}
+    kept = []
+    for p in named:
+        if owner.setdefault(p.name, p.address) == p.address:
+            kept.append(p)
+    return kept
 
 
 def _placeholder(name: str | None) -> bool:

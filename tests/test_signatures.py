@@ -794,6 +794,18 @@ class SwitchSignatureTests(unittest.TestCase):
         self.assertEqual(signatures.aligned(list("aXYd"), list("abcd")), [(0, 0), (3, 3)])  # two side by side
         self.assertEqual(signatures.aligned(["s", "s", "a"], ["s", "s", "s", "a"]), [(2, 3)])  # repeats can slide
 
+    def test_analyze_gives_a_name_to_one_function(self):
+        """A proposal whose name the base symbols already give another function, or an earlier proposal gave, is
+        left out: two functions never share a name."""
+        from zkit import analyze
+        from zkit.signatures import Proposal
+        def proposal(address, name):
+            return Proposal(address, name, "function", "reference", 0, ("d",), "", None, 0, False)
+        current = {0x100: "_Z1fv", 0x200: "fn_7100000200", 0x300: "fn_7100000300", 0x400: "fn_7100000400"}
+        kept = analyze._unique([proposal(0x200, "_Z1fv"), proposal(0x300, "_Z1gv"), proposal(0x400, "_Z1gv"),
+                                proposal(0x100, "_Z1fv")], current)
+        self.assertEqual([(p.address, p.name) for p in kept], [(0x300, "_Z1gv"), (0x100, "_Z1fv")])
+
     def test_analyze_names_the_module_and_adds_its_data(self):
         """With the donor cached, a fresh analysis of the stripped build renames its functions and adds the data
         the donor names that its symbols lack, each with the donor's size."""
