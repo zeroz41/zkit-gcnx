@@ -40,6 +40,20 @@
           "why": "0x140d8e4d7 jne 0x140d8e53f -> jmp 0x140d8e53f: the merge always gives up as for an unscaled offset, and the loop steps to the next instruction"
         }
       ]
+    },
+    {
+      "release": "LLVM 22.1.8 for macOS Arm64, LLVM-22.1.8-macOS-ARM64.tar.xz: bin/clang-22 (bin/clang and bin/clang++ link to it)",
+      "sha256": "9a690e9e11d4774d63e95ed2ab90abd82889f949b0bb9db8208f7e18f278ea50",
+      "patched_sha256": "5f46d4e81589a94ab19ac077ce72ed36a1935076aefba2cc10f3fe15d7d95f16",
+      "function": "(anonymous namespace)::AArch64LoadStoreOpt::optimizeBlock at 0x1011812e4, which has the fifth step's loop and tryToMergeIndexLdSt inlined: it calls AArch64InstrInfo::hasUnscaledLdStOffset at 0x101187468, reads aarch64-load-store-const-scan-limit (LdStConstLimit+0x78) at 0x10118748c, and gives up at 0x101185e58 (the step to the next instruction)",
+      "edits": [
+        {
+          "offset": "0x1187474",
+          "old": "204f0737",
+          "new": "79faff17",
+          "why": "0x101187474 tbnz w0, #0, 0x101185e58 -> b 0x101185e58: the merge always gives up as for an unscaled offset, and the loop steps to the next instruction"
+        }
+      ]
     }
   ]
 }
