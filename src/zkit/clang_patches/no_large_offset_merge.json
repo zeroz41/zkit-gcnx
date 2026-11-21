@@ -1,0 +1,31 @@
+{
+  "about": [
+    "build.clang_patches rule `no-large-offset-merge`: AArch64's load/store optimizer without its fifth step,",
+    "tryToMergeIndexLdSt (llvm/lib/Target/AArch64/AArch64LoadStoreOptimizer.cpp, LLVM 18 and later), which turns a",
+    "constant offset built in a register and a register-offset load or store (`mov w9, #lo; movk w9, #hi, lsl #16;",
+    "ldr w0, [x8, x9]`) into an add of the offset's high part and an immediate-offset access (`add x8, x8, #hi,",
+    "lsl #12; ldr w0, [x8, #lo]`). A toolchain built without that step keeps the register-offset form. No option",
+    "turns the step off (aarch64-load-store-const-scan-limit only shortens its search), so the rule is a byte",
+    "patch: the step's merge starts by asking hasUnscaledLdStOffset whether the access has an unscaled offset and",
+    "gives up when it has; each edit makes it give up whatever the answer. zkit applies a patch to a copy of the",
+    "official binary whose SHA-256 is the patch's `sha256`, checks each edit's `old` bytes first and the result",
+    "against `patched_sha256` (build.patched_clang). Offsets are file offsets; each `why` names the instruction",
+    "(virtual address) it changes."
+  ],
+  "patches": [
+    {
+      "release": "LLVM 22.1.8 for Linux x86-64, LLVM-22.1.8-Linux-X64.tar.xz: bin/clang-22 (bin/clang and bin/clang++ link to it)",
+      "sha256": "31a40dc31f3c15a47aa119aa148f339bf363d8f61202ddbdacbd3f24b71ba113",
+      "patched_sha256": "1229ac892afa78c039cb6445d6312b96bc48d25206a60f7ba28938d9641eae44",
+      "function": "(anonymous namespace)::AArch64LoadStoreOpt::optimizeBlock at 0x73c24c0, which has the fifth step's loop and tryToMergeIndexLdSt inlined: the loop reads the opcode's scale (0x73c319c-0x73c31df), calls AArch64InstrInfo::hasUnscaledLdStOffset at 0x73c31eb, and goes on to findMatchingConstOffsetBackward (the read of aarch64-load-store-const-scan-limit at 0x73c322d) only when it says no",
+      "edits": [
+        {
+          "offset": "0x73c21f2",
+          "old": "7428",
+          "new": "6690",
+          "why": "0x73c31f2 je 0x73c321c -> 2-byte nop: the merge always gives up as for an unscaled offset, and the loop steps to the next instruction (0x73c31f4)"
+        }
+      ]
+    }
+  ]
+}

@@ -62,8 +62,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
 STARTING_CFLAGS = {"gamecube": [], "switch": ["-O3", "-fno-exceptions", "-fno-rtti", "-std=gnu++17"]}
 IMPORTS = "imports.txt"   # beside the target objects of a `relax` target: the module's imported names, one a line
 UNIT_KEYS = {"compiler", "cflags", "extra_cflags", "includes", "compiler_version", "source_root", "clang_plugins",
-             "compiler_download"}
+             "clang_patches", "compiler_download"}
 PLUGINS = Path(__file__).parent / "clang_plugins"   # zkit's clang pass plugins (build.clang_plugins)
+PATCHES = Path(__file__).parent / "clang_patches"   # zkit's byte patches to official clang releases (build.clang_patches)
 
 
 def words(value: str | list[str] | None) -> list[str]:
@@ -221,31 +222,45 @@ def plugin_patches(name: str) -> list[dict[str, Any]]:
     return json.loads(table.read_text(encoding="utf-8"))["patches"] if table.is_file() else []
 
 
-def patched_clang(clang: Path, names: list[str]) -> Path | None:
-    """build.clang_plugins where clang can load no plugin (a Windows clang.exe): a copy of the official `clang` with
-    each plugin's rule applied in turn as zkit's byte patch for exactly the binary it has then (`plugin_patches`:
-    its SHA-256 picks the patch, each edit's old bytes are checked, and the result must have the patch's SHA-256),
-    or None when zkit has no patch for it. The copy lies beside `clang`, so it finds the same resource folder, named
-    `<name>-<plugins>` (clang's driver reads its mode from its name without the last `-` part, so a clang++ copy is
-    still clang++); it is made once and made again when its bytes are not the expected ones."""
+def clang_patches(name: str) -> list[dict[str, Any]]:
+    """build.clang_patches: zkit's rule `name` (clang_patches/<name>.json, `-` read as `_`), a change to a part of
+    clang no plugin reaches, such as one code generation pass, as byte patches to official clang binaries, in
+    `plugin_patches`' form."""
+    table = PATCHES / f"{name.replace('-', '_')}.json"
+    if not table.is_file():
+        known = sorted(path.stem.replace("_", "-") for path in PATCHES.glob("*.json"))
+        raise ValueError(f"build.clang_patches: no rule {name!r} (zkit has: {', '.join(known) or 'none'})")
+    return json.loads(table.read_text(encoding="utf-8"))["patches"]
+
+
+def patched_clang(clang: Path, names: list[str], rules: list[str] = ()) -> Path | None:
+    """A copy of the official `clang` with byte patches applied in turn: first each of the plugins `names` as its
+    rule (build.clang_plugins where clang can load no plugin, a Windows clang.exe), then each of zkit's `rules`
+    (build.clang_patches, on every system). Each takes zkit's patch for exactly the binary it has then (its SHA-256
+    picks the patch, each edit's old bytes are checked, and the result must have the patch's SHA-256); None when
+    zkit has no patch for it. The copy lies beside `clang`, so it finds the same resource folder, named
+    `<name>-<plugins and rules>` (clang's driver reads its mode from its name without the last `-` part, so a
+    clang++ copy is still clang++); it is made once and made again when its bytes are not the expected ones."""
     for name in names:
         plugin_source(name)
+    tables = [("build.clang_plugins", name, plugin_patches(name)) for name in names] + \
+             [("build.clang_patches", name, clang_patches(name)) for name in rules]
     patched = bytearray(clang.read_bytes())
     digest = hashlib.sha256(patched).hexdigest()
-    for name in names:
-        patch = next((patch for patch in plugin_patches(name) if patch["sha256"] == digest), None)
+    for setting, name, patches in tables:
+        patch = next((patch for patch in patches if patch["sha256"] == digest), None)
         if patch is None:
             return None
         for edit in patch["edits"]:
             offset, old, new = int(edit["offset"], 16), bytes.fromhex(edit["old"]), bytes.fromhex(edit["new"])
             if len(new) != len(old) or patched[offset:offset + len(old)] != old:
-                raise ValueError(f"build.clang_plugins: {name}'s patch for {clang} does not fit it at {edit['offset']}")
+                raise ValueError(f"{setting}: {name}'s patch for {clang} does not fit it at {edit['offset']}")
             patched[offset:offset + len(new)] = new
         digest = hashlib.sha256(patched).hexdigest()
         if digest != patch["patched_sha256"]:
-            raise ValueError(f"build.clang_plugins: {name}'s patch for {clang} gave SHA-256 {digest}, not "
+            raise ValueError(f"{setting}: {name}'s patch for {clang} gave SHA-256 {digest}, not "
                              f"{patch['patched_sha256']}")
-    tag = "+".join(name.replace("-", "_") for name in names)
+    tag = "+".join(name.replace("-", "_") for _, name, _ in tables)
     out = clang.with_name(f"{clang.stem}-{tag}{clang.suffix}")
     if out.is_file() and hashlib.sha256(out.read_bytes()).hexdigest() == digest:
         return out
@@ -731,21 +746,29 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
     cc = [str(exe) if exe else config["compiler"]]
     implicit = [_relative(exe, root)] if exe else []
     wanted = words(config.get("clang_plugins")) if exe else []
-    if wanted and sys.platform == "win32":
-        # A Windows clang.exe exports none of LLVM's symbols, so it can load no plugin: compile with a copy of it
-        # that has the plugins' rules as zkit's byte patches, or, for a clang zkit has no patch for, without them
-        # (said once).
-        key = f"clang_plugins {exe} {' '.join(wanted)}"
+    rules = words(config.get("clang_patches")) if exe else []
+    if rules or (wanted and sys.platform == "win32"):
+        # A Windows clang.exe exports none of LLVM's symbols, so it can load no plugin: there the plugins' rules
+        # are zkit's byte patches, as zkit's clang_patches rules are on every system. Compile with a copy of clang
+        # that has them, or, for a clang zkit has no patch for, without them (said once).
+        patched = wanted if sys.platform == "win32" else []
+        key = f"patched_clang {exe} {' '.join(patched)} / {' '.join(rules)}"
         if key not in found:
-            found[key] = patched_clang(exe, wanted)
+            found[key] = patched_clang(exe, patched, rules)
             if found[key] is None:
                 digest = hashlib.sha256(exe.read_bytes()).hexdigest()
-                notes.append(f"clang on Windows cannot load plugins, and zkit has no patch for this {exe.name} "
-                             f"(SHA-256 {digest}): units built with build.clang_plugins ({', '.join(wanted)}) may "
-                             "not match here (build on Linux or in WSL to match them)")
+                if patched:
+                    notes.append(f"clang on Windows cannot load plugins, and zkit has no patch for this {exe.name} "
+                                 f"(SHA-256 {digest}): units built with build.clang_plugins ({', '.join(patched)}) "
+                                 "may not match here (build on Linux or in WSL to match them)")
+                if rules:
+                    notes.append(f"zkit has no patch for this {exe.name} (SHA-256 {digest}) for build.clang_patches "
+                                 f"({', '.join(rules)}): units built with them compile with the official binary and "
+                                 "may not match here")
         if found[key] is not None:
             cc, implicit = [str(found[key])], [_relative(found[key], root)]
-        wanted = []
+        if sys.platform == "win32":
+            wanted = []
     plugins = [clang_plugin(root, exe, name) for name in wanted]
     implicit += [_relative(path, root) for path in plugins]
     config = {**config, "extra_cflags": config["extra_cflags"] + [word for path in plugins for word in

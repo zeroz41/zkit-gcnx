@@ -32,4 +32,5 @@ zkit = "zkit.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-zkit = ["report.html", "treemap.html", "contracts/*.md", "clang_plugins/*.cpp", "clang_plugins/*.json"]
+zkit = ["report.html", "treemap.html", "contracts/*.md", "clang_plugins/*.cpp", "clang_plugins/*.json",
+        "clang_patches/*.json"]
