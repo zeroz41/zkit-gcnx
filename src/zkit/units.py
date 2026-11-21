@@ -1902,7 +1902,6 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
     qualified = {i: q for i, q in qualified.items() if re.fullmatch(r"[A-Za-z_][\w/]*", q)}
     units = []
     reserved = {u["unit"] for u in held.values()}     # a fixed unit keeps its name in every code section
-    taken: collections.Counter = collections.Counter()
     named: list[tuple[int, int, str, str]] = []
     for first, end in zip(edges, edges[1:]):
         if first >= end or first in linker and (first, end) not in held:
@@ -1926,10 +1925,12 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
     named = _not_another_build_s_file(program, named, lambda first, end: _unnamed(program, class_of, first, end,
                                                                                     qualified))
     named = _in_neighbours_folder(named, held)
-    for first, end, name, how in named:
+    plain = _plain_pieces(named, held, lambda first, end, name: (
+        sum(1 for i in range(first, end) if ev.files.get(i) == name and i not in ev.placed),
+        sum(1 for i in range(first, end) if ev.files.get(i) == name)))
+    for piece, (first, end, name, how) in enumerate(named):
         if (first, end) not in held:
-            taken[name] += 1
-            if taken[name] > 1 or name in reserved:   # one file in several pieces keeps one name per piece
+            if piece not in plain or name in reserved:   # one file in several pieces keeps one name per piece
                 stem, dot, ext = name.rpartition(".")
                 name = f"{stem}_{text(functions[first].address)[2:]}.{ext}"
         last = functions[end - 1]
@@ -2001,6 +2002,20 @@ def _not_another_build_s_file(program: Program, named: list, rename) -> list:
 def _sort_key(name: str) -> str:
     """A file name as a Windows build orders a folder's files: case folded to upper, so `_` sorts after letters."""
     return name.upper()
+
+
+def _plain_pieces(named: list, held: dict, votes) -> set[int]:
+    """Which of `named`'s pieces keep their file's plain name: of the pieces one name falls to, the one holding most
+    of that file's evidence (`votes(first, end, name)`, compared in order), the earliest of equals. A file's other
+    pieces (code another build's coarser unit lent the name, a template run cut off its start) take their address."""
+    best: dict[str, tuple[Any, int]] = {}
+    for piece, (first, end, name, _) in enumerate(named):
+        if (first, end) in held:
+            continue
+        count = votes(first, end, name)
+        if name not in best or count > best[name][0]:
+            best[name] = (count, piece)
+    return {piece for _, piece in best.values()}
 
 
 def _in_neighbours_folder(named: list, held: dict) -> list:

@@ -1089,6 +1089,16 @@ class AnotherBuildNameTests(unittest.TestCase):
         self.assertEqual([n for _, _, n, _ in units._not_another_build_s_file(code, named, rename)],
                          ["a.cpp", "b.cpp", "K2.cpp", "a.cpp"])
 
+    def test_a_file_in_pieces_keeps_its_name_where_most_of_its_evidence_is(self):
+        """a.cpp falls to three pieces: the second holds most of its evidence and keeps the plain name; b.cpp's two
+        pieces hold one function each, so the earlier keeps it; a fixed unit's span is no piece."""
+        named = [(0, 2, "a.cpp", "another build"), (2, 3, "b.cpp", "file string"), (3, 9, "a.cpp", "file string"),
+                 (9, 10, "a.cpp", "file string"), (10, 11, "b.cpp", "file string"), (11, 12, "c.cpp", "map")]
+        files = {0: "a.cpp", 1: "a.cpp", 2: "b.cpp", 3: "a.cpp", 4: "a.cpp", 5: "a.cpp", 9: "a.cpp", 10: "b.cpp"}
+        votes = lambda first, end, name: sum(1 for i in range(first, end) if files.get(i) == name)
+        self.assertEqual(units._plain_pieces(named, {(11, 12): {}}, votes), {1, 2})
+
+
     def test_the_cited_files_decide_whether_the_link_is_sorted(self):
         """Another build's units named after their classes (`Zeta.cpp` before `f_b.cpp`) say nothing of the link's
         order: the files the code cites are in name order, so the class unit takes their folder."""
