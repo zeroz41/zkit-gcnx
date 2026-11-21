@@ -687,6 +687,11 @@ def render_extract(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _pending_archives(root: Path, config: dict[str, Any]) -> list[tuple[dict[str, Any], Path]]:
+    from .fetch import pending_archives
+    return pending_archives(root, config)
+
+
 def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found: dict[str, Path | None],
              notes: list[str]) -> dict[str, Any]:
     """One unit's compile step: its rule, the compiler words and flags, the whole argv (compile_commands.json),
@@ -699,6 +704,9 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
                                                             "bundle)" if config["platform"] == "gamecube" else
                                                             " (set build.compiler, or pin its archive in "
                                                             "build.compiler_download for `zkit build --download`)"))
+        elif config["platform"] == "switch" and (pending := _pending_archives(root, config)):
+            raise ValueError(f"build.compiler_download: {pending[0][0]['url']} is not unpacked into {pending[0][1]} "
+                             "(`zkit build --download` fetches it)")
         elif config["platform"] == "switch" and config.get("compiler_version"):
             accepted = [config["compiler_version"]] if isinstance(config["compiler_version"], str) \
                 else config["compiler_version"]

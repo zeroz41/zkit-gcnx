@@ -362,6 +362,29 @@ def compiler_archives(spec: Any, place: str | None = None) -> tuple[str | None, 
     return spec["folder"], [checked(archive) for archive in (chosen if isinstance(chosen, list) else [chosen])]
 
 
+def _archive_folder(root: Path, default: str | None, archive: dict[str, Any]) -> Path:
+    stem = archive["url"].rstrip("/").rsplit("/", 1)[-1]
+    for suffix in (".tar.xz", ".tar.gz", ".tar.bz2", ".tgz", ".zip", ".deb", ".exe"):
+        stem = stem.removesuffix(suffix)
+    folder = Path(archive.get("folder") or default or f"build/compilers/{stem}").expanduser()
+    return folder if folder.is_absolute() else root / folder
+
+
+def pending_archives(root: Path, config: dict[str, Any], place: str | None = None) -> list[tuple[dict[str, Any], Path]]:
+    """The `build.compiler_download` archives of this host still to unpack, with their folders: all of them while
+    the configured compiler is missing, else those whose folder is not there yet (one pinned beside the compiler
+    later, such as the headers it builds with)."""
+    spec = config.get("compiler_download")
+    if not spec:
+        return []
+    default, archives = compiler_archives(spec, place)
+    from .build import compiler
+    have = compiler(root, config)[0] is not None
+    folders = [(archive, _archive_folder(root, default, archive)) for archive in archives]
+    return [(archive, folder) for archive, folder in folders
+            if not have or not folder.is_dir() or not any(folder.iterdir())]
+
+
 def compiler_archive(root: Path, config: dict[str, Any], place: str | None = None) -> dict[str, Any] | None:
     """`build.compiler_download`: the project's own pinned compiler, fetched when the configured one is missing.
     Either one archive for every host, {url, sha256, folder?, strip?, members?}, or archives per host, {folder,
@@ -369,23 +392,16 @@ def compiler_archive(root: Path, config: dict[str, Any], place: str | None = Non
     own takes the x86-64 one). An archive is a zip, tarball, Debian package or NSIS installer (LLVM's Windows
     releases), unpacked into `folder` (default build/compilers/<archive name>; an archive's own `folder` puts it
     elsewhere, such as a library the compiler loads from its lib folder), `strip` leading folders dropped (default
-    1, 0 for an installer) and, with `members`, only the files matching those globs kept."""
-    spec = config.get("compiler_download")
-    if not spec:
+    1, 0 for an installer) and, with `members`, only the files matching those globs kept. With the compiler there,
+    only the archives whose folder is missing are fetched."""
+    pending = pending_archives(root, config, place)
+    if not pending:
         return None
-    default, archives = compiler_archives(spec, place)
     from . import nsis
     from .build import compiler
-    if compiler(root, config)[0] is not None:
-        return None
     files, urls, top = 0, [], None
-    for archive in archives:
+    for archive, folder in pending:
         url = archive["url"]
-        stem = url.rstrip("/").rsplit("/", 1)[-1]
-        for suffix in (".tar.xz", ".tar.gz", ".tar.bz2", ".tgz", ".zip", ".deb", ".exe"):
-            stem = stem.removesuffix(suffix)
-        folder = Path(archive.get("folder") or default or f"build/compilers/{stem}").expanduser()
-        folder = folder if folder.is_absolute() else root / folder
         top = top or folder
         temporary = download(url, archive["sha256"].lower().removeprefix("sha256:"), folder.parent)
         try:

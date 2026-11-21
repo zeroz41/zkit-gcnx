@@ -175,6 +175,27 @@ class FetchTests(unittest.TestCase):
                 fetch.compiler_archive(root / "c", {**config, "compiler_download": {k: v for k, v in spec.items()
                                                                                     if k != "folder"}})
 
+    def test_an_archive_pinned_beside_an_installed_compiler_is_fetched_alone(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            clang = _tarball(root / "clang.tar.xz", {"clang+llvm/bin/clang++": b"cc"})
+            headers = _tarball(root / "lib-1.0.src.tar.xz", {"lib-1.0.src/include/vector": b"v",
+                                                              "lib-1.0.src/test/t.cpp": b"t"})
+            spec = {"folder": "build/compilers/clang",
+                    "linux-x86_64": [{"url": (root / "clang.tar.xz").as_uri(), "sha256": clang}]}
+            config = {"platform": "switch", "compiler": "build/compilers/clang/bin/clang++", "compiler_download": spec}
+            self.assertEqual(fetch.compiler_archive(root / "repo", config, "linux-x86_64")["files"], 1)
+            (root / "clang.tar.xz").unlink()  # the compiler is never fetched again
+            spec["linux-x86_64"].append({"url": (root / "lib-1.0.src.tar.xz").as_uri(), "sha256": headers,
+                                         "folder": "build/compilers/lib-1.0", "members": ["include/*"]})
+            self.assertEqual([folder.name for _, folder in fetch.pending_archives(root / "repo", config,
+                                                                                  "linux-x86_64")], ["lib-1.0"])
+            result = fetch.compiler_archive(root / "repo", config, "linux-x86_64")
+            self.assertEqual(result["files"], 1)
+            self.assertEqual((root / "repo/build/compilers/lib-1.0/include/vector").read_bytes(), b"v")
+            self.assertEqual(fetch.pending_archives(root / "repo", config, "linux-x86_64"), [])
+            self.assertIsNone(fetch.compiler_archive(root / "repo", config, "linux-x86_64"))
+
     def test_an_installer_is_unpacked_whole(self):
         import test_nsis
         with tempfile.TemporaryDirectory() as temp:
