@@ -87,7 +87,32 @@ def settings(target: dict[str, Any]) -> dict[str, Any] | None:
         if unknown:
             raise ValueError(f"build.units[{pattern!r}]: unknown setting {', '.join(sorted(unknown))} "
                              f"(per unit: {', '.join(sorted(UNIT_KEYS))})")
+    if "trap" in own:
+        trap_word(own["trap"], platform)
     return {"platform": platform, **DEFAULTS[platform], **own}
+
+
+def trap_word(value: Any, platform: str = "switch") -> int:
+    """`build.trap` as the instruction word it names: a hex string of 32 bits, on a Switch target."""
+    if platform != "switch":
+        raise ValueError("build.trap: only a Switch target's compiles write clang's trap (`brk #1`) to rewrite")
+    try:
+        word = int(value, 16) if isinstance(value, str) else -1
+    except ValueError:
+        word = -1
+    if not 0 <= word <= 0xFFFFFFFF:
+        raise ValueError(f"build.trap must be an instruction word in hex, such as \"0x00008002\": got {value!r}")
+    return word
+
+
+def apply_trap(path: Path, value: str) -> int:
+    """Write the object's traps as the original's compiler does (`build.trap`, `elf.with_trap`); how many."""
+    from .elf import with_trap
+    raw = path.read_bytes()
+    out, changed = with_trap(raw, trap_word(value))
+    if changed:
+        path.write_bytes(out)
+    return changed
 
 
 def unit_settings(config: dict[str, Any], unit: str) -> dict[str, Any]:
@@ -454,6 +479,9 @@ def configure(project: Project, repository: str | None = None, only: str | None 
         depfile="$basefile.d", deps="gcc", description="MWCC $out")
     ninja.rule("clang", "$cc $cflags -MMD -MF $out.d -c $in -o $out", depfile="$out.d", deps="gcc",
                description="CC $out")
+    # `trap`: the compile, then its object's traps written as the original's compiler writes them (`apply_trap`)
+    ninja.rule("clang_trap", _command(python) + " trap $trap $out $cc $cflags -MMD -MF $out.d -c $in -o $out",
+               depfile="$out.d", deps="gcc", description="CC $out")
     # `source_root`: each unit's copy that names it as the original's build did (`stage`); one step writes every
     # copy whose source changed, restat: an unchanged copy keeps its time, so only a changed unit recompiles
     ninja.rule("rooted", _command(python) + " rooted $in", restat="1", description="ROOTED $in")
@@ -513,7 +541,8 @@ def configure(project: Project, repository: str | None = None, only: str | None 
                 staged.append(step["stage"])
             ninja.build([step["out"]], step["rule"], [step["stage"]["copy"] if step.get("stage") else f"src/{unit}"],
                         implicit=step["implicit"],
-                        variables={"cc": _command(step["cc"]), "cflags": _command(step["flags"]), **variables})
+                        variables={"cc": _command(step["cc"]), "cflags": _command(step["flags"]),
+                                   **step.get("variables", {}), **variables})
             compiled.append(step["out"])
             sources.add(unit)
         if staged:
@@ -721,6 +750,8 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
     flags = words(config["cflags"]) + quoted + [f"-I{folder}" for folder in includes] + config["extra_cflags"]
     step = {"rule": "clang", "cc": cc, "flags": flags, "argv": [*cc, *flags, "-c", source, "-o", out], "out": out,
             "implicit": implicit}
+    if config.get("trap"):   # argv (compile_commands.json, editors) stays the compiler's own command
+        step.update(rule="clang_trap", variables={"trap": _command([config["trap"]])})
     if named:
         step["stage"] = {"source": source, "named": named, "copy": f"{paths.dir}/rooted/{unit}"}
     return step
@@ -1051,11 +1082,16 @@ def main(argv: list[str]) -> int:
         imports = set(Path(argv[5]).read_text(encoding="utf-8").split()) if len(argv) == 6 else None
         write_views([(obj / c.relative_to(src), c, view / c.relative_to(src)) for c in compiled], imports)
         return 0
+    if len(argv) > 3 and argv[0] == "trap":   # WORD OBJECT COMMAND...: compile, then `apply_trap`
+        done = subprocess.run(argv[3:])
+        if done.returncode == 0:
+            apply_trap(Path(argv[2]), argv[1])
+        return done.returncode
     if len(argv) == 2 and argv[0] == "rooted":  # MANIFEST: configure's list of `stage` copies
         write_staged(json.loads(Path(argv[1]).read_text(encoding="utf-8")))
         return 0
     print("usage: python -m zkit.build depfile FILE OBJECT | sha1 FILE EXPECTED STAMP | "
-          "views LIST SRC OBJ VIEW [IMPORTS] | rooted MANIFEST", file=sys.stderr)
+          "views LIST SRC OBJ VIEW [IMPORTS] | rooted MANIFEST | trap WORD OBJECT COMMAND...", file=sys.stderr)
     return 2
 
 

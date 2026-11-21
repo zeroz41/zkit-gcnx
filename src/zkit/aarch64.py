@@ -379,6 +379,7 @@ ADR_GOT_PAGE, LD64_GOT_LO12_NC = 311, 312
 ADR_PREL_PG_HI21_NC = 276
 LDST = {0: LDST8, 1: LDST16, 2: LDST32, 3: LDST64, 4: LDST128}
 NOP = 0xD503201F
+BRK_TRAP = 0xD4200020   # `brk #1`: what clang writes for a trap (`__builtin_trap`, `llvm.trap`) on AArch64
 # The bits of its instruction each relocation fills, as `code_relocations` clears them (an assembler leaves them
 # zero): a branch's offset, an adrp's or adr's immediate, a literal load's offset, a low 12 bits' field.
 FILLS = {CALL26: 0x03FFFFFF, JUMP26: 0x03FFFFFF, ADR_PREL_LO21: 0x60FFFFE0, ADR_PREL_PG_HI21: 0x60FFFFE0,

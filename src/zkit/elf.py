@@ -224,6 +224,26 @@ def without_foreign_data(raw: bytes, owned: set[str]) -> tuple[bytes, list[str]]
     return bytes(out), list(dict.fromkeys(discarded.values()))
 
 
+def with_trap(raw: bytes, word: int) -> tuple[bytes, int]:
+    """The AArch64 object with each trap clang wrote (`brk #1`, `aarch64.BRK_TRAP`) in its code sections written
+    as `word`, the instruction the original's compiler writes for one (`build.trap`). Every other byte is
+    unchanged. Returns the bytes and how many words changed (none: the same bytes, 0)."""
+    from . import aarch64
+    elf = Elf(raw)
+    if elf.machine != "aarch64":
+        return raw, 0
+    e, out, changed = elf.endian, bytearray(raw), 0
+    trap, wanted = struct.pack(e + "I", aarch64.BRK_TRAP), struct.pack(e + "I", word)
+    for code in elf.sections:
+        if not code.flags & SHF_EXECINSTR or code.type == SHT_NOBITS:
+            continue
+        for at in range(code.offset, code.offset + code.size - 3, 4):
+            if raw[at:at + 4] == trap:
+                out[at:at + 4] = wanted
+                changed += 1
+    return (bytes(out), changed) if changed else (raw, 0)
+
+
 def with_got_loads_relaxed(raw: bytes, imports: set[str]) -> tuple[bytes, int]:
     """The AArch64 object as a relaxing lld links it into a module that defines every symbol but `imports` (the
     module's imported names): each GOT load lld turns into `adrp` + `add` (`aarch64.relaxed_pairs`, the rules

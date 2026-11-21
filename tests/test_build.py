@@ -653,6 +653,82 @@ class SwitchBuildTests(unittest.TestCase):
             self.assertTrue(done["identical"], done)
             self.assertEqual(done["linked_units"], ["a.cpp", "b.cpp"], done["not_linked"])
 
+    def test_a_trap_word_the_original_compiler_wrote(self):
+        """The original's compiler wrote each trap as `udf #0x8002` where clang writes `brk #1`. With `build.trap`
+        the compiled unit equals its target object, the report agrees and `zkit try` compiles alike; without it
+        the traps differ. A data word that reads as `brk #1` stays as it is."""
+        from zkit.elf import Elf
+        a_cpp = A_CPP + ("int checked(int v) { if (v < 0) __builtin_trap(); return v + 1; }\n"
+                         "int ratio(int v) { if (!v) __builtin_trap(); return 100 / v; }\n")
+        brk, udf = (0xD4200020).to_bytes(4, "little"), (0x00008002).to_bytes(4, "little")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in (("a.cpp", a_cpp), ("b.cpp", B_CPP)):
+                (root / name).write_text(text, encoding="utf-8")
+                subprocess.run([CLANG, *FLAGS, str(root / name), "-o", str(root / name.replace(".cpp", ".o"))],
+                               check=True, capture_output=True)
+            compiled = Elf.load(root / "a.o")
+            text = compiled.section(".text")
+            raw = bytearray(compiled.raw)   # the fork's object: its traps, in its code only
+            traps = [at for at in range(text.offset, text.offset + text.size, 4) if raw[at:at + 4] == brk]
+            self.assertEqual(len(traps), 2, "clang wrote both traps as brk #1")
+            for at in traps:
+                raw[at:at + 4] = udf
+            (root / "a.o").write_bytes(bytes(raw))
+            subprocess.run([LLD, "-shared", "--no-relax", "--unresolved-symbols=ignore-all", "-o",
+                            str(root / "main.elf"), str(root / "a.o"), str(root / "b.o")], check=True,
+                           capture_output=True)
+            result = new.new(root / "main.elf", root / "game", game_id="test")
+            game, manifest = root / "game", Path(result["manifest"])
+            linked = Elf.load(game / "orig/test/main.elf")
+            at = {s.name: s.value for s in linked.symbols if s.name}
+            rodata = linked.section(".rodata").address
+            (game / "config/test/splits.txt").write_text(
+                f"a.cpp:\n\t.text start:{at['_Z6scaledi']:#x} end:{at['_Z6helperi']:#x}\n"
+                f"\t.rodata.str1.1 start:{rodata:#x} end:{rodata + 13:#x}\n\n"
+                f"b.cpp:\n\t.text start:{at['_Z6helperi']:#x} end:{at['_Z6helperi'] + 36:#x}\n"
+                f"\t.rodata.cst16 start:{at['_ZL5table']:#x} end:{at['_ZL5table'] + 16:#x}\n"
+                f"\t.data start:{at['g_counter']:#x} end:{at['g_counter'] + 4:#x}\n", encoding="utf-8")
+            (game / "src/a.cpp").write_text(a_cpp, encoding="utf-8")
+            (game / "src/b.cpp").write_text(B_CPP, encoding="utf-8")
+            data = json.loads(manifest.read_text())
+            settings = data["targets"]["test"]["build"]
+            settings.update(compiler=CLANG, cflags=[f for f in FLAGS if f != "-c"])
+            seen = {}
+            for trap in (None, "0x00008002"):
+                if trap:
+                    settings["trap"] = trap
+                manifest.write_text(json.dumps(data), encoding="utf-8")
+                project = Project.load(manifest)
+                built = build.build(project, quiet=True)
+                self.assertEqual(built["ok"], bool(trap), "the link rebuilds the module once traps are alike")
+                diff = objects.unit_diff(game / "build/test/obj/a.o", game / "build/test/src/a.o")
+                unit = objects.objdiff_units(project, "test")["a"]
+                tried = candidate.compare(project, "test", unit, "_Z7checkedi", a_cpp)
+                seen[trap] = (diff["exact"] == diff["total"], tried["exact"])
+            self.assertEqual(seen, {None: (False, False), "0x00008002": (True, True)})
+            if OBJDIFF:
+                measures = json.loads((game / "build/test/report.json").read_text())["measures"]
+                self.assertEqual(measures["matched_code"], measures["total_code"])
+            commands = json.loads((game / "build/compile_commands.json").read_text())
+            self.assertFalse(any("trap" in c["arguments"] for c in commands), "editors get the compiler's command")
+            # a cold section's too: clang puts a deleting destructor of an abstract class in .text.unlikely.
+            cold = root / "cold.o"
+            (root / "cold.cpp").write_text("struct Shape { virtual ~Shape(); virtual int area() const = 0; };\n"
+                                           "Shape::~Shape() {}\nextern const unsigned looks_like_a_trap = 0xD4200020u;\n",
+                                           encoding="utf-8")
+            subprocess.run([CLANG, *FLAGS, str(root / "cold.cpp"), "-o", str(cold)], check=True, capture_output=True)
+            self.assertEqual(build.apply_trap(cold, "0x00008002"), 1)
+            rewritten = Elf.load(cold)
+            self.assertIn(udf, rewritten.data(rewritten.section(".text.unlikely.")))
+            self.assertIn(brk, rewritten.data(rewritten.section(".rodata")), "data is never rewritten")
+            self.assertEqual(build.apply_trap(cold, "0x00008002"), 0, "nothing left to rewrite")
+            for wrong in ("udf", "0x1FFFFFFFF", 32770):
+                with self.assertRaises(ValueError):
+                    build.settings({"platform": "switch", "build": {"trap": wrong}})
+            with self.assertRaises(ValueError):
+                build.settings({"platform": "gamecube", "build": {"trap": "0x00008002"}})
+
     def test_a_renamed_symbol_reaches_the_target_objects(self):
         """The target objects take their function names from symbols.txt, also once a report exists: the index
         reads the report, which the objects themselves wrote, so a name the file changes must come from the file."""

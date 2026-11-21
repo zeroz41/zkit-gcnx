@@ -164,6 +164,9 @@ def _compile(project: Project, target: str, unit: dict, text: str, work: Path,
             message = ("the compiler was killed by the sandbox (SIGSYS): rerun this command with permission to "
                        "run the compiler outside the sandbox\n" + message[-800:])
         return None, shlex.join(command), message
+    trap = (build.settings(project.target(target)) or {}).get("trap")
+    if trap:   # as the build writes the unit's object: its traps as the original's compiler writes them
+        build.apply_trap(built, trap)
     return built, shlex.join(command), message
 
 
