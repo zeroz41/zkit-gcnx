@@ -831,6 +831,25 @@ class SwitchSignatureTests(unittest.TestCase):
         weak = {s.key: s.weak for s in donor.signatures}
         self.assertEqual((weak["_Z6sharedi"], weak["_Z4useri"]), (True, False))   # and a name keeps its binding
 
+    def test_an_inline_two_objects_define_has_no_unit(self):
+        """The link keeps whichever object's copy of an inline comes first: where one object of the build defines
+        it, that is its unit; where two do, neither is; and a donor of only some of a build's objects (another
+        might define it too) gives an inline no unit."""
+        self.module("target", COMPILED, hide=False, **RELAXING)
+        for folder in ("one/game", "two/game", "two/more"):
+            (self.root / folder).mkdir(parents=True)
+        shutil.copy(self.root / "target.o", self.root / "one/game/built.o")
+        shutil.copy(self.root / "target.o", self.root / "two/game/built.o")
+        shutil.copy(self.root / "target.o", self.root / "two/more/built.o")
+        units = lambda donor: {s.unit for s in donor.signatures if signatures.display(s.key) == "_Z5tallyv"}
+        self.assertEqual(units(signatures.build("one", objects=[self.root / "one"])), {"game/target.cpp"})
+        self.assertEqual(units(signatures.build("two", objects=[self.root / "two"])), {""})
+        some = signatures.Donor("some")
+        some.signatures = [signatures.Signature("_Z5tallyv", 4, "", (), "game/target.cpp", "some", weak=True)]
+        some.platform = "switch"
+        signatures._inline_units(some, every_object=False)
+        self.assertEqual(units(some), {""})
+
     def test_most_donors_decide_a_functions_unit(self):
         """One donor's split can put a file's code in the wrong unit: the unit more donors give a function wins
         over the unit of the donor that named it; on a tie, the namer's stays."""
@@ -851,8 +870,8 @@ class SwitchSignatureTests(unittest.TestCase):
         """clang's object of a file and lld's relaxing link of it: every function the object defines has the shape
         of its linked code, though lld made one GOT load `adrp` + `add` and the near ones `nop` + `adr`; a call to
         a file-local function names it through its section; a class table's slots are its virtuals; the object
-        is its source file's unit in its folder, but an inline has no unit and its static is weak. Read blind,
-        the link takes the object's names."""
+        is its source file's unit in its folder, an inline only it defines too, and the inline's static is weak.
+        Read blind, the link takes the object's names."""
         elf, symbols, at = self.module("target", COMPILED, hide=False, **RELAXING)
         folder = self.root / "objects" / "game"
         folder.mkdir(parents=True)
@@ -872,8 +891,8 @@ class SwitchSignatureTests(unittest.TestCase):
         self.assertEqual({r.token for r in compiled["_Z4useri"].references},
                          {("n", signatures.key("_ZL6helperi", "local", unit), 0)})
         self.assertEqual(donor.tables["_ZTV5Shape"], ["_ZN5ShapeD1Ev", "_ZN5ShapeD0Ev", "_ZNK5Shape4areaEv"])
-        self.assertEqual({s.unit for name, s in compiled.items() if name != "_Z5tallyv"}, {unit})
-        self.assertEqual((compiled["_Z5tallyv"].unit, compiled["_Z5tallyv"].weak), ("", True))
+        self.assertEqual({s.unit for s in compiled.values()}, {unit})
+        self.assertTrue(compiled["_Z5tallyv"].weak)
         self.assertEqual(donor.weak, ["_ZZ5tallyvE7s_tally"])
         built = Elf.load(folder / "built.o")
         self.assertEqual(signatures.compiled_unit(built, "game\\built.o"), unit)

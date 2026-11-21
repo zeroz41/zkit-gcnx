@@ -56,7 +56,7 @@ import math
 import re
 import struct
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -522,8 +522,8 @@ def _add_aarch64_object(donor: Donor, elf, unit: str, rows: dict[int, list]) -> 
     pairs a linker relaxes take one form on both sides (`unrelaxed`). A reference through a section symbol (a
     file-local function or variable) names the symbol it falls in. The object's functions, its code sections
     (one per function with -ffunction-sections) in order, are its layout; an inline or a template instance has
-    no place in it and no unit, the link keeping whichever unit's copy comes first, and its weak data is
-    marked weak as an original's is."""
+    no place in it, the link keeping whichever unit's copy comes first, and keeps this unit only until another
+    object defines it too (`_inline_units`); its weak data is marked weak as an original's is."""
     from . import aarch64
     from .elf import SHT_NOBITS
     held = {index: sorted(symbols, key=lambda s: s.value) for index, symbols in rows.items()}
@@ -587,10 +587,23 @@ def _add_aarch64_object(donor: Donor, elf, unit: str, rows: dict[int, list]) -> 
                     references[at] = (kind, None)
             shaped = unrelaxed(words, [(4 * at, kind, what) for at, (kind, what) in sorted(references.items())])
             found.append(Signature(named, 4 * len(words), digest(words, ((o, k) for o, k, _ in shaped)),
-                                   tuple(Reference(o, k, t) for o, k, t in shaped), "" if weak else unit, donor.name,
-                                   weak=weak))
+                                   tuple(Reference(o, k, t) for o, k, t in shaped), unit, donor.name, weak=weak))
     _neighbours(found, order)
     donor.signatures += found
+
+
+def _inline_units(donor: Donor, every_object: bool) -> None:
+    """An AArch64 object's inline or template instance keeps its unit only where the donor holds every object of
+    a build and that object alone defines it: whichever copy a link keeps is that one's. Several objects
+    defining it, or a donor of some of a build's objects (another may define it too), leave it no unit."""
+    if donor.platform != "switch":
+        return
+    definers: dict[str, set[str]] = collections.defaultdict(set)
+    for s in donor.signatures:
+        if s.weak and s.unit and s.place is None:
+            definers[s.key].add(s.unit)
+    donor.signatures = [replace(s, unit="") if s.weak and s.unit and s.place is None and
+                        (not every_object or len(definers[s.key]) > 1) else s for s in donor.signatures]
 
 
 def compiled_unit(elf, path: str) -> str:
@@ -715,6 +728,7 @@ def build(name: str, image: Path | None = None, symbols: Path | None = None, map
         elif elf.machine == "aarch64" and elf.type == 1:
             add_object(donor, elf, compiled_unit(elf, unit))
             donor.platform = "switch"
+    _inline_units(donor, every_object=True)
     donor.sources += [str(p) for p in objects]
     if not donor.signatures:
         raise ValueError(f"No named functions found for {name}")
@@ -1965,6 +1979,7 @@ def build_project(project, target: str, name: str, complete: bool = False) -> Do
         elf = Elf.load(path)
         add_object(donor, elf, compiled_unit(elf, unit) if switch else source)
     donor.platform = "switch" if switch else "gamecube"
+    _inline_units(donor, every_object=False)
     donor.sources.append(f"{project.config['id']}:{target} complete units")
     return donor
 
