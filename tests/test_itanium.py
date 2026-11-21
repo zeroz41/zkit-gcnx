@@ -66,6 +66,25 @@ class ItaniumClassTests(unittest.TestCase):
         self.assertEqual([b for _, b in classes["Multi"].bases], ["Mid", "Iface"])   # Iface::pong inherited
         self.assertEqual(classes["Multi"].groups[1].offset, classes["Multi"].bases[1][0])
 
+    def test_a_thunk_s_name_takes_the_module_s_offset(self):
+        """A further base's group gives each thunk it holds its offset; a thunk name carried over from a build where
+        the base sat elsewhere (the donor's shape match leaves the offset out) takes the module's."""
+        from zkit import analyze, signatures
+        thunks = {f.address: f.name for f in self.program.functions if f.name.startswith("_ZThn")}
+        self.assertTrue(thunks)
+        offsets = itanium.thunk_offsets(self.program)
+        for address, name in thunks.items():
+            self.assertEqual(f"_ZThn{offsets[address]}_", name[:len(f"_ZThn{offsets[address]}_")], name)
+        address, name = next(iter(thunks.items()))
+        wrong = name.replace(name.split("_")[1], "ZThn24", 1)
+        named = [signatures.Proposal(address, wrong, "function", "shape")]
+        self.assertEqual([p.name for p in analyze._thunk_offsets(self.program, named)], [name])
+        from dataclasses import replace       # a name the symbols already carry is corrected too
+        carried = self.program.derived([replace(f, name=wrong) if f.address == address else f
+                                        for f in self.program.functions])
+        self.assertEqual([(p.address, p.name) for p in analyze._thunk_offsets(carried, [])], [(address, name)])
+        self.assertEqual(analyze._thunk_offsets(self.program, []), [])     # right names stay as they are
+
     def test_slots_name_the_overrides(self):
         """With Leaf::get and Multi::more unnamed, the others in their slots name them again (a const method too);
         a parameter naming the class the name moves to is left (a mangler would substitute it)."""

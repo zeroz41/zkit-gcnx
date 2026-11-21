@@ -94,6 +94,48 @@ def methods(program: Program) -> dict[int, Method]:
     return out
 
 
+def thunk_offsets(program: Program, classes: dict[str, ItClass] | None = None) -> dict[int, int]:
+    """{function address: the `this` adjustment a `_ZThn<offset>_` name of it states} for the functions a further
+    base's group of a class table holds: that group's offset, where every group holding the function agrees, and
+    where the function's own code adjusts `this` (`sub x0, x0, #offset`) it says the same. A thunk that adjusts
+    nothing (it was inlined into a `ret`) has only its group. A table no name says is one is read too where it holds a
+    function a thunk's name names (its groups prove it a table). The offset is the module's own layout, which
+    another build of the class (a name carried over from it) need not share."""
+    classes = classes if classes is not None else recover(program)
+    tables = [(cls.table, cls.groups) for cls in classes.values()]
+    named = {cls.table for cls in classes.values()}
+    thunks = {f.address for f in program.functions if f.name.startswith("_ZThn")}
+    holders = {o.address: o for at, target in program.image.pointers.items() if target in thunks
+               and (o := program.object_at(at)) is not None and o.address not in named}
+    tables += [(o.address, _groups(program, o.address, o.size)) for o in holders.values()]
+    groups: dict[int, set[int]] = collections.defaultdict(set)
+    for _, found in tables:
+        for group in found[1:]:
+            for s in group.slots:
+                if isinstance(s, int):
+                    groups[s].add(group.offset)
+    out = {}
+    for address, offsets in groups.items():
+        if len(offsets) != 1 or address not in program.function_index:
+            continue
+        offset = next(iter(offsets))
+        own = _thunk_adjustment(program, address)
+        if offset > 0 and own in (None, offset):
+            out[address] = offset
+    return out
+
+
+def _thunk_adjustment(program: Program, address: int) -> int | None:
+    """The amount a thunk's first instruction subtracts from `this` (`sub x0, x0, #n{, lsl #12}`), or None."""
+    try:
+        word = program.platform.words(program.image, address, 4)[0]
+    except (ValueError, IndexError):
+        return None
+    if word & 0xFF8003FF != 0xD1000000:             # sub x0, x0, #imm (64-bit, no flags)
+        return None
+    return (word >> 10 & 0xFFF) << (12 if word >> 22 & 1 else 0)
+
+
 def _thunk_target(program: Program, address: int) -> int | None:
     """The function a this-adjusting thunk branches to (`sub x0, x0, #n` or `add`, then `b`)."""
     function = program.functions[program.function_index[address]]

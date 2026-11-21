@@ -45,6 +45,7 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
              and p.address not in initializers]
     if program.platform.name != "gamecube":
         named += _slot_names(program, named)
+        named = _thunk_offsets(program, named)
         symbols = {address: (name, "object", 0) for address, name in misplaced.items()}
         symbols |= {p.address: (p.name, "function" if p.kind == "function" else "object", 0) for p in named}
         sizes = {p.address: p.size for p in named if p.kind == "object" and p.size}
@@ -109,6 +110,32 @@ def _slot_names(program: Program, named: list) -> list:
                         table_of.setdefault(slot, cls.table)
         out += [signatures.Proposal(address, name, "function", kind, weak=table_of.get(address) in weak)
                 for address, name in find(renamed, classes).items()]
+    return out
+
+
+def _thunk_offsets(program: Program, named: list) -> list:
+    """The proposals with each `_ZThn<offset>_` name's offset the module's own (`itanium.thunk_offsets`), and a
+    proposal for each thunk the symbols already name with another offset: a donor's thunk matches by its shape,
+    which leaves out the offset its class's layout in that build gave it, so a name carried over from another build
+    can state that build's."""
+    import re
+    from dataclasses import replace
+    from . import itanium, signatures
+    thunk = re.compile(r"_ZThn\d+_")
+    renamed = signatures.renamed(program, named)
+    if not any(thunk.match(f.name) for f in renamed.functions):
+        return named
+    offsets = itanium.thunk_offsets(renamed)
+
+    def fixed(address: int, name: str) -> str:
+        offset = offsets.get(address)
+        return name if offset is None or not thunk.match(name) else thunk.sub(f"_ZThn{offset}_", name, count=1)
+    out = [replace(p, name=fixed(p.address, p.name)) if p.kind == "function" and thunk.match(p.name) else p
+           for p in named]
+    proposed = {p.address for p in named}
+    out += [signatures.Proposal(f.address, fixed(f.address, f.name), "function", "thunk offset")
+            for f in program.functions if f.address not in proposed and thunk.match(f.name)
+            and fixed(f.address, f.name) != f.name]
     return out
 
 
