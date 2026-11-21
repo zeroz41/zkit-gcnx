@@ -408,6 +408,31 @@ SHAPE_BODIES = {SHAPE_DEPTH: "int Shape::depth() const { return d * d - w * 11 +
                 SHAPE_COLOR: "int Shape::color() const { return (w << 4) + h * 19 - d; }\n"}
 
 
+# a derived class whose base one update took a virtual from (@GONE@), with the code of two of its own changed
+KID_GONE = "virtual int gone(); "
+KID_CLASS = """int g_k = 3;
+struct Base { virtual ~Base(); virtual int a() const; @GONE@int w, h; };
+struct Kid : Base { ~Kid(); int a() const; virtual int set(int v); virtual int step(); virtual int is() const;
+  virtual int reset(); virtual int tail(); int n; };
+Base::~Base() {}
+int Base::a() const { int t = 0; for (int i = 0; i < w; i++) t += (h ^ i) * 5 - g_k; return t; }
+@GONEBODY@Kid::~Kid() { g_k = n; }
+int Kid::a() const { int t = n; for (int i = 0; i < h; i++) t = t * 3 + (w - i) * g_k; return t ^ 0x55; }
+int Kid::set(int v) { for (int i = 0; i < v; i++) n += (w * i) ^ (h + g_k); return n ^ h; }
+int Kid::step() { for (int i = 0; i < w; i++) n = n * @STEP@ + (h ^ i) - g_k; return n; }
+int Kid::is() const { int t = 0; for (int i = 0; i < n; i++) t += (w > i) * 7 + (h != g_k); return t; }
+int Kid::reset() { for (int i = 0; i < h; i++) w = w * @RESET@ - (n ^ i); n = g_k; return w; }
+int Kid::tail() { int t = 1; for (int i = 0; i < n; i++) t = t * 11 + (w ^ i) - (h << 2); return t; }
+Base *make(int w) { Kid *k = new Kid(); k->w = w * g_k + @STEP@; k->h = w - @RESET@; k->n = 0; return k; }
+"""
+
+
+def kid_class(gone: str, step: int, reset: int) -> str:
+    body = "int Base::gone() { return h * 9 - w; }\n" if gone else ""
+    return KID_CLASS.replace("@GONE@", gone).replace("@GONEBODY@", body).replace(
+        "@STEP@", str(step)).replace("@RESET@", str(reset))
+
+
 def shape_class(added: str, removed: str) -> str:
     return SHAPE_CLASS.replace("@ADDED@", added).replace("@REMOVED@", removed).replace(
         "@BODY@", SHAPE_BODIES.get(added, "") + SHAPE_BODIES.get(removed, ""))
@@ -490,6 +515,19 @@ class SwitchSignatureTests(unittest.TestCase):
             self.assertEqual(found.get(at[name]), name)
         self.assertNotIn(at["_ZNK5Shape5colorEv"], found)
         self.assertNotIn("_ZNK5Shape5depthEv", found.values())
+
+    def test_a_table_a_base_took_a_slot_from(self):
+        """A later build took a virtual from a base class and changed the code that builds the derived one, so the
+        derived class's table is a slot shorter and nothing that refers to it is named: its destructors in its
+        first two slots name it, and its changed slots between named ones take their names."""
+        elf, symbols, _ = self.module("donor", kid_class(KID_GONE, 7, 5), hide=False)
+        donor = signatures.build("earlier", elf, symbols)
+        elf, symbols, at = self.module("target", kid_class("", 9, 3), hide=True)
+        program = Program.from_symbols(Switch(), elf, symbols)
+        found = {p.address: (p.name, p.evidence) for p in signatures.propose(program, [donor])}
+        self.assertEqual(found.get(at["_ZTV3Kid"]), ("_ZTV3Kid", "table"))
+        for name in ("_ZN3Kid4stepEv", "_ZN3Kid5resetEv"):
+            self.assertEqual(found.get(at[name]), (name, "slot"))
 
     def test_changed_code_pairs_by_likeness(self):
         """Between two matched functions, the donor has two functions an update changed with one it dropped
@@ -791,7 +829,11 @@ class SwitchSignatureTests(unittest.TestCase):
         self.assertEqual(signatures.aligned(list("abXdef"), list("abcdef")), [(i, i) for i in range(6)])  # changed
         self.assertEqual(signatures.aligned(list("abNcde"), list("abcdeR")),        # one added, one removed
                          [(0, 0), (1, 1), (3, 2), (4, 3), (5, 4)])
-        self.assertEqual(signatures.aligned(list("aXYd"), list("abcd")), [(0, 0), (3, 3)])  # two side by side
+        self.assertEqual(signatures.aligned(list("aXYd"), list("abcde")), [(0, 0), (3, 3)])  # two side by side
+        # another compiler changed every slot: as many slots on both sides pair in order between the anchors
+        self.assertEqual(signatures.aligned(list("aXYd"), list("abcd")), [(i, i) for i in range(4)])
+        self.assertEqual(signatures.aligned(list("WXYZ"), list("abcd")), [(i, i) for i in range(4)])
+        self.assertEqual(signatures.aligned(list("aXbYZ"), list("aQRbS")), [(0, 0), (2, 3)])  # spans differ
         self.assertEqual(signatures.aligned(["s", "s", "a"], ["s", "s", "s", "a"]), [(2, 3)])  # repeats can slide
 
     def test_analyze_gives_a_name_to_one_function(self):

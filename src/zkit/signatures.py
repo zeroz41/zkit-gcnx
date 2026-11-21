@@ -118,6 +118,7 @@ def display(name: str) -> str:
 
 
 TABLES = ("__vt__", "_ZTV")      # a class table: CodeWarrior's, Itanium's
+DELETING = re.compile(r"D0Ev(?:\0|$)")          # an Itanium deleting destructor's name
 
 
 def c_name(name: str) -> bool:
@@ -139,7 +140,11 @@ def aligned(ours: list, theirs: list) -> list[tuple[int, int]]:
     index names nothing by itself. Code that is the same in both tables and occurs once in each anchors them; between
     two anchors (or the tables' ends), as many slots on both sides pair in order where their code is the same, or
     differs in single slots between same ones (changed in place). Two changed slots side by side, or a different
-    count, could be a slot added next to one removed: they pair with nothing."""
+    count, could be a slot added next to one removed: they pair with nothing, unless both tables have as many slots.
+    Then every span between two anchors that is as long on both sides pairs in order: a build by another compiler
+    changes the code of nearly every slot (a new prologue, a sized delete), and with as many slots on both sides
+    and the same slots anchoring them, a slot added next to one removed is what the names then checked refute
+    (`Matcher.fits`, the file a function cites)."""
     import difflib
     a = [x if x is not None else ("?", 0, i) for i, x in enumerate(ours)]
     b = [x if x is not None else ("?", 1, j) for j, x in enumerate(theirs)]
@@ -156,7 +161,7 @@ def aligned(ours: list, theirs: list) -> list[tuple[int, int]]:
             continue
         span = [(i0 + k, j0 + k) for k in range(1, i1 - i0)]
         changed = [a[i] != b[j] for i, j in span]
-        if not any(x and y for x, y in zip(changed, changed[1:])):
+        if len(a) == len(b) or not any(x and y for x, y in zip(changed, changed[1:])):
             pairs += span
     return pairs
 
@@ -1376,9 +1381,16 @@ class _State:
         return next(iter(shapes)) if len(shapes) == 1 else None if shapes else ("import", named)
 
     def name_slots(self, table: int, slots: list[tuple[str, int | str | None]], row: list[str | None]) -> None:
-        """A named table's slots from one donor table of its class, as `aligned` pairs them."""
+        """A named table's slots from one donor table of its class, as `aligned` pairs them. A slot whose function
+        is already named as a donor slot is the same slot whatever its code: the name anchors the pair."""
         ours = [self.slot_code(kind, value) for kind, value in slots]
-        for i, j in aligned(ours, [self.donor_code(k) for k in row]):
+        theirs = [self.donor_code(k) for k in row]
+        for i, (kind, value) in enumerate(slots):
+            known = self.known.get(value) if kind == "function" else None
+            if known and known in row:
+                ours[i] = ("named", known)
+                theirs = [("named", known) if k == known else code for k, code in zip(row, theirs)]
+        for i, j in aligned(ours, theirs):
             (kind, target), named = slots[i], row[j]
             if kind == "function" and named and named in self.m.by_key:
                 self.vote(target, named, table, "slot")
@@ -1437,6 +1449,33 @@ class _State:
                 and all(row[i] in (None, "", k) for i, k in known) for row in self.m.tables[cls])}
             if len(fits) == 1:
                 self.vote(address, fits.pop(), address, "table")
+            elif not fits and (owner := self.destroyed(dict(known))):
+                self.vote(address, owner, address, "table")
+
+    def destroyed(self, known: dict[int, str]) -> str | None:
+        """The class of a primary table whose second slot holds a named deleting destructor: in the Itanium ABI the
+        first two slots of a class with a virtual destructor hold its complete and deleting destructors, its own
+        whether it declared one or not, so they name the class whatever slots its bases added or removed (a table
+        of another length than the donor's). The complete one is often the base destructor's alias, which no code
+        tells apart, so the deleting one decides: the one donor class whose primary tables hold it there (and the
+        first slot's, when that is named), with every other named slot of the table in them in the same order."""
+        first, second = known.get(0), known.get(1)
+        if not (second and DELETING.search(second)):
+            return None
+        classes = self.m.slot_classes()
+        fits = set(classes.get((1, second), set()))
+        if first is not None:
+            fits &= classes.get((0, first), set())
+        if len(fits) != 1:
+            return None
+        cls = next(iter(fits))
+        names = [k for _, k in sorted(known.items())]
+        for row in self.m.tables[cls]:
+            primary = row[:row.index(None)] if None in row else row
+            places = [primary.index(k) for k in names if k in primary]
+            if places != sorted(places) or len(set(places)) != len(places):
+                return None
+        return cls
 
     def gaps(self) -> None:
         """Between two target functions named from one donor original's, in its order: functions of one shape take the
