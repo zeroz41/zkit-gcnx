@@ -731,5 +731,28 @@ class SwitchBuildTests(unittest.TestCase):
             self.assertIn("no work to do", dry.stdout, dry.stdout + dry.stderr)   # its dependencies are found
 
 
+class ObjdiffUnitsTests(unittest.TestCase):
+    def test_object_paths_come_back_from_the_repository_root_wherever_the_project_file_sits(self):
+        """objdiff reads a unit's objects from its project file's folder: a target whose file sits in a subfolder
+        (one of several targets) has them as ../../build/...; every reader joins them to the repository's root."""
+        for where, prefix in (("objdiff.json", ""), ("config/t/objdiff.json", "../../")):
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                (root / where).parent.mkdir(parents=True, exist_ok=True)
+                (root / where).write_text(json.dumps({"units": [
+                    {"name": "a", "target_path": f"{prefix}build/t/obj/a.o", "base_path": f"{prefix}build/t/src/a.o",
+                     "metadata": {"source_path": "src/a.cpp"}},
+                    {"name": "b", "target_path": f"{prefix}build/t/obj/b.o"}]}), encoding="utf-8")
+                manifest = root / "p.json"
+                manifest.write_text(json.dumps({"schema_version": 1, "id": "prog", "repositories": {
+                    "decomp": {"root": ".", "role": "decomp"}}, "targets": {"t": {
+                        "repository": "decomp", "module": "main", "objdiff": where}}}), encoding="utf-8")
+                units = objects.objdiff_units(Project.load(manifest), "t")
+                self.assertEqual((units["a"]["target_path"], units["a"]["base_path"], units["b"]["target_path"]),
+                                 ("build/t/obj/a.o", "build/t/src/a.o", "build/t/obj/b.o"), where)
+                self.assertNotIn("base_path", units["b"])
+                self.assertEqual(units["a"]["metadata"], {"source_path": "src/a.cpp"})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import bisect
 import json
+import os
 import re
 import shutil
 import struct
@@ -37,14 +38,18 @@ def _anonymous(name: str, bind: str) -> bool:
 
 
 def objdiff_units(project: Project, target: str) -> dict[str, dict]:
-    """{unit name: objdiff.json unit} for a target's repository."""
+    """{unit name: objdiff.json unit} for a target's repository, its objects (`target_path`, `base_path`) relative to
+    the repository's root: objdiff reads them from the project file's own folder, the root only when it sits there."""
     config = project.target(target)
     path = project.file(config["repository"], config.get("objdiff", "objdiff.json"))
     if not path.is_file():
         raise ValueError(f"No {path.name} in {config['repository']}: build the project once (it writes objdiff's "
                          "project file)")
     data = json.loads(path.read_text(encoding="utf-8"))
-    return {u["name"]: u for u in data.get("units", []) if u.get("name")}
+    root = project.root(config["repository"])
+    rooted = lambda p: os.path.relpath(path.parent / p, root).replace(os.sep, "/")
+    return {u["name"]: {**u, **{key: rooted(u[key]) for key in ("target_path", "base_path") if u.get(key)}}
+            for u in data.get("units", []) if u.get("name")}
 
 
 def unit_holding(project: Project, target: str, row) -> dict | None:
