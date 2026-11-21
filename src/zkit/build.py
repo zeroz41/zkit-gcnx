@@ -511,6 +511,7 @@ def _paths(items: list[str]) -> str:
 class Ninja:
     def __init__(self):
         self.lines: list[str] = []
+        self.rules: dict[str, tuple] = {}
 
     def comment(self, text: str) -> None:
         self.lines += [f"# {line}" for line in text.splitlines()]
@@ -519,6 +520,13 @@ class Ninja:
         self.lines.append(f"{'  ' if indent else ''}{name} = {value}")
 
     def rule(self, name: str, command: str, **extra: str) -> None:
+        """A rule, written once: a target's rule that another target already wrote (each Switch target's link) is
+        the same rule; one by the same name that differs is an error, as ninja would make it."""
+        if name in self.rules:
+            if self.rules[name] != (command, extra):
+                raise ValueError(f"ninja rule {name} defined twice, differently")
+            return
+        self.rules[name] = (command, extra)
         self.lines.append(f"rule {name}")
         self.variable("command", command, True)
         for key, value in extra.items():

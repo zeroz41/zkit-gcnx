@@ -169,6 +169,17 @@ class NinjaCommandTests(unittest.TestCase):
             self.assertEqual(build.ninja_command(), "ninja")  # not a virtual environment: PATH finds it
 
 
+    def test_a_rule_two_targets_share_is_written_once(self):
+        """Each Switch target's link uses the same rule: written once, as ninja allows; another by its name is
+        refused."""
+        ninja = build.Ninja()
+        ninja.rule("link", "zkit link $target", description="LINK $target")
+        ninja.rule("link", "zkit link $target", description="LINK $target")
+        self.assertEqual(ninja.text().count("rule link"), 1)
+        with self.assertRaises(ValueError):
+            ninja.rule("link", "other $target")
+
+
 class ConfigureTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
