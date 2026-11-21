@@ -52,9 +52,18 @@ def compile_command(project: Project, target: str, unit: dict) -> tuple[list[str
     if database is not None:
         for entry in json.loads(database.read_text(encoding="utf-8")):
             path = Path(entry["directory"]) / entry["file"]
-            if path.resolve() == (root / source).resolve():
-                argv = entry.get("arguments") or shlex.split(entry["command"])
-                return list(argv), Path(entry["directory"]), entry["file"]
+            if path.resolve() != (root / source).resolve():
+                continue
+            # Targets that share a source file (two versions of a game from one src/) each have their own
+            # command; the database may hold only the last-built target's, so the entry must build this object.
+            output = entry.get("output")
+            if output and (Path(entry["directory"]) / output).resolve() != (root / base).resolve():
+                continue
+            argv = entry.get("arguments") or shlex.split(entry["command"])
+            return list(argv), Path(entry["directory"]), entry["file"]
+    planned = _planned_command(project, target, unit)  # a zkit build: the command it builds this object with
+    if planned is not None:
+        return planned
     raise ValueError(f"No build command for {base}: neither build.ninja nor compile_commands.json names it")
 
 

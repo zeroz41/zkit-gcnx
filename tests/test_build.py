@@ -227,6 +227,13 @@ class ConfigureTests(unittest.TestCase):
         # `zkit try` compiles candidates with exactly this command
         found, workdir, source = candidate.compile_command(Project.load(self.manifest), "t", units[0])
         self.assertEqual((found, workdir, source), (argv, self.game, "src/game/Enemy.cpp"))
+        # another target built last from the same source: its command builds its own object, not this one
+        database = self.game / "build/compile_commands.json"
+        entries = json.loads(database.read_text())
+        entries[0].update(arguments=["other-compiler", "-c", "src/game/Enemy.cpp"], output="build/U/src/game/Enemy.o")
+        database.write_text(json.dumps(entries))
+        found, workdir, source = candidate.compile_command(Project.load(self.manifest), "t", units[0])
+        self.assertEqual((found, workdir, source), (argv, self.game, "src/game/Enemy.cpp"))
         # a unit with no source file yet compiles as the build will compile it once it has one
         found, workdir, source = candidate.compile_command(Project.load(self.manifest), "t", units[1])
         self.assertEqual((found, workdir, source), (
