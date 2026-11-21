@@ -43,7 +43,7 @@ import collections
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .program import CODE_SECTIONS, DataObject, Program
 
@@ -93,6 +93,8 @@ class Evidence:
     inlined: set[tuple[int, int, str]] = field(default_factory=set)   # joins only another class's constructor
                                                                       # forming a table's address makes
     ordered: list[tuple[int, int, str]] = field(default_factory=list)  # joins a pool out of code order makes
+    sources: set[str] = field(default_factory=set)     # another build's units that are files of the sources
+                                                       # (compiled objects'): a name, never a piece or placeholder
     toward: dict[tuple[int, int, str], int] = field(default_factory=dict)   # separation -> the place its
                                                                             # boundary takes among equal ones
 
@@ -138,7 +140,7 @@ def _initialized(program: Program) -> set[int]:
     return out
 
 
-def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence:
+def evidence(program: Program, placed: dict[int, str] | None = None, sources: Iterable[str] = ()) -> Evidence:
     users = program.users()
     local = {o: sorted(fs) for o, fs in users.items() if fs and max(fs) - min(fs) <= TIGHT}
     initialized = _initialized(program)
@@ -170,6 +172,7 @@ def evidence(program: Program, placed: dict[int, str] | None = None) -> Evidence
     ev = Evidence(local, joins + firsts, separations, firsts=firsts)
     ev.globals = {row for row, (o, fs) in zip(joins, tight) if _through_got(program, o, fs)}
     ev.reach = _direct_reach(program, users, shared | initialized)
+    ev.sources = set(sources)
     _file_evidence(program, ev, placed)
     ev.reach = _cited_reach(ev)
     ev.joins += _table_joins(program, ev)
@@ -1114,7 +1117,8 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
     for address, unit in (placed or {}).items():
         index = program.function_index.get(address)
         if index is not None and unit and index not in ev.files:
-            ev.files[index] = unit if UNNAMED.match(unit) else PIECE.sub("", unit)   # its address is no piece's
+            # a piece's address is no piece's here; a placeholder, or a file of the sources, is that file
+            ev.files[index] = unit if UNNAMED.match(unit) or unit in ev.sources else PIECE.sub("", unit)
             ev.placed.add(index)
     # One file named two ways: a path relative to an include folder (or another build's unit name) is the one
     # full path that ends in it.
@@ -1873,12 +1877,13 @@ def linker_spans(image) -> list[tuple[int, int]]:
 
 
 def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
-            placed: dict[int, str] | None = None) -> dict[str, Any]:
+            placed: dict[int, str] | None = None, sources: Iterable[str] = ()) -> dict[str, Any]:
     """Units for every function from the evidence: boundaries, a name per unit, and the data each unit owns.
     `fixed` units ({unit, how, ranges: [(section, start, end)]}, from a linker map: mapalign.py) are taken as
     they are, code and data; the evidence decides the rest around them. `placed` ({function address: unit},
-    from another build's units) counts like a source file a function cites."""
-    ev = evidence(program, placed)
+    from another build's units) counts like a source file a function cites; of those, `sources` are files of
+    the sources (a compiled object's unit), each kept as its own file under its own name."""
+    ev = evidence(program, placed, sources)
     cuts = boundaries(program, ev)
     text = program.platform.text
     functions = program.functions
@@ -1918,8 +1923,8 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
                 else "another build"
         else:
             name, how = _unnamed(program, class_of, first, end, qualified)
-        if UNNAMED.match(name):                  # another build's placeholder: this build's address names it
-            folder = name.rpartition("/")[0]
+        if UNNAMED.match(name) and name not in ev.sources:   # another build's placeholder: this build's address
+            folder = name.rpartition("/")[0]                   # names it (a file of the sources keeps its name)
             name, how = f"{folder + '/' if folder else ''}unit_{text(functions[first].address)[2:]}.cpp", "placeholder"
         named.append((first, end, name, how))
     named = _not_another_build_s_file(program, named, lambda first, end: _unnamed(program, class_of, first, end,
@@ -1931,7 +1936,7 @@ def propose(program: Program, fixed: list[dict[str, Any]] | None = None,
     for piece, (first, end, name, how) in enumerate(named):
         if (first, end) not in held:
             if piece not in plain or name in reserved:   # one file in several pieces keeps one name per piece
-                stem, dot, ext = name.rpartition(".")
+                stem, dot, ext = (PIECE.sub("", name) if name in ev.sources else name).rpartition(".")
                 name = f"{stem}_{text(functions[first].address)[2:]}.{ext}"
         last = functions[end - 1]
         units.append({"unit": name, "named_by": how, "first": first, "end": end,

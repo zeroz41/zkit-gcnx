@@ -28,8 +28,10 @@ int lib::Hand::play(int n) { return cards + tick(n * 3); }
 """
 
 
-def owners(root: Path) -> tuple[dict[str, int], dict[int, str]]:
-    """Builds both files into a stripped module and proposes its units with the other build's placements."""
+def owners(root: Path, pool: str = "lib/pool.cpp", hand: str = "lib/hand.cpp",
+           sources: tuple[str, ...] = ()) -> tuple[dict[str, int], dict[int, str]]:
+    """Builds both files into a stripped module and proposes its units with the other build's placements (`pool`'s
+    and `hand`'s names for the two files' code)."""
     objects = []
     for name, text in {"pool.cpp": POOL, "hand.cpp": HAND}.items():
         (root / name).write_text(text, encoding="utf-8")
@@ -46,10 +48,10 @@ def owners(root: Path) -> tuple[dict[str, int], dict[int, str]]:
                for a, size in module.functions()]
     program = Program.from_symbol_list(Switch(), module, symbols)
     program.cflags = COMPILE
-    placed = {a: ("lib/pool.cpp" if n.startswith("_ZN3lib4Pool") else "lib/hand.cpp") for a, n in name.items()
+    placed = {a: (pool if n.startswith("_ZN3lib4Pool") else hand) for a, n in name.items()
               if n.startswith(("_ZN3lib4Pool", "_ZN3lib4Hand"))}
     owner = {}
-    for unit in units.propose(program, placed=placed)["units"]:
+    for unit in units.propose(program, placed=placed, sources=sources)["units"]:
         for index in range(unit["first"], unit["end"]):
             owner[program.functions[index].address] = unit["unit"]
     return at, owner
@@ -68,3 +70,17 @@ class CallAffinityTests(unittest.TestCase):
         self.assertTrue(owner[draw].endswith("hand.cpp"))
         self.assertEqual(owner[drain], owner[take])
         self.assertEqual(owner[refill], owner[take])
+
+    def test_a_file_of_the_sources_keeps_its_name(self):
+        """Another build's placeholder (`unit_<its address>.cpp`) and piece (`hand_<its address>.cpp`) take this
+        build's address, unless they are files of the sources (a compiled object's unit): then each is its own
+        file under that name."""
+        pool, hand = "lib/unit_7100001234.cpp", "lib/hand_7100005678.cpp"
+        with tempfile.TemporaryDirectory() as tmp:
+            at, owner = owners(Path(tmp), pool, hand)
+            _, kept = owners(Path(tmp), pool, hand, (pool, hand))
+        take, draw = at["_ZN3lib4Pool4takeEi"], at["_ZN3lib4Hand4drawEi"]
+        self.assertRegex(owner[take], r"^lib/unit_[0-9A-F]+\.cpp$")             # this build's address
+        self.assertNotEqual(owner[take], pool)
+        self.assertEqual(owner[draw], "lib/hand.cpp")
+        self.assertEqual((kept[take], kept[draw]), (pool, hand))

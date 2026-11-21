@@ -25,7 +25,10 @@ from .program import Program
 
 def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     from . import signatures
-    proposals = signatures.propose(program, signatures.donors()) if signatures.listed() else []
+    donors = signatures.donors() if signatures.listed() else []
+    proposals = signatures.propose(program, donors) if donors else []
+    # a donor read from compiled objects (no original) names its units after the files of the sources
+    sources = {s.unit for d in donors if not d.images for s in d.signatures if s.unit}
     initializers = units.initializers(program)
     # the donors' units; an initializer's only from another build's initializer (a constructor's shape is no file)
     placed = {p.address: p.unit for p in proposals if p.kind == "function" and p.unit
@@ -57,14 +60,14 @@ def analyze(program: Program, fixed: list[dict[str, Any]] | None = None) -> dict
         weak = {p.address for p in named if p.weak}
         with_data = _with_objects(program, _new_objects(program, symbols, sizes, set(current) - absorbed, weak))
         named_program = signatures.renamed(with_data, named)       # the names say which class owns a function
-        proposal = units.propose(named_program, fixed, placed)
+        proposal = units.propose(named_program, fixed, placed, sources)
         own = _initializer_names(program, proposal, initializers)
         named += own
         symbols |= {p.address: (p.name, "function", 0) for p in own}
         return {"units": proposal, "classes": None, "symbols": symbols,
                 "sizes": sizes, "signatures": named,     # the data named counts for the units' data
                 "weak": weak, "local": {p.address for p in own}, "absorbed": absorbed, "resized": resized}
-    proposal = units.propose(program, fixed, placed)
+    proposal = units.propose(program, fixed, placed, sources)
     result: dict[str, Any] = {"units": proposal, "classes": None, "symbols": {}, "signatures": named,
                               "weak": {p.address for p in named if p.weak}}
     program = signatures.renamed(program, named)
