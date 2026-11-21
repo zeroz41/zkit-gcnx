@@ -62,7 +62,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
 STARTING_CFLAGS = {"gamecube": [], "switch": ["-O3", "-fno-exceptions", "-fno-rtti", "-std=gnu++17"]}
 IMPORTS = "imports.txt"   # beside the target objects of a `relax` target: the module's imported names, one a line
 UNIT_KEYS = {"compiler", "cflags", "extra_cflags", "includes", "compiler_version", "source_root", "clang_plugins",
-             "clang_patches", "header_patches", "compiler_download", "optimizer", "optimizer_version"}
+             "clang_patches", "header_patches", "compiler_download", "optimizer", "optimizer_version",
+             "optimizer_patches"}
 PLUGINS = Path(__file__).parent / "clang_plugins"   # zkit's clang pass plugins (build.clang_plugins)
 PATCHES = Path(__file__).parent / "clang_patches"   # zkit's byte patches to official clang releases (build.clang_patches)
 HEADER_PATCHES = Path(__file__).parent / "header_patches"   # zkit's edits to official library headers (build.header_patches)
@@ -361,10 +362,12 @@ def patched_headers(root: Path, includes: list[str], rules: list[str]) -> tuple[
     return folder, notes
 
 
-def patched_clang(clang: Path, names: list[str], rules: list[str] = ()) -> Path | None:
+def patched_clang(clang: Path, names: list[str], rules: list[str] = (),
+                  setting: str = "build.clang_patches") -> Path | None:
     """A copy of the official `clang` with byte patches applied in turn: first each of the plugins `names` as its
     rule (build.clang_plugins where clang can load no plugin, a Windows clang.exe), then each of zkit's `rules`
-    (build.clang_patches, on every system). Each takes zkit's patch for exactly the binary it has then (its SHA-256
+    (build.clang_patches, or the `setting` that names them, such as build.optimizer_patches, on every system). Each
+    takes zkit's patch for exactly the binary it has then (its SHA-256
     picks the patch, each edit's old bytes are checked, and the result must have the patch's SHA-256); None when
     zkit has no patch for it. The copy lies beside `clang`, so it finds the same resource folder, named
     `<name>-<plugins and rules>` (clang's driver reads its mode from its name without the last `-` part, so a
@@ -372,7 +375,7 @@ def patched_clang(clang: Path, names: list[str], rules: list[str] = ()) -> Path 
     for name in names:
         plugin_source(name)
     tables = [("build.clang_plugins", name, plugin_patches(name)) for name in names] + \
-             [("build.clang_patches", name, clang_patches(name)) for name in rules]
+             [(setting, name, clang_patches(name)) for name in rules]
     patched = bytearray(clang.read_bytes())
     digest = hashlib.sha256(patched).hexdigest()
     for setting, name, patches in tables:
@@ -950,8 +953,12 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
 
 def _optimizer(root: Path, config: dict[str, Any], found: dict[str, Path | None], notes: list[str]) -> Path | None:
     """build.optimizer: the optimizer's executable (None when not found, said once), checked once against
-    build.optimizer_version as the compiler is against build.compiler_version."""
-    key = f"optimizer {config['optimizer']}"
+    build.optimizer_version as the compiler is against build.compiler_version. build.optimizer_patches names zkit's
+    clang_patches rules for a part of the optimizer (such as one optimization pass) the original's differed in: the
+    executable is then a patched copy beside the official one, as for the compiler's build.clang_patches, or the
+    official one for a binary zkit has no patch for (said once)."""
+    rules = words(config.get("optimizer_patches"))
+    key = f"optimizer {config['optimizer']} / {' '.join(rules)}"
     if key not in found:
         exe = _tool(root, config["optimizer"])
         if exe is None:
@@ -963,6 +970,14 @@ def _optimizer(root: Path, config: dict[str, Any], found: dict[str, Path | None]
             says = clang_version(exe)
             if not any(version in says for version in accepted):
                 raise ValueError(f"{exe} is not {' or '.join(map(repr, accepted))}: it says {says!r}")
+        if exe is not None and rules:
+            patched = patched_clang(exe, [], rules, "build.optimizer_patches")
+            if patched is None:
+                digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+                notes.append(f"zkit has no patch for this {exe.name} (SHA-256 {digest}) for build.optimizer_patches "
+                             f"({', '.join(rules)}): units built with them optimize with the official binary and may "
+                             "not match here")
+            exe = patched or exe
         found[key] = exe
     return found[key]
 

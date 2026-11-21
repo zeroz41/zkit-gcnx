@@ -16,12 +16,23 @@ from zkit import build
 # on another system (e.g. `wine`).
 PATCH_CLANG = os.environ.get("ZKIT_TEST_PATCH_CLANG")
 PATCH_RUNNER = os.environ.get("ZKIT_TEST_PATCH_RUNNER", "").split()
+# An official clang release folder (bin/clang++) the no-ctor-evaluation rule has a patch for, such as LLVM 19.1.7's
+# for Linux x86-64.
+OPTIMIZER_PATCH_CLANG = os.environ.get("ZKIT_TEST_OPTIMIZER_PATCH_CLANG")
 
 # A field past 0x40000: stock clang 18+ adds the offset's high part to the base and loads with the low part as the
 # load's immediate; without the merge the offset is built in a register and the load takes it as its index.
 FAR_FIELD = """
 struct Big { char pad[0x4cb58]; int value; };
 int far_field(const Big *big) { return big->value; }
+"""
+
+
+# A static initializer stock GlobalOpt runs at compile time: the store folds into the global's initializer and the
+# unit has no _GLOBAL__sub_I_ function; without the evaluation the store stays code in one.
+STATIC_INIT = """
+struct Counter { int value; Counter() : value(7) {} };
+Counter g_counter;
 """
 
 
@@ -128,6 +139,57 @@ class ClangPatchesTest(unittest.TestCase):
             made.assert_called_once_with(root, root / "clang++", "bare-return-atexit")  # built against the official
             self.assertIn("-load", step["flags"])
 
+    def test_optimizer_patches_patch_the_optimizer_not_the_compiler(self):
+        """build.optimizer_patches: the optimizer stage (the step's `cc` and argv) runs a patched copy of the
+        optimizer, made once per build; the compiler (`backend`) stays the official binary."""
+        data = bytes(range(256)) * 4
+        with tempfile.TemporaryDirectory() as temp, mock.patch("sys.platform", "linux"), \
+                mock.patch.object(build, "clang_patches", return_value=[fake_patch(data, 0x40, b"\x31\xc0\xc3")]):
+            root = Path(temp)
+            (root / "opt").mkdir()
+            (root / "opt" / "clang++").write_bytes(data)
+            (root / "cg").mkdir()
+            (root / "cg" / "clang++").write_bytes(b"code generator")
+            config = {**build.settings({"platform": "switch", "build": {"compiler": "cg/clang++",
+                                                                        "optimizer": "opt/clang++"}}),
+                      "optimizer_patches": ["no-ctor-evaluation"], "extra_cflags": []}
+            found, notes = {}, []
+            with mock.patch.object(build, "patched_clang", wraps=build.patched_clang) as patched:
+                for unit in ("a.cpp", "b.cpp"):
+                    step = build._compile(root, config, unit, build.Layout("build/t"), found, notes)
+            patched.assert_called_once_with(root / "opt" / "clang++", [], ["no-ctor-evaluation"],
+                                            "build.optimizer_patches")
+            self.assertEqual(notes, [])
+            copy = root / "opt" / "clang++-no_ctor_evaluation"
+            self.assertEqual(step["cc"], [str(copy)])
+            self.assertEqual(step["argv"][0], str(copy))
+            self.assertEqual(step["backend"], [str(root / "cg" / "clang++")])
+            self.assertIn(copy.relative_to(root).as_posix(), step["implicit"])
+            self.assertEqual(copy.read_bytes(), data[:0x40] + b"\x31\xc0\xc3" + data[0x43:])
+            self.assertEqual((root / "opt" / "clang++").read_bytes(), data)
+
+    def test_without_an_optimizer_patch_units_optimize_with_the_official_binary_and_say_so_once(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch("sys.platform", "linux"):
+            root = Path(temp)
+            (root / "clang++").write_text("")
+            config = {**build.settings({"platform": "switch", "build": {"compiler": str(root / "clang++"),
+                                                                        "optimizer": str(root / "clang++")}}),
+                      "optimizer_patches": ["no-ctor-evaluation"], "extra_cflags": []}
+            found, notes = {}, []
+            for unit in ("a.cpp", "b.cpp"):
+                step = build._compile(root, config, unit, build.Layout("build/t"), found, notes)
+            self.assertEqual(len(notes), 1)
+            self.assertIn("build.optimizer_patches (no-ctor-evaluation)", notes[0])
+            self.assertIn(hashlib.sha256(b"").hexdigest(), notes[0])
+            self.assertEqual(step["cc"], [str(root / "clang++")])
+
+    def test_optimizer_patches_may_be_set_per_unit(self):
+        config = build.settings({"platform": "switch", "build": {
+            "compiler": "clang++", "optimizer": "clang++",
+            "units": {"lib/*": {"optimizer_patches": ["no-ctor-evaluation"]}}}})
+        self.assertEqual(build.unit_settings(config, "lib/a.cpp")["optimizer_patches"], ["no-ctor-evaluation"])
+        self.assertFalse(build.unit_settings(config, "game/a.cpp").get("optimizer_patches"))
+
     def test_unknown_rule_is_refused(self):
         with tempfile.TemporaryDirectory() as temp:
             clang = Path(temp) / "clang"
@@ -195,6 +257,28 @@ class ClangPatchesTest(unittest.TestCase):
                              "add x8, x0, #76, lsl #12 ldr w0, [x8, #2904] ret")
             self.assertEqual(far_field_asm([*PATCH_RUNNER, str(copy)], source),
                              "mov w8, #52056 movk w8, #4, lsl #16 ldr w0, [x0, x8] ret")
+
+    @unittest.skipUnless(OPTIMIZER_PATCH_CLANG, "set ZKIT_TEST_OPTIMIZER_PATCH_CLANG to an official clang release "
+                                                "folder the no-ctor-evaluation rule has a patch for")
+    def test_no_ctor_evaluation_keeps_the_static_initializer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            clang = Path(temp) / "bin" / "clang++"
+            clang.parent.mkdir()
+            shutil.copyfile(Path(OPTIMIZER_PATCH_CLANG) / "bin" / "clang++", clang)
+            shutil.copymode(Path(OPTIMIZER_PATCH_CLANG) / "bin" / "clang++", clang)
+            source = Path(temp) / "init.cpp"
+            source.write_text(STATIC_INIT, encoding="utf-8")
+            copy = build.patched_clang(clang, [], ["no-ctor-evaluation"], "build.optimizer_patches")
+            self.assertIsNotNone(copy, "no patch for this clang++")
+
+            def ir(cc: Path) -> str:
+                return subprocess.run([str(cc), "--target=aarch64-none-elf", "-O2", "-S", "-emit-llvm",
+                                       str(source), "-o", "-"], check=True, capture_output=True, text=True).stdout
+            stock, patched = ir(clang), ir(copy)
+            self.assertIn("global %struct.Counter { i32 7 }", stock)   # evaluated: the store folded
+            self.assertNotIn("_GLOBAL__sub_I_", stock)
+            self.assertIn("_GLOBAL__sub_I_", patched)   # kept: the store stays code
+            self.assertIn("store i32 7", patched)
 
 
 if __name__ == "__main__":

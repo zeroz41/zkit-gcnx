@@ -1,0 +1,30 @@
+{
+  "about": [
+    "build.optimizer_patches rule `no-ctor-evaluation`: GlobalOpt without static-constructor evaluation. Stock",
+    "GlobalOpt hands a unit's static initializers (llvm.global_ctors, such as _GLOBAL__sub_I_*) to",
+    "llvm::optimizeGlobalCtorsList (llvm/lib/Transforms/Utils/CtorUtils.cpp), which runs them at compile time and,",
+    "when it can, folds what they store into the globals' initializers and drops the code. A toolchain whose",
+    "optimizer did not evaluate them keeps every static initializer as code that stores at startup. No option turns",
+    "the evaluation off, so the rule is a byte patch: optimizeGlobalCtorsList returns false (nothing changed) before",
+    "it reads llvm.global_ctors. It changes the optimizer (build.optimizer), not the code generator. zkit applies a",
+    "patch to a copy of the official binary whose SHA-256 is the patch's `sha256`, checks each edit's `old` bytes",
+    "first and the result against `patched_sha256` (build.patched_clang). Offsets are file offsets; each `why` names",
+    "the instruction (virtual address) it changes."
+  ],
+  "patches": [
+    {
+      "release": "LLVM 19.1.7 for Linux x86-64, LLVM-19.1.7-Linux-X64.tar.xz: bin/clang-19 (bin/clang and bin/clang++ link to it)",
+      "sha256": "c57e2928bc629e58da157867bb9af550edfc1195e7b003edfcfecd57faf2b71b",
+      "patched_sha256": "a9b8ab79177b4b16debe761228aa32ed003ef615a0c3fa574e80d16600b96614",
+      "function": "llvm::optimizeGlobalCtorsList(Module&, function_ref<bool(unsigned, Function*)>) at 0x69ed810 (symbol _ZN4llvm23optimizeGlobalCtorsListERNS_6ModuleENS_12function_refIFbjPNS_8FunctionEEEE)",
+      "edits": [
+        {
+          "offset": "0x69ec810",
+          "old": "554157",
+          "new": "31c0c3",
+          "why": "0x69ed810 push rbp; push r15 -> xor eax, eax; ret: the function returns false before it reads llvm.global_ctors"
+        }
+      ]
+    }
+  ]
+}
