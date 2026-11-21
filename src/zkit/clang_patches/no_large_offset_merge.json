@@ -26,6 +26,20 @@
           "why": "0x73c31f2 je 0x73c321c -> 2-byte nop: the merge always gives up as for an unscaled offset, and the loop steps to the next instruction (0x73c31f4)"
         }
       ]
+    },
+    {
+      "release": "LLVM 22.1.8 for Windows x86-64, clang+llvm-22.1.8-x86_64-pc-windows-msvc.tar.xz: bin/clang++.exe",
+      "sha256": "8bbe086dfb0f9543a41ec470eefffe42fe15a29d40e88d4ba5dd068b0a05c63d",
+      "patched_sha256": "50098420e5d872ba72e3ef6961ff5802c608f36023513fc2c3e0d4783834fe84",
+      "function": "AArch64LoadStoreOpt::optimizeBlock's fifth-step loop with tryToMergeIndexLdSt inlined (no symbols; found from the aarch64-load-store-const-scan-limit option, whose value at 0x1467af968 only it reads, at 0x140d8e4eb): the loop reads the opcode (0x140d8e408) and its scale, calls AArch64InstrInfo::hasUnscaledLdStOffset at 0x140d8e4d0, gives up at 0x140d8e53f (the step to the next instruction) when it says yes",
+      "edits": [
+        {
+          "offset": "0xd8d8d7",
+          "old": "7566",
+          "new": "eb66",
+          "why": "0x140d8e4d7 jne 0x140d8e53f -> jmp 0x140d8e53f: the merge always gives up as for an unscaled offset, and the loop steps to the next instruction"
+        }
+      ]
     }
   ]
 }
