@@ -831,6 +831,22 @@ class SwitchSignatureTests(unittest.TestCase):
         weak = {s.key: s.weak for s in donor.signatures}
         self.assertEqual((weak["_Z6sharedi"], weak["_Z4useri"]), (True, False))   # and a name keeps its binding
 
+    def test_most_donors_decide_a_functions_unit(self):
+        """One donor's split can put a file's code in the wrong unit: the unit more donors give a function wins
+        over the unit of the donor that named it; on a tie, the namer's stays."""
+        elf, symbols, at = self.module("donor", SWITCH_DONOR, hide=False)
+        span = f"\t.text start:0x{min(at.values()):08X} end:0x{max(at.values()) + 0x100:08X}\n"
+        donors = []
+        for name, unit in (("first", "other.cpp"), ("second", "lib.cpp"), ("third", "lib.cpp")):
+            splits = self.root / f"{name}.splits.txt"
+            splits.write_text(f"{unit}:\n{span}")
+            donors.append(signatures.build(name, elf, symbols, splits=splits))
+        elf, symbols, at = self.module("target", SWITCH_TARGET, hide=True)
+        program = Program.from_symbols(Switch(), elf, symbols)
+        unit = lambda found: {p.name: p.unit for p in found}["_Z4useri"]
+        self.assertEqual(unit(signatures.propose(program, donors)), "lib.cpp")
+        self.assertEqual(unit(signatures.propose(program, donors[:2])), "other.cpp")
+
     def test_a_compiled_object_shapes_as_its_relaxed_link(self):
         """clang's object of a file and lld's relaxing link of it: every function the object defines has the shape
         of its linked code, though lld made one GOT load `adrp` + `add` and the near ones `nop` + `adr`; a call to

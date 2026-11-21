@@ -1211,10 +1211,13 @@ class _State:
         entries = entries or self.m.by_key.get(named, ())
         sizes = {s.size for s in entries} if kind == "function" else self.m.sizes.get(named, set())
         units = {s.unit for s in entries if s.unit}
+        unit = next(iter(units)) if len(units) == 1 else ""
+        if kind == "function":                           # the entries that named it may be one donor, whose own
+            unit = self.majority(named) or unit          # split can be wrong: most donors outvote it
         self.proposals[address] = Proposal(address, display(named), kind, evidence,
                                            next(iter(sizes)) if len(sizes) == 1 else 0,
                                            tuple(sorted({s.donor for s in entries})),
-                                           next(iter(units)) if len(units) == 1 else "", source, agreed,
+                                           unit, source, agreed,
                                            kind == "function" and bool(entries) and all(s.weak for s in entries)
                                            or kind == "object" and named in self.m.weak)
         self.changed = True
@@ -1224,6 +1227,16 @@ class _State:
             if same:
                 self.later.append((address, same))
         return True
+
+    def majority(self, named: str) -> str:
+        """The unit more donors put a function in than any other, each donor voting with its one unit for it;
+        "" on a tie or without votes."""
+        per: dict[str, set[str]] = collections.defaultdict(set)
+        for s in self.m.by_key.get(named, ()):
+            if s.unit:
+                per[s.donor].add(s.unit)
+        votes = collections.Counter(next(iter(u)) for u in per.values() if len(u) == 1).most_common(2)
+        return votes[0][0] if votes and (len(votes) == 1 or votes[0][1] > votes[1][1]) else ""
 
     def plausible(self, address: int, named: str) -> bool:
         """A function named by evidence other than its shape keeps roughly the donors' extent of that name: a
