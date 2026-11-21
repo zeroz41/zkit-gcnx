@@ -180,6 +180,20 @@ class UnitEvidenceTests(unittest.TestCase):
             code.platform = GameCube()
             self.assertEqual(units._first_users(code), [])
 
+    def test_a_static_initializer_between_a_weak_function_and_its_first_user_ends_that_user_s_unit(self):
+        """Weak 7 is called by 1 and 8, weak 3 by 2: 4 is its unit's static initializer, the unit's last function,
+        so 7 is not 1's (nor 8's, after it) and only 3 is 2's. An initializer as the first user ends its unit too:
+        weak 9 called only by initializer 6 says nothing."""
+        code = _Code(10, weak=[3, 7, 9])
+        code.calls = {1: [7], 2: [3], 8: [7], 6: [9]}
+        code.refs = {}
+        code.pointers = []
+        code.object_at = lambda a: None
+        with unittest.mock.patch.object(units, "_initializers", return_value=[4, 6]):
+            self.assertEqual([(lo, hi) for lo, hi, _ in units._first_users(code)], [(2, 3)])
+        with unittest.mock.patch.object(units, "_initializers", return_value=[]):
+            self.assertEqual([(lo, hi) for lo, hi, _ in units._first_users(code)], [(2, 3), (1, 7), (6, 9)])
+
     def test_a_weak_marked_table_holding_its_class_s_own_definition_is_its_key_function_s(self):
         """W's table is marked weak and 2 forms its address, but it holds W's unmarked 5, defined among the code
         (6 is no slot of it) before its inline virtuals 8 and 9: W has a key function, so 8 and 9 are not 2's.

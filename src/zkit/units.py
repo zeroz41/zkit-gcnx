@@ -891,9 +891,14 @@ def _first_users(program: Program) -> list[tuple[int, int, str]]:
                 for user in users:
                     use(target, user)
     text = program.platform.text
+    own = _initializers(program)
+    # A unit's own static initializer is its last function (`_initializer_ends`): a weak function after one that
+    # lies at or past its earliest user is not in that user's unit, so the pair says nothing (a weak mark a name
+    # brought from another build, on code of another function that compiles alike).
+    first = {target: user for target, user in first.items()
+             if not (target > user and bisect.bisect_left(own, user) < bisect.bisect_left(own, target))}
     rows = [(user, target, f"{functions[target].name} is first used by {functions[user].name} "
                            f"({text(functions[user].address)})") for target, user in sorted(first.items())]
-    own = _initializers(program)
     later: dict[int, int] = {}          # weak function -> the one initializer after it referring to it, with no
     for target, users in coded.items():     # other unit's initializer (its end) between the two
         users = users - {target}
