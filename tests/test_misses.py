@@ -74,8 +74,10 @@ class MissesTests(unittest.TestCase):
             entry = next(e for e in listed["entries"] if e["function"] == "_Z6scaledi")
             self.assertEqual(entry["origin"], "unit")
             self.assertTrue(entry["with_headers"])
-            again = candidate.check_unit(project, "test", "a", work / "a.cpp", [work / "include"])
+            kept = root / "kept/a.o"
+            again = candidate.check_unit(project, "test", "a", work / "a.cpp", [work / "include"], keep=kept)
             self.assertEqual(again["compiled"], True)
+            self.assertEqual(kept.read_bytes()[:4], b"\x7fELF")                # --keep writes the unit's object
             self.assertEqual(misses.listing(project, "test", unit="a")["candidates"], 1)   # the same text, once
 
             restored = misses.restore(project, "test", "_Z6scaledi", root / "restored")

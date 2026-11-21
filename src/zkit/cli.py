@@ -836,13 +836,13 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         data = bridge.compiled(project, args.query, target, args.limit)
         return data, render.compiled(data)
     if command == "try":
-        if args.unit:
-            from .candidate import check_unit
-            data = check_unit(project, target, args.query, args.candidate, _folders(args.include))
-            return data, render.candidate_unit(data)
-        from .candidate import check
         if args.keep and args.keep.suffix != ".o":
             raise ValueError(f"--keep takes the path of an object file to write (ending in .o), not {str(args.keep)!r}")
+        if args.unit:
+            from .candidate import check_unit
+            data = check_unit(project, target, args.query, args.candidate, _folders(args.include), keep=args.keep)
+            return data, render.candidate_unit(data)
+        from .candidate import check
         data = check(project, target, args.query, args.candidate, args.force, args.keep, _folders(args.include))
         return data, render.candidate(data)
     if command == "twins":

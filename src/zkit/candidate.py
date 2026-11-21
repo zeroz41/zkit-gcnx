@@ -261,11 +261,13 @@ def _state(row: dict) -> str:
 
 
 def check_unit(project: Project, target: str, query: str, candidate: Path,
-               includes: list[Path] | None = None, link: bool = True, keep_misses: bool = True) -> dict[str, Any]:
+               includes: list[Path] | None = None, link: bool = True, keep_misses: bool = True,
+               keep: Path | None = None) -> dict[str, Any]:
     """A whole unit's candidate, outside the tree: compiled with the unit's command, every function of the unit
     compared with the original's, and (Switch) the object linked into the original, which proves the unit's data,
     strings and tables too. Each function's state is set beside its state in the tree's last build of the unit, so
-    what the candidate gained and lost is listed. Records no attempts: it judges a unit, not one function's try."""
+    what the candidate gained and lost is listed. `keep` also writes the compiled object to that path. Records no
+    attempts: it judges a unit, not one function's try."""
     from . import objects, quality
     from .elf import Elf
     from .index import connect
@@ -283,6 +285,9 @@ def check_unit(project: Project, target: str, query: str, candidate: Path,
             out.update(compiled=False, errors=message[-3000:])
             return out
         out["compiled"] = True
+        if keep:
+            keep.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(built, keep)
         original = Elf.load(root / unit["target_path"])
         names = {s.name for s in Elf.load(built).symbols if s.kind == "func"}
         rows = []
