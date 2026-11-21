@@ -444,9 +444,11 @@ def unrelaxed(words: list[int], kinds: dict[int, int]) -> list[int]:
 #   instructions, name one symbol with addends 0, and that symbol binds in the module (defined there, not
 #   preemptible: every symbol a position-independent executable defines; never an import, an absolute symbol or
 #   an ifunc), the load any 64-bit load or store of the unsigned-offset encoding with the adrp's register as both
-#   its own registers, and s within 4 GiB of the adrp's page (always, in a module under 4 GiB). It is all or
-#   nothing per symbol and section: one GOT relocation of s that is not part of a candidate pair (a pair the
-#   scheduler parted, a page shared by two loads) keeps every GOT load of s in that section;
+#   its own registers, and s within 4 GiB of the adrp's page (always, in a module under 4 GiB). A pair the
+#   scheduler parted keeps its own GOT load only. The section as a whole relaxes no GOT load at all unless every
+#   ADR_GOT_PAGE in it is followed by an LD64_GOT_LO12_NC as the next relocation and no LD64_GOT_LO12_NC stands
+#   alone (lld's `safeToRelaxAdrpLdr`): two loads whose pages come first, a page shared by two loads, or a load
+#   whose page sits in another section keep every symbol's GOT loads in that section;
 # - an `adrp xN, s` + `add xN, xN, :lo12:s` (ADR_PREL_PG_HI21 + ADD_ABS_LO12_NC, adjacent, one symbol, addends
 #   0, one register throughout), and the pair the first rule made, becomes `nop` + `adr xN, s` when s is within a
 #   MiB of the add (adr reaches [-1 MiB, 1 MiB)).
@@ -492,20 +494,20 @@ def relaxed_pairs(relocations: list, word, binds_locally, near=None) -> dict[int
         return second.offset == first.offset + 4 and second.symbol == first.symbol \
             and first.addend == second.addend == 0 and relaxable_got(word(first.offset), word(second.offset)) \
             and binds_locally(index)
-    unsafe, index = set(), 0
-    while index < count:                       # the symbols whose GOT loads this section keeps, every one
-        r = relocations[index]
-        if got_pair(index) and r.symbol not in unsafe and candidate(index):
+    safe, index = True, 0                      # every GOT page followed by its load, no load alone
+    while index < count:
+        if got_pair(index):
             index += 2
             continue
-        if r.type in (ADR_GOT_PAGE, LD64_GOT_LO12_NC):
-            unsafe.add(r.symbol)
+        if relocations[index].type in (ADR_GOT_PAGE, LD64_GOT_LO12_NC):
+            safe = False
+            break
         index += 1
     out: dict[int, str] = {}
     index = 0
     while index + 1 < count:
         first, second = relocations[index], relocations[index + 1]
-        if got_pair(index) and first.symbol not in unsafe:
+        if safe and got_pair(index) and candidate(index):
             out[index] = "adr" if near is not None and near(index + 1) else "add"
             index += 2
             continue

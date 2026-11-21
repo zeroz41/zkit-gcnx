@@ -188,19 +188,27 @@ class RelaxerTests(unittest.TestCase):
         return {relocations[i].offset: form for i, form in aarch64.relaxed_pairs(
             relocations, self.WORDS.__getitem__, lambda i: relocations[i].symbol != 3, near).items()}
 
-    def test_a_symbol_s_got_loads_in_a_section_relax_all_or_none(self):
-        """s1's adjacent GOT load becomes adrp + add, and nop + adr once its target is near; s2's adjacent load
-        stays, as its other load in the section is parted (before it or after it); the import's load stays; an
-        adrp + add with an addend is never relaxed."""
+    def test_each_adjacent_got_load_relaxes_on_its_own(self):
+        """s1's adjacent GOT load becomes adrp + add, and nop + adr once its target is near; s2's parted load
+        stays and its adjacent one relaxes all the same (lld judges each pair); the import's load stays; an adrp +
+        add with an addend is never relaxed."""
         order = sorted(self.WORDS.keys() - {0x14})
-        self.assertEqual(self.pairs(self.relocations(order)), {0x00: "add"})
-        self.assertEqual(self.pairs(self.relocations(order), lambda i: True), {0x00: "adr", 0x40: "adr"})
-        self.assertEqual(self.pairs(self.relocations(order), lambda i: False), {0x00: "add"})
+        self.assertEqual(self.pairs(self.relocations(order)), {0x00: "add", 0x20: "add"})
+        self.assertEqual(self.pairs(self.relocations(order), lambda i: True),
+                         {0x00: "adr", 0x20: "adr", 0x40: "adr"})
+        self.assertEqual(self.pairs(self.relocations(order), lambda i: False), {0x00: "add", 0x20: "add"})
         swapped = [0x00, 0x04, 0x20, 0x24, 0x10, 0x18, 0x30, 0x34]
-        self.assertEqual(self.pairs(self.relocations(swapped)), {0x00: "add"})
+        self.assertEqual(self.pairs(self.relocations(swapped)), {0x00: "add", 0x20: "add"})
         self.assertEqual(self.pairs(self.relocations([0x20, 0x24])), {0x20: "add"})   # alone in its section
 
-    def test_a_lone_load_or_a_narrow_load_keeps_the_symbol_s_got_loads(self):
+    def test_a_page_before_another_load_keeps_every_got_load_of_the_section(self):
+        """Two GOT pages before their loads (s1's, then s2's) leave lld's section unsafe to relax: no symbol's GOT
+        load relaxes there, while an adrp + add still becomes nop + adr when near."""
+        interleaved = self.relocations([0x00, 0x20, 0x04, 0x24, 0x40, 0x44])
+        self.assertEqual(self.pairs(interleaved), {})
+        self.assertEqual(self.pairs(interleaved, lambda i: True), {0x40: "adr"})
+
+    def test_a_lone_load_or_a_narrow_load_keeps_its_got_load(self):
         """lld reads bit 31 of the load (its "sf" check): a byte load fails it."""
         from zkit.elf import Relocation
         alone = self.relocations([0x00, 0x04]) + [Relocation(0x60, self.LD64, 1, 0)]
