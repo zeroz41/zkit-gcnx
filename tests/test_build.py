@@ -701,7 +701,8 @@ class SwitchBuildTests(unittest.TestCase):
                 manifest.write_text(json.dumps(data), encoding="utf-8")
                 project = Project.load(manifest)
                 built = build.build(project, quiet=True)
-                self.assertEqual(built["ok"], bool(trap), "the link rebuilds the module once traps are alike")
+                if OBJDIFF:  # the link reads the report, so without objdiff-cli there is none to fail
+                    self.assertEqual(built["ok"], bool(trap), "the link rebuilds the module once traps are alike")
                 diff = objects.unit_diff(game / "build/test/obj/a.o", game / "build/test/src/a.o")
                 unit = objects.objdiff_units(project, "test")["a"]
                 tried = candidate.compare(project, "test", unit, "_Z7checkedi", a_cpp)
