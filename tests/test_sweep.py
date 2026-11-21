@@ -251,7 +251,7 @@ def test_a_placeholder_is_swept_under_the_name_the_candidate_defines(tmp_path):
         built.write_bytes(b"")
         return built, "", ""
 
-    def score_(original, built, name, labels=None, built_name=None):
+    def score_(original, built, name, labels=None, built_name=None, imports=None):
         scored.append((name, built_name))
         return sweep.FAILED
     with mock.patch("zkit.index.refresh"), mock.patch("zkit.index.connect"), \
