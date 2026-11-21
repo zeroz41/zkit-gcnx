@@ -1532,3 +1532,22 @@ def candidate_unit(data: dict) -> str:
                          "reaches (--gc-sections dropped them)")
     lines.append("DONE: every function identical, no debt, linked" if data.get("done") else "not done")
     return "\n".join(lines)
+
+
+def carve(data: list[dict]) -> str:
+    """`zkit carve`: each piece unit, what moves into its source and what stays and why."""
+    if not data:
+        return "no piece unit without a source of its own has a file to carve from"
+    lines, moves, written = [], 0, 0
+    for piece in data:
+        moves += len(piece["moves"])
+        state = piece.get("written")
+        written += state == "yes"
+        note = "" if state is None else ("  written" if state == "yes" else f"  not written: {state}")
+        lines.append(f"{piece['unit']}: {len(piece['moves'])} from {piece['base']}{note}")
+        for reason, names in sorted(piece["left"].items()):
+            lines.append(f"    stays ({reason}): {len(names)}, e.g. {names[0]}")
+    head = f"{len(data)} piece(s), {moves} definition(s) to move"
+    if any("written" in piece for piece in data):
+        head += f", {written} source(s) written"
+    return "\n".join([head, *lines])

@@ -290,6 +290,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "code wherever it lines up (no FILE: the maps that came with the original's disc)")
     c.add_argument("--write", action="store_true", help="with --map: rewrite the target's splits.txt and symbols.txt")
     c.add_argument("--limit", type=int, default=30)
+    c = add("carve", help="Move the definitions a split gives a piece unit (`file_<address>`, a part of a source "
+                          "file another build compiled on its own) from the file into the piece's own source; what "
+                          "they use from the file moves, is copied or is declared with them. A plan unless --write")
+    c.add_argument("units", nargs="*", help="only these piece units (default: every piece with no source)")
+    c.add_argument("--write", action="store_true", help="write the pieces' sources and take the definitions out")
     c = add("delink", help="Split the original into one relocatable object per unit of a splits.txt (GameCube and "
                            "Switch): the target objects objdiff compares the compiled ones with")
     c.add_argument("--splits", type=Path, help="default: the target's splits file")
@@ -897,6 +902,14 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from .discover import discover_project
         data = discover_project(project, target, args.out.expanduser().resolve())
         return data, render.discovered(data)
+    if command == "carve":
+        from . import carve
+        pieces = carve.plan(project, target, args.units or None)
+        written = dict((id(p), why) for p, why in carve.write(project, target, pieces)) if args.write else {}
+        data = [{"unit": p.unit, "base": p.base, "source": p.source, "moves": [name for name, _ in p.moves],
+                 "left": dict(p.left), **({"written": written.get(id(p)) or "yes"} if id(p) in written else {})}
+                for p in pieces]
+        return data, render.carve(data)
     if command == "units":
         from . import units
         if args.map is not None:
