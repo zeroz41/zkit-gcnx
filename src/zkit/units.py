@@ -1135,6 +1135,8 @@ def _file_evidence(program: Program, ev: Evidence, placed: dict[int, str] | None
         if index in ev.placed and before == after != unit:
             del ev.files[index]
             ev.placed.discard(index)
+    if program.platform.name == "switch":
+        _sandwiched_runs(ev)
     _joined_placements(ev)
     _wide_statics(program, ev)
     # One file's own citations around another's: that one is compiled inside it (included), and the run between
@@ -1324,6 +1326,31 @@ def _wide_statics(program: Program, ev: Evidence) -> None:
         files = {f for _, f in anchors[bisect.bisect_left(keys, lo):bisect.bisect_right(keys, hi)]}
         if len(files) == 1:
             ev.joins.append((lo, hi, f"{o.name} ({o.section}) is {next(iter(files))}'s only"))
+
+
+def _sandwiched_runs(ev: Evidence) -> None:
+    """Switch: nor is a run of functions another build put in X, between two runs that agree on Y and each at
+    least as long: X's code would be two runs, or Y's (a build whose code moved, or another compiler's code that
+    looks alike, places a few functions in a neighbour's file). The shortest such runs go first, so what is left
+    does not depend on where a pass starts."""
+    while True:
+        runs: list[tuple[str, list[int]]] = []
+        for index, unit in sorted(ev.files.items()):
+            if runs and runs[-1][0] == unit:
+                runs[-1][1].append(index)
+            else:
+                runs.append((unit, [index]))
+        found = [inside for (before, b), (unit, inside), (after, a) in zip(runs, runs[1:], runs[2:])
+                 if before == after != unit and len(inside) <= min(len(b), len(a))
+                 and all(i in ev.placed for i in inside)]
+        if not found:
+            return
+        shortest = min(len(inside) for inside in found)
+        for inside in found:
+            if len(inside) == shortest:
+                for i in inside:
+                    del ev.files[i]
+                    ev.placed.discard(i)
 
 
 def _joined_placements(ev: Evidence) -> None:

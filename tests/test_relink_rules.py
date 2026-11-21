@@ -263,6 +263,21 @@ class UnitEvidenceTests(unittest.TestCase):
             units._file_evidence(code, ev, placed)
         self.assertFalse({row for row in ev.direct if row[0] <= 9 and row[1] >= 4})
 
+    def test_a_run_another_build_put_in_another_file_between_two_longer_runs_says_nothing(self):
+        """Switch, nothing cited: another build put 0-2 and 5-7 in a.cpp and 3-4 between them in b.cpp; a.cpp's
+        code is one run, so 3-4 are no evidence for b.cpp there. d.cpp's 10-12 between c.cpp's two shorter runs
+        (8-9, 13-14) stand: there it is c.cpp's that would be the strays."""
+        code = _Code(15)
+        code.strings = lambda: {}
+        code.users = lambda: {}
+        files =["a.cpp"] * 3 + ["b.cpp"] * 2 + ["a.cpp"] * 3 + ["c.cpp"] * 2 + ["d.cpp"] * 3 + ["c.cpp"] * 2
+        placed = {f.address: files[i] for i, f in enumerate(code.functions)}
+        ev = units.Evidence({}, [], [])
+        with unittest.mock.patch.object(units, "_function_classes", return_value={}):
+            units._file_evidence(code, ev, placed)
+        self.assertEqual(sorted(ev.files), [0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
+        self.assertNotIn("b.cpp", ev.files.values())
+
     def test_one_header_spelled_two_ways_is_two_units(self):
         """2 and 9 cite one header through two include folders (two projects' compiles): a boundary lies between
         them, where the code leaves 2's namespace (a:: for b:: at 6), though nothing else prefers a place; two
