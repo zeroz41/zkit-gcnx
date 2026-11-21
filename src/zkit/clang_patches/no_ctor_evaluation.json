@@ -25,6 +25,34 @@
           "why": "0x69ed810 push rbp; push r15 -> xor eax, eax; ret: the function returns false before it reads llvm.global_ctors"
         }
       ]
+    },
+    {
+      "release": "LLVM 19.1.7 for Windows x86-64, clang+llvm-19.1.7-x86_64-pc-windows-msvc.tar.xz: bin/clang++.exe",
+      "sha256": "56ef1abd0df11a3b1b77822193e927c6345078c24511567ae10b3afd803d03a3",
+      "patched_sha256": "6e10cf2f66e3100c9f6a6965d14108567a066c0e0eb8b833288c5d0937dd31a9",
+      "function": "llvm::optimizeGlobalCtorsList at 0x1403b1ce0 (the binary has no symbols): its first call is Module::getGlobalVariable(\"llvm.global_ctors\", false) at 0x1403b1d3f and it returns false when there is none, as CtorUtils.cpp's findGlobalCtors does; patched, a static initializer stays code (checked under wine)",
+      "edits": [
+        {
+          "offset": "0x3b10e0",
+          "old": "415741",
+          "new": "31c0c3",
+          "why": "0x1403b1ce0 push r15; push r14 -> xor eax, eax; ret: the function returns false before it reads llvm.global_ctors"
+        }
+      ]
+    },
+    {
+      "release": "LLVM 19.1.7 for macOS Arm64, LLVM-19.1.7-macOS-ARM64.tar.xz: bin/clang-19 (bin/clang and bin/clang++ link to it)",
+      "sha256": "572445ec045cc85b4d0948d30acaf9311d78b2731a68ba98bfc3e0cb9d011eb9",
+      "patched_sha256": "efd2e8a8f50d8d18b2b6d91e845ffe49ddc72ec945af225bec5465950c586abe",
+      "function": "llvm::optimizeGlobalCtorsList(Module&, function_ref<bool(unsigned, Function*)>) at 0x1022cc0c4 (symbol __ZN4llvm23optimizeGlobalCtorsListERNS_6ModuleENS_12function_refIFbjPNS_8FunctionEEEE)",
+      "edits": [
+        {
+          "offset": "0x22cc0c4",
+          "old": "ffc305d1fc6f11a9",
+          "new": "00008052c0035fd6",
+          "why": "0x1022cc0c4 sub sp, sp, #0x170; stp x28, x27, [sp, #0x110] -> mov w0, #0; ret: the function returns false before it reads llvm.global_ctors"
+        }
+      ]
     }
   ]
 }
