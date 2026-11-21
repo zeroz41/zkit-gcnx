@@ -119,6 +119,31 @@ class AuditRegressions(unittest.TestCase):
         self.assertEqual(found[("decomp-placeholder", "TPlayer__sub_80003010")], "info")
         self.assertIn(("decomp-debt-added", "fn_80003030"), found)   # no function of the symbols is named so
 
+    def test_check_reads_placeholders_from_every_target_of_the_repository(self):
+        from zkit.bridge import check
+        from zkit.project import Project
+        # another version of the game: its symbols name a function only it has
+        (self.decomp / "config/symbols2.txt").write_text(
+            "fn_80003030 = .text:0x80003030; // type:function size:0x4\n", encoding="utf-8")
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        manifest["targets"]["t2"] = dict(manifest["targets"]["t"], symbols="config/symbols2.txt",
+                                         report="build/report2.json")
+        manifest["targets"]["n"] = dict(manifest["targets"]["t2"], repository="native")  # another repository's
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+        project = Project.load(self.manifest)
+        (self.decomp / "src/Call.cpp").write_text("void f() {\n    fn_80003030();\n    fn_80003020();\n}\n",
+                                                  encoding="utf-8")
+        found = {(f["rule"], f.get("line")): f["severity"]
+                 for f in check(project, "decomp", paths=["src/Call.cpp"])["findings"]}
+        self.assertEqual(found[("decomp-placeholder", "fn_80003030")], "info")
+        self.assertEqual(found[("decomp-placeholder", "fn_80003020")], "info")   # the first target's still counts
+        self.assertNotIn(("decomp-debt-added", "fn_80003030"), found)
+        manifest["targets"].pop("t2")
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+        found = {(f["rule"], f.get("line")): f["severity"]
+                 for f in check(Project.load(self.manifest), "decomp", paths=["src/Call.cpp"])["findings"]}
+        self.assertIn(("decomp-debt-added", "fn_80003030"), found)   # only another repository's target names it
+
     def test_check_reads_a_line_inside_a_block_comment_as_comment(self):
         from zkit.bridge import check
         (self.decomp / "src/Doc.cpp").write_text("/*\n  the results are undefined.\n*/\nundefined4 g;\n",

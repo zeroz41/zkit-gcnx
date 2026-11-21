@@ -1672,6 +1672,10 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
         decomp_gate = quality_config.get("gate", "warning")
         catalog = quality.patterns(project, repo)
         roots, exclude = quality._paths(project, repo, None)
+        # one source tree builds every target of its repository (other versions of the game): a placeholder any of
+        # their symbols carry is that callee's naming debt
+        carriers = [target] + [name for name, other in project.config.get("targets", {}).items()
+                               if name != target and other.get("repository") == repo]
     for rel, added in sorted(changed.items()):
         if texts.get(rel) is None:
             continue
@@ -1690,7 +1694,10 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
                 if added is not None and number not in added:
                     continue
                 found_here = quality.findings(line, catalog, header=header, skip=("extern_c",)) + externs[number]
-                found_here, carried = symbol_placeholders(db, target, found_here)
+                carried = []
+                for carrier in carriers if target else []:
+                    found_here, more = symbol_placeholders(db, carrier, found_here)
+                    carried += more
                 for token in carried:   # the callee's naming debt, which `zkit quality` still counts
                     stats["placeholders"] += 1
                     findings.append({"severity": "info", "rule": "decomp-placeholder", "ref": f"{rel}:{number}",
