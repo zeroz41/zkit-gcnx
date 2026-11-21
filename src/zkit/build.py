@@ -62,7 +62,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
 STARTING_CFLAGS = {"gamecube": [], "switch": ["-O3", "-fno-exceptions", "-fno-rtti", "-std=gnu++17"]}
 IMPORTS = "imports.txt"   # beside the target objects of a `relax` target: the module's imported names, one a line
 UNIT_KEYS = {"compiler", "cflags", "extra_cflags", "includes", "compiler_version", "source_root", "clang_plugins",
-             "clang_patches", "header_patches", "compiler_download"}
+             "clang_patches", "header_patches", "compiler_download", "optimizer", "optimizer_version"}
 PLUGINS = Path(__file__).parent / "clang_plugins"   # zkit's clang pass plugins (build.clang_plugins)
 PATCHES = Path(__file__).parent / "clang_patches"   # zkit's byte patches to official clang releases (build.clang_patches)
 HEADER_PATCHES = Path(__file__).parent / "header_patches"   # zkit's edits to official library headers (build.header_patches)
@@ -115,6 +115,64 @@ def apply_trap(path: Path, value: str) -> int:
     if changed:
         path.write_bytes(out)
     return changed
+
+
+DEP_FLAGS = {"-MMD", "-MD", "-MP", "-M", "-MM"}   # a compile's dependency file: the words that ask for one
+DEP_ARGS = {"-MF", "-MT", "-MQ"}                 # and those followed by a value
+
+
+def stages(command: list[str], backend: list[str]) -> tuple[list[list[str]], Path]:
+    """build.optimizer: a Switch compile `command` (the optimizer's own: COMPILER FLAGS... -c SOURCE -o OBJECT) as
+    the two compiles it stands for, and the bitcode between them (OBJECT with the suffix `.bc`). The optimizer
+    compiles the source with every flag to optimized bitcode; the `backend` compiler makes the object from it with
+    the same flags and its own passes off (`-disable-llvm-passes`), so its code generation alone stands where a
+    compiler built from one release's optimizer and another's code generator ran. The dependency file is the
+    optimizer's, naming the object as its target, as ninja reads it."""
+    try:
+        at = len(command) - 1 - command[::-1].index("-o")
+        source_at = len(command) - 1 - command[::-1].index("-c") + 1
+        obj, source = command[at + 1], command[source_at]
+    except (ValueError, IndexError):
+        raise ValueError(f"build.optimizer: no `-c SOURCE -o OBJECT` in {shlex.join(command)}") from None
+    bitcode = Path(obj).with_suffix(".bc")
+    first = [*command[:at + 1], bitcode.as_posix(), *command[at + 2:], "-emit-llvm"]
+    if any(word in DEP_FLAGS for word in command) and "-MT" not in command and "-MQ" not in command:
+        first += ["-MT", obj]
+    flags, skip = [], False
+    for index, word in enumerate(command[1:], 1):
+        if skip:
+            skip = False
+        elif word in DEP_ARGS or index in (at, source_at - 1):
+            skip = True
+        elif word not in DEP_FLAGS and index != source_at:
+            flags.append(word)
+    second = [*backend, *flags, "-Xclang", "-disable-llvm-passes", "-Wno-unused-command-line-argument",
+              "-c", "-x", "ir", bitcode.as_posix(), "-o", obj]
+    return [first, second], bitcode
+
+
+def run_compile(command: list[str], backend: list[str] | None = None, trap: str | None = None,
+                **options: Any) -> subprocess.CompletedProcess:
+    """Run a unit's compile `command` as the build does: with build.optimizer, as its `stages` through `backend`
+    (the bitcode removed after), then the object's traps written (`apply_trap`, build.trap). `options` go to
+    subprocess.run; captured output joins both stages'."""
+    runs, bitcode = stages(command, backend) if backend else ([command], None)
+    outputs: list[str] = []
+    done = None
+    for run in runs:
+        done = subprocess.run(run, **options)
+        outputs += [done.stdout or "", done.stderr or ""] if options.get("capture_output") else []
+        if done.returncode:
+            break
+    if bitcode is not None:
+        workdir = Path(options.get("cwd") or ".")
+        (workdir / bitcode).unlink(missing_ok=True)
+    if done.returncode == 0 and trap:
+        obj = command[len(command) - 1 - command[::-1].index("-o") + 1]
+        apply_trap(Path(options.get("cwd") or ".") / obj, trap)
+    if outputs:
+        done = subprocess.CompletedProcess(done.args, done.returncode, outputs[0][:0].join(outputs), outputs[0][:0])
+    return done
 
 
 def unit_settings(config: dict[str, Any], unit: str) -> dict[str, Any]:
@@ -567,6 +625,9 @@ def configure(project: Project, repository: str | None = None, only: str | None 
     # `trap`: the compile, then its object's traps written as the original's compiler writes them (`apply_trap`)
     ninja.rule("clang_trap", _command(python) + " trap $trap $out $cc $cflags -MMD -MF $out.d -c $in -o $out",
                depfile="$out.d", deps="gcc", description="CC $out")
+    # build.optimizer: the optimizer's compile as its two `stages` through $backend, then any trap ($trap, or -)
+    ninja.rule("clang_stages", _command(python) + " stages $trap $backend $cc $cflags -MMD -MF $out.d -c $in -o $out",
+               depfile="$out.d", deps="gcc", description="CC $out")
     # `source_root`: each unit's copy that names it as the original's build did (`stage`); one step writes every
     # copy whose source changed, restat: an unchanged copy keeps its time, so only a changed unit recompiles
     ninja.rule("rooted", _command(python) + " rooted $in", restat="1", description="ROOTED $in")
@@ -813,6 +874,10 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
         argv = [*cc, *flags, "-c", source, "-o", Path(out).parent.as_posix()]
         return {"rule": "mwcc", "cc": cc, "flags": flags, "argv": argv, "out": out,
                 "implicit": [_relative(p, root) for p in (run, exe) if p]}
+    if config.get("optimizer") and config.get("clang_plugins"):
+        # a plugin's passes would run in the compiler, whose passes build.optimizer turns off
+        raise ValueError(f"{unit}: build.optimizer and build.clang_plugins together: the plugin's passes would run "
+                         "in the compiler, which only generates code from the optimizer's bitcode")
     cc = [str(exe) if exe else config["compiler"]]
     implicit = [_relative(exe, root)] if exe else []
     wanted = words(config.get("clang_plugins")) if exe else []
@@ -859,11 +924,39 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
     flags = words(config["cflags"]) + quoted + [f"-I{folder}" for folder in includes] + config["extra_cflags"]
     step = {"rule": "clang", "cc": cc, "flags": flags, "argv": [*cc, *flags, "-c", source, "-o", out], "out": out,
             "implicit": implicit}
-    if config.get("trap"):   # argv (compile_commands.json, editors) stays the compiler's own command
+    if config.get("optimizer"):
+        # build.optimizer: the optimizer compiles the source to optimized bitcode and the compiler (with its
+        # clang_patches) makes the object from it (`stages`). argv (compile_commands.json, editors, `zkit try`)
+        # is the optimizer's own command, the source's front end; `backend` the compiler's words.
+        exe = _optimizer(root, config, found, notes)
+        front = [str(exe) if exe else config["optimizer"]]
+        step.update(rule="clang_stages", cc=front, argv=[*front, *flags, "-c", source, "-o", out], backend=cc,
+                    implicit=implicit + ([_relative(exe, root)] if exe else []),
+                    variables={"backend": _command(cc), "trap": _command([config.get("trap") or "-"])})
+    elif config.get("trap"):   # argv (compile_commands.json, editors) stays the compiler's own command
         step.update(rule="clang_trap", variables={"trap": _command([config["trap"]])})
     if named:
         step["stage"] = {"source": source, "named": named, "copy": f"{paths.dir}/rooted/{unit}"}
     return step
+
+
+def _optimizer(root: Path, config: dict[str, Any], found: dict[str, Path | None], notes: list[str]) -> Path | None:
+    """build.optimizer: the optimizer's executable (None when not found, said once), checked once against
+    build.optimizer_version as the compiler is against build.compiler_version."""
+    key = f"optimizer {config['optimizer']}"
+    if key not in found:
+        exe = _tool(root, config["optimizer"])
+        if exe is None:
+            notes.append(f"optimizer not found: {config['optimizer']} (set build.optimizer, or pin its archive in "
+                         "build.compiler_download for `zkit build --download`)")
+        elif config.get("optimizer_version"):
+            accepted = [config["optimizer_version"]] if isinstance(config["optimizer_version"], str) \
+                else config["optimizer_version"]
+            says = clang_version(exe)
+            if not any(version in says for version in accepted):
+                raise ValueError(f"{exe} is not {' or '.join(map(repr, accepted))}: it says {says!r}")
+        found[key] = exe
+    return found[key]
 
 
 def original_name(config: dict[str, Any], unit: str) -> str | None:
@@ -1196,11 +1289,14 @@ def main(argv: list[str]) -> int:
         if done.returncode == 0:
             apply_trap(Path(argv[2]), argv[1])
         return done.returncode
+    if len(argv) > 3 and argv[0] == "stages":   # TRAP BACKEND COMMAND...: build.optimizer's `run_compile`
+        return run_compile(argv[3:], [argv[2]], None if argv[1] == "-" else argv[1]).returncode
     if len(argv) == 2 and argv[0] == "rooted":  # MANIFEST: configure's list of `stage` copies
         write_staged(json.loads(Path(argv[1]).read_text(encoding="utf-8")))
         return 0
     print("usage: python -m zkit.build depfile FILE OBJECT | sha1 FILE EXPECTED STAMP | "
-          "views LIST SRC OBJ VIEW [IMPORTS] | rooted MANIFEST | trap WORD OBJECT COMMAND...", file=sys.stderr)
+          "views LIST SRC OBJ VIEW [IMPORTS] | rooted MANIFEST | trap WORD OBJECT COMMAND... | "
+          "stages TRAP BACKEND COMMAND...", file=sys.stderr)
     return 2
 
 

@@ -151,6 +151,27 @@ def _original_name(project: Project, target: str, root: Path, source: Path) -> s
     return build.original_name(build.unit_settings(config, unit), unit) if config else None
 
 
+_BACKENDS: dict[tuple[str, str, str], list[str] | None] = {}
+
+
+def _backend(project: Project, target: str, root: Path, source: Path) -> list[str] | None:
+    """The compiler a zkit build makes the unit's object with from its build.optimizer's bitcode (`build.stages`):
+    None when the unit has no optimizer. Found once per unit (the patched compiler is checked by its SHA-256)."""
+    from . import build
+    config = build.settings(project.target(target))
+    try:
+        unit = source.resolve().relative_to((root / "src").resolve()).as_posix()
+    except ValueError:
+        return None
+    if config is None or not build.unit_settings(config, unit).get("optimizer"):
+        return None
+    key = (str(root), target, unit)
+    if key not in _BACKENDS:
+        _BACKENDS[key] = build._compile(root, build.unit_settings(config, unit), unit,
+                                        build.layout(target, project.target(target)), {}, []).get("backend")
+    return _BACKENDS[key]
+
+
 def _compile(project: Project, target: str, unit: dict, text: str, work: Path,
              includes: list[Path] | None = None) -> tuple[Path | None, str, str]:
     """Compile `text` in `work` with the unit's exact command, `includes` searched before the tree's headers:
@@ -164,8 +185,9 @@ def _compile(project: Project, target: str, unit: dict, text: str, work: Path,
     named = _original_name(project, target, root, source_path)   # the build's `source_root`: as its copy reads
     staged.write_bytes(build.stage(text.encode("utf-8"), named) if named else text.encode("utf-8"))
     command, expected = _restage(argv, source_arg, staged, work, source_path.parent, workdir, includes)
-    result = subprocess.run(command, cwd=workdir, capture_output=True, text=True, encoding="utf-8",
-                            errors="replace", timeout=300)
+    backend = _backend(project, target, root, source_path)
+    result = build.run_compile(command, backend, cwd=workdir, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=300)
     built = expected if expected.is_file() else next(iter(work.glob("*.o")), None)
     message = (result.stdout + result.stderr).strip()
     if result.returncode != 0 or built is None:

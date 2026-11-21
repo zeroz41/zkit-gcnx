@@ -660,6 +660,67 @@ class SwitchBuildTests(unittest.TestCase):
             self.assertTrue(done["identical"], done)
             self.assertEqual(done["linked_units"], ["a.cpp", "b.cpp"], done["not_linked"])
 
+    def test_an_optimizer_and_a_code_generator(self):
+        """build.optimizer: the original's compiler ran one release's optimizer and another's code generator. Each
+        unit compiles to optimized bitcode with the optimizer, then to its object with the compiler and the same
+        flags, its own passes off; the objects equal their targets, `zkit try` compiles alike, and no bitcode is
+        left. A wrong optimizer_version and a plugin (whose passes would not run) are refused."""
+        command = ["opt", "-O2", "-x", "c++", "-MMD", "-MF", "x.o.d", "-Iinc", "-c", "src/x.cpp", "-o", "x.o"]
+        runs, bitcode = build.stages(command, ["cg"])
+        self.assertEqual(bitcode, Path("x.bc"))
+        self.assertEqual(runs[0], ["opt", "-O2", "-x", "c++", "-MMD", "-MF", "x.o.d", "-Iinc", "-c", "src/x.cpp",
+                                   "-o", "x.bc", "-emit-llvm", "-MT", "x.o"])
+        self.assertEqual(runs[1], ["cg", "-O2", "-x", "c++", "-Iinc", "-Xclang", "-disable-llvm-passes",
+                                   "-Wno-unused-command-line-argument", "-c", "-x", "ir", "x.bc", "-o", "x.o"])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, text in (("a.cpp", A_CPP), ("b.cpp", B_CPP)):
+                (root / name).write_text(text, encoding="utf-8")
+                out = str(root / name.replace(".cpp", ".o"))
+                done = build.run_compile([CLANG, *[f for f in FLAGS if f != "-c"], "-c", str(root / name), "-o",
+                                          out], [CLANG], capture_output=True, text=True)
+                self.assertEqual(done.returncode, 0, done.stdout)
+            self.assertEqual(sorted(p.name for p in root.iterdir()), ["a.cpp", "a.o", "b.cpp", "b.o"])
+            subprocess.run([LLD, "-shared", "--no-relax", "--unresolved-symbols=ignore-all", "-o",
+                            str(root / "main.elf"), str(root / "a.o"), str(root / "b.o")], check=True,
+                           capture_output=True)
+            result = new.new(root / "main.elf", root / "game", game_id="test")
+            game, manifest = root / "game", Path(result["manifest"])
+            from zkit.elf import Elf
+            linked = Elf.load(game / "orig/test/main.elf")
+            at = {s.name: s.value for s in linked.symbols if s.name}
+            rodata = linked.section(".rodata").address
+            (game / "config/test/splits.txt").write_text(
+                f"a.cpp:\n\t.text start:{at['_Z6scaledi']:#x} end:{at['_Z6helperi']:#x}\n"
+                f"\t.rodata.str1.1 start:{rodata:#x} end:{rodata + 13:#x}\n\n"
+                f"b.cpp:\n\t.text start:{at['_Z6helperi']:#x} end:{at['_Z6helperi'] + 36:#x}\n"
+                f"\t.rodata.cst16 start:{at['_ZL5table']:#x} end:{at['_ZL5table'] + 16:#x}\n"
+                f"\t.data start:{at['g_counter']:#x} end:{at['g_counter'] + 4:#x}\n", encoding="utf-8")
+            (game / "src/a.cpp").write_text(A_CPP, encoding="utf-8")
+            (game / "src/b.cpp").write_text(B_CPP, encoding="utf-8")
+            data = json.loads(manifest.read_text())
+            settings = data["targets"]["test"]["build"]
+            settings.update(compiler=CLANG, optimizer=CLANG, cflags=[f for f in FLAGS if f != "-c"])
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+            project = Project.load(manifest)
+            built = build.build(project, quiet=True)
+            self.assertTrue(built["ok"])
+            self.assertIn("clang_stages", (game / "build/build.ninja").read_text())
+            for unit in ("a", "b"):
+                diff = objects.unit_diff(game / f"build/test/obj/{unit}.o", game / f"build/test/src/{unit}.o")
+                self.assertEqual((diff["exact"], diff["compiled_only"]), (diff["total"], []), unit)
+                self.assertGreater(diff["total"], 0)
+            self.assertEqual(list((game / "build/test/src").glob("*.bc")), [])
+            commands = json.loads((game / "build/compile_commands.json").read_text())
+            self.assertTrue(all(c["arguments"][0] == CLANG and "-emit-llvm" not in c["arguments"] for c in commands))
+            unit = objects.objdiff_units(project, "test")["a"]
+            self.assertTrue(candidate.compare(project, "test", unit, "_Z6scaledi", A_CPP)["exact"])
+            for setting, value in (("optimizer_version", "clang version 0.0.0-none"), ("clang_plugins", ["any"])):
+                manifest.write_text(json.dumps({**data, "targets": {"test": {**data["targets"]["test"], "build": {
+                    **settings, setting: value}}}}), encoding="utf-8")
+                with self.assertRaises(ValueError, msg=setting):
+                    build.configure(Project.load(manifest))
+
     def test_a_trap_word_the_original_compiler_wrote(self):
         """The original's compiler wrote each trap as `udf #0x8002` where clang writes `brk #1`. With `build.trap`
         the compiled unit equals its target object, the report agrees and `zkit try` compiles alike; without it
