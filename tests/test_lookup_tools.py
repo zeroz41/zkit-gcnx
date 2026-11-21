@@ -136,7 +136,7 @@ class LookupToolTests(unittest.TestCase):
 
     def test_argument_errors_name_the_valid_arguments_and_aliases_work(self):
         from zkit.server import create_server
-        with self.assertRaisesRegex(Exception, r"unknown argument\(s\) sice\. zkit_progress takes: response_format, "
+        with self.assertRaisesRegex(Exception, r"unknown argument\(s\) sice\. zkit_progress takes: carry, response_format, "
                                                r"since"):
             self.call("zkit_progress", {"sice": "x"})
         with self.assertRaisesRegex(Exception, "kind: Input should be 'decomp', 'port' or 'source-port' "

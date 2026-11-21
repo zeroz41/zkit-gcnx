@@ -448,6 +448,9 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--save", action="store_true", help="save the current report as a baseline")
     c.add_argument("--list", action="store_true", help="list saved baselines")
     c.add_argument("--check", action="store_true", help="with --since: exit 1 on any lost match, link or data")
+    c.add_argument("--carry", metavar="TARGET",
+                   help="where the functions TARGET matched exactly stand in this target (by name): exact, compiled "
+                        "but not, no source file, or absent")
     c = add("report", help="Write browsable offline HTML pages from the objdiff reports, a table and a treemap (the "
                            "build writes them too), with --badges shields.io badge data, and with --readme the "
                            "progress table in the README")
@@ -1097,6 +1100,9 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             if meta is None:
                 raise ValueError("No complete report to save")
             return meta, f"saved baseline {meta['name']} ({meta['label']})"
+        if args.carry:
+            data = progress.carry(project, target, args.carry)
+            return data, render.carry(data)
         if args.since:
             data = progress.since(project, target, None if args.since == "latest" else args.since)
             if not args.check:

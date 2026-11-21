@@ -399,6 +399,65 @@ def progress(project: Project, target: str) -> dict[str, Any]:
     return data
 
 
+
+CARRY_BANDS = ((99.0, ">=99%"), (90.0, "90-99%"), (50.0, "50-90%"), (0.0, "<50%"))
+
+
+def carry(project: Project, target: str, source: str) -> dict[str, Any]:
+    """Where the functions another target matched exactly stand in this one, by name (two builds of the same code
+    place them at different addresses): exact here; compiled but not exact (by objdiff's score, `0%` where it gives
+    none); in a unit whose source file does not exist yet; or named nowhere in this target's report. A name the
+    other target only has as a placeholder (its own address) cannot carry and is counted apart. `units`: per
+    unit of this target (or of the other where the name is absent), what has not carried yet."""
+    from .score import placeholder
+    reports = {}
+    for name in (source, target):
+        path = report_path(project, name)
+        if not path.is_file():
+            raise ValueError(f"No report at {path}: build {name} first")
+        reports[name] = load(path)
+    root = project.root(project.target(target)["repository"])
+    here: dict[str, tuple[str, dict, bool]] = {}
+    for unit in reports[target].get("units", []):
+        path = (unit.get("metadata") or {}).get("source_path")
+        sourced = bool(path) and (root / path).is_file()
+        for function in unit.get("functions") or []:
+            here.setdefault(str(function.get("name")), (str(unit.get("name")), function, sourced))
+    counts: dict[str, int] = {}
+    units: dict[str, dict[str, int]] = {}
+    names: dict[str, list[str]] = {}
+    for unit in reports[source].get("units", []):
+        for function in unit.get("functions") or []:
+            if number(function.get("fuzzy_match_percent")) != 100.0:
+                continue
+            name = str(function.get("name"))
+            where = str(unit.get("name"))
+            if placeholder(name):
+                state = "unnamed there"
+            elif name not in here:
+                state = "absent"
+            else:
+                where, own, sourced = here[name]
+                score = number(own.get("fuzzy_match_percent"))
+                if score == 100.0:
+                    state = "exact"
+                elif not sourced:
+                    state = "no source"
+                elif score == 0.0:
+                    state = "compiled 0%"
+                else:
+                    state = "compiled " + next(label for floor, label in CARRY_BANDS if score >= floor)
+            counts[state] = counts.get(state, 0) + 1
+            names.setdefault(state, []).append(name)
+            if state != "exact":
+                row = units.setdefault(where, {})
+                row[state] = row.get(state, 0) + 1
+    total = sum(counts.values())
+    return {"target": target, "from": source, "matched_there": total, "counts": counts,
+            "carried_percent": _percent(counts.get("exact", 0), total),
+            "units": dict(sorted(units.items(), key=lambda item: -sum(item[1].values()))), "names": names}
+
+
 # A link's proof, written into the report
 
 def apply_link(path: Path, linked: list[str],

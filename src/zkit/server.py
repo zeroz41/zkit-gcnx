@@ -281,13 +281,18 @@ def create_server(project: Project) -> FastMCP:
         return out(data, render.renamed(data), response_format)
 
     @tool(enabled=any(t.get("report") for t in project.config.get("targets", {}).values()))
-    def zkit_progress(since: str | None = None, response_format: Format = "text") -> str:
+    def zkit_progress(since: str | None = None, carry: str | None = None, response_format: Format = "text") -> str:
         """objdiff progress: code and data bytes matched and linked, exact functions, linked units, per category
         and module. since="session" (this session's start, saved automatically), "latest", a saved name or a
         report path: what changed by original address (renames and folds are not losses), with every lost match,
-        unlinked function or lost data range listed. Use it to report results instead of hand-counting."""
+        unlinked function or lost data range listed. carry="<other target>": where the functions that target
+        matched exactly stand here, by name (exact, compiled with a score band, no source file yet, absent). Use it
+        to report results instead of hand-counting."""
         from . import progress
         p = current()
+        if carry:
+            data = progress.carry(p, target(p), carry)
+            return out(data, render.carry(data), response_format)
         if since:
             name = None if since == "latest" else since
             if since == "session":

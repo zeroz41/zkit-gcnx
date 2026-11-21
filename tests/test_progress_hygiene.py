@@ -174,6 +174,40 @@ class ProgressTests(unittest.TestCase):
             self.assertTrue(index.read_text(encoding="utf-8").startswith("<!doctype html>"))
             self.assertEqual(json.loads((root / "out/t.json").read_text(encoding="utf-8")), self.before)
 
+    def test_matches_carried_from_another_target(self):
+        """`zkit progress --carry OTHER`: each function OTHER matched exactly, by name, is exact here, compiled
+        with a score band, in a unit with no source file yet, or absent; OTHER's placeholders count apart."""
+        from zkit.cli import build_parser, run
+
+        def unit(name, source, functions):
+            return {"name": name, "metadata": {"source_path": source}, "measures": {},
+                    "functions": [{"name": n, "size": "8", **({} if p is None else {"fuzzy_match_percent": p})}
+                                  for n, p in functions]}
+        there = {"units": [unit("a", "src/a.cpp", [("f", 100.0), ("g", 100.0), ("h", 100.0), ("i", 100.0),
+                                                   ("j", 100.0), ("fn_7100001000", 100.0), ("k", 50.0)])]}
+        here = {"units": [unit("a", "src/a.cpp", [("f", 100.0), ("g", 95.5), ("h", None)]),
+                          unit("a_7100009000", "src/a_7100009000.cpp", [("i", None)])]}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "build").mkdir()
+            (root / "src").mkdir()
+            (root / "src/a.cpp").write_text("", encoding="utf-8")
+            (root / "build/one.json").write_text(json.dumps(there), encoding="utf-8")
+            (root / "build/two.json").write_text(json.dumps(here), encoding="utf-8")
+            manifest = root / "p.json"
+            manifest.write_text(json.dumps({"schema_version": 1, "id": "prog", "repositories": {
+                "decomp": {"root": ".", "role": "decomp"}}, "targets": {
+                "one": {"repository": "decomp", "module": "main", "report": "build/one.json"},
+                "two": {"repository": "decomp", "module": "main", "report": "build/two.json"}}}), encoding="utf-8")
+            data, said = run(build_parser().parse_args(["--project", str(manifest), "--target", "two", "progress",
+                                                        "--carry", "one"]))
+        self.assertEqual(data["counts"], {"exact": 1, "compiled 90-99%": 1, "compiled 0%": 1, "no source": 1,
+                                          "absent": 1, "unnamed there": 1})
+        self.assertEqual(data["matched_there"], 6)
+        self.assertEqual(data["units"]["a_7100009000"], {"no source": 1})
+        self.assertEqual(data["units"]["a"], {"compiled 90-99%": 1, "compiled 0%": 1, "absent": 1, "unnamed there": 1})
+        self.assertIn("one -> two: 1 of 6 exact functions carried", said)
+
     def test_treemap_beside_the_table_and_badges(self):
         """`zkit report` writes treemap.html beside index.html, each linking the other, and --badges the first
         target's shields.io endpoint badges."""

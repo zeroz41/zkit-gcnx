@@ -1275,6 +1275,20 @@ def progress(data: dict) -> str:
     return "\n".join(out)
 
 
+def carry(data: dict, limit: int = 15) -> str:
+    counts = data["counts"]
+    order = ["exact", "compiled >=99%", "compiled 90-99%", "compiled 50-90%", "compiled <50%", "compiled 0%",
+             "no source", "absent", "unnamed there"]
+    lines = [f"{data['from']} -> {data['target']}: {counts.get('exact', 0)} of {data['matched_there']} exact "
+             f"functions carried ({data['carried_percent']:.2f}%)"]
+    lines += [f"  {counts[k]:7}  {k}" for k in order + sorted(set(counts) - set(order)) if counts.get(k)]
+    if data["units"]:
+        lines.append(f"units with the most not carried (first {limit}):")
+        for unit, row in list(data["units"].items())[:limit]:
+            lines.append(f"  {sum(row.values()):6}  {unit}  " + ", ".join(f"{k} {v}" for k, v in sorted(row.items())))
+    return "\n".join(lines)
+
+
 def delta(data: dict) -> str:
     base = data.get("baseline", {})
     out = [f"since {base.get('label', '?')} baseline {base.get('time', base.get('name', ''))}"
