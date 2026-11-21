@@ -33,4 +33,4 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 zkit = ["report.html", "treemap.html", "contracts/*.md", "clang_plugins/*.cpp", "clang_plugins/*.json",
-        "clang_patches/*.json"]
+        "clang_patches/*.json", "header_patches/*.json"]

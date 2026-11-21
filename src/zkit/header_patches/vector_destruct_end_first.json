@@ -1,0 +1,21 @@
+{
+  "about": [
+    "build.header_patches rule `vector-destruct-end-first`: std::vector's __base_destruct_at_end (clear, a resize or",
+    "erase that shrinks it, the destructor) loops `while (__soon_to_be_end != __new_last)`, the moving end on the",
+    "left, where libc++'s releases 16 to 22 write `while (__new_last != __soon_to_be_end)`. clang keeps the operands'",
+    "order in the loop's compare (`cmp end, new_last` against `cmp new_last, end`), so every vector of elements with",
+    "a destructor compiles otherwise. zkit edits a copy of the release's header whose SHA-256 is the patch's `sha256`",
+    "and checks the result against `patched_sha256` (build.patched_headers)."
+  ],
+  "file": "vector",
+  "patches": [
+    {
+      "release": "libc++ 19.1.7, libcxx-19.1.7.src.tar.xz: include/vector",
+      "sha256": "73080dbbcbf6c24501859a565420373ae1543ad7374345c7f05f342644bf1592",
+      "patched_sha256": "16b44c1bafa02b1f513a93338ebc0bd9a3566200ba4e5942789945d0fcad9b82",
+      "edits": [
+        {"old": "    while (__new_last != __soon_to_be_end)\n", "new": "    while (__soon_to_be_end != __new_last)\n"}
+      ]
+    }
+  ]
+}

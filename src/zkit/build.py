@@ -62,9 +62,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
 STARTING_CFLAGS = {"gamecube": [], "switch": ["-O3", "-fno-exceptions", "-fno-rtti", "-std=gnu++17"]}
 IMPORTS = "imports.txt"   # beside the target objects of a `relax` target: the module's imported names, one a line
 UNIT_KEYS = {"compiler", "cflags", "extra_cflags", "includes", "compiler_version", "source_root", "clang_plugins",
-             "clang_patches", "compiler_download"}
+             "clang_patches", "header_patches", "compiler_download"}
 PLUGINS = Path(__file__).parent / "clang_plugins"   # zkit's clang pass plugins (build.clang_plugins)
 PATCHES = Path(__file__).parent / "clang_patches"   # zkit's byte patches to official clang releases (build.clang_patches)
+HEADER_PATCHES = Path(__file__).parent / "header_patches"   # zkit's edits to official library headers (build.header_patches)
 
 
 def words(value: str | list[str] | None) -> list[str]:
@@ -231,6 +232,75 @@ def clang_patches(name: str) -> list[dict[str, Any]]:
         known = sorted(path.stem.replace("_", "-") for path in PATCHES.glob("*.json"))
         raise ValueError(f"build.clang_patches: no rule {name!r} (zkit has: {', '.join(known) or 'none'})")
     return json.loads(table.read_text(encoding="utf-8"))["patches"]
+
+
+def header_patches(name: str) -> dict[str, Any]:
+    """build.header_patches: zkit's rule `name` (header_patches/<name>.json, `-` read as `_`), a change to one header
+    of an official library release that the original's toolchain shipped written otherwise: the header's path as
+    the compiler finds it (`file`, such as `vector`) and text edits to exactly the releases' copies (`patches`,
+    each picked by the copy's SHA-256: `edits` of `old` text, found once, to `new`, and the result's SHA-256)."""
+    table = HEADER_PATCHES / f"{name.replace('-', '_')}.json"
+    if not table.is_file():
+        known = sorted(path.stem.replace("_", "-") for path in HEADER_PATCHES.glob("*.json"))
+        raise ValueError(f"build.header_patches: no rule {name!r} (zkit has: {', '.join(known) or 'none'})")
+    return json.loads(table.read_text(encoding="utf-8"))
+
+
+def patched_headers(root: Path, includes: list[str], rules: list[str]) -> tuple[Path | None, list[str]]:
+    """(folder, notes) for build.header_patches: each rule's header, found in the target's `includes` as the
+    compiler would (the first folder that has it), with zkit's edits for exactly that copy (its SHA-256 picks the
+    patch, each edit's text must be there once, and the result must have the patch's SHA-256), written under
+    build/tools/header-patches/<rules>. The folder is searched before the includes, so the compiler reads the
+    edited copy and every other header as before; a header that continues the search (`#include_next`) cannot be
+    one. Rules on one header apply in turn. A header zkit has no patch for, or none found, keeps the release's
+    copy and gets a note; None when no header was edited. The copies are written again when they differ."""
+    texts: dict[str, tuple[Path, str]] = {}
+    notes: list[str] = []
+    for name in rules:
+        rule = header_patches(name)
+        relative = rule["file"]
+        if relative not in texts:
+            found = next((root / folder / relative for folder in includes if (root / folder / relative).is_file()),
+                         None)
+            if found is None:
+                notes.append(f"build.header_patches: {name}'s header {relative} is in none of the includes "
+                             f"({', '.join(includes)}): units build without it")
+                continue
+            texts[relative] = (found, found.read_bytes().decode("utf-8"))
+        source, text = texts[relative]
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        patch = next((patch for patch in rule["patches"] if patch["sha256"] == digest), None)
+        if patch is None:
+            notes.append(f"zkit has no patch for {_relative(source, root)} (SHA-256 {digest}) for "
+                         f"build.header_patches ({name}): units build with the release's header and may not match")
+            continue
+        for edit in patch["edits"]:
+            if text.count(edit["old"]) != 1:
+                raise ValueError(f"build.header_patches: {name}'s edit {edit['old']!r} is not in "
+                                 f"{_relative(source, root)} exactly once")
+            text = text.replace(edit["old"], edit["new"])
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if digest != patch["patched_sha256"]:
+            raise ValueError(f"build.header_patches: {name}'s patch for {_relative(source, root)} gave SHA-256 "
+                             f"{digest}, not {patch['patched_sha256']}")
+        if "#include_next" in text:
+            raise ValueError(f"build.header_patches: {relative} continues the include search (#include_next), so "
+                             "an edited copy searched first cannot stand in for it")
+        texts[relative] = (source, text)
+    edited = {relative: text for relative, (source, text) in texts.items()
+              if text != source.read_bytes().decode("utf-8")}
+    if not edited:
+        return None, notes
+    folder = root / "build" / "tools" / "header-patches" / "+".join(name.replace("-", "_") for name in rules)
+    for relative, text in edited.items():
+        out = folder / relative
+        if out.is_file() and out.read_bytes() == text.encode("utf-8"):
+            continue
+        out.parent.mkdir(parents=True, exist_ok=True)
+        partial = out.with_name(out.name + ".partial")
+        partial.write_bytes(text.encode("utf-8"))
+        partial.replace(out)
+    return folder, notes
 
 
 def patched_clang(clang: Path, names: list[str], rules: list[str] = ()) -> Path | None:
@@ -773,6 +843,14 @@ def _compile(root: Path, config: dict[str, Any], unit: str, paths: Layout, found
     implicit += [_relative(path, root) for path in plugins]
     config = {**config, "extra_cflags": config["extra_cflags"] + [word for path in plugins for word in
                                                                   ("-Xclang", "-load", "-Xclang", path.as_posix())]}
+    headers = words(config.get("header_patches"))
+    if headers:
+        key = f"patched_headers {' '.join(includes)} / {' '.join(headers)}"
+        if key not in found:
+            found[key], said = patched_headers(root, includes, headers)
+            notes.extend(said)
+        if found[key] is not None:
+            includes = [_relative(found[key], root), *includes]
     named = original_name(config, unit)
     # `source_root`: ninja compiles a copy that names the source as the original's build did (`stage`), with the
     # source's own folder searched first for quoted includes, as the source's would be. argv (compile_commands.json,
