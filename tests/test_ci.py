@@ -55,6 +55,8 @@ class GateTests(unittest.TestCase):
         self.assertEqual([c["name"] for c in written["checks"]], ["build", "progress", "lint", "files"])
         self.assertEqual(written["delta"]["metrics"]["matched_functions"], {"before": 1, "after": 2, "delta": 1})
         self.assertEqual(written["delta"]["counts"]["new_exact"], 1)
+        self.assertEqual(written["quality"]["files_changed"], 0)   # advisory, beside the checks
+        self.assertIn("added", written["quality"]["total"])
 
     def test_a_lost_match_fails_and_is_named(self):
         after = report([("main/a", "f", 0x1000, 0x20, 99.0), ("main/a", "g", 0x1020, 0x10, 90.0)],
@@ -136,6 +138,61 @@ class CommentTests(unittest.TestCase):
         self.assertIn("| Matched code (bytes) | 1,000 | 1,240 | **+240** |", text)
         self.assertIn("| Linked units | 5 | 5 | 0 |", text)
         self.assertIn("3 new exact functions, 1 renamed functions.", text)
+
+    QUALITY = {
+        "rows": [
+            {"key": "raw_offset", "name": "Byte-pointer offsets", "example": "(u8 *)p + 0x30", "group": "types",
+             "category": "Types", "before": 10, "after": 8, "removed": 3, "added": 1},
+            {"key": "arg_name", "name": "Numbered parameters", "example": "arg0, farg1", "group": "names",
+             "category": "Names", "before": 5, "after": 5, "removed": 0, "added": 0},
+            {"key": "this_cast", "name": "Casts of this to an unrelated class", "example": "((T *)this)->f()",
+             "group": "ownership", "category": "Members in the wrong class", "before": 2, "after": 2,
+             "removed": 0, "added": 0}],
+        "total": {"before": 15, "after": 13, "removed": 3, "added": 1}, "files_changed": 2,
+        "after_commit": "0123456789abcdef0123456789abcdef01234567",
+        "new": [{"key": "raw_offset", "path": "src/a.cpp", "line": 7, "text": "(u8 *)p + 0x30"},
+                {"key": "raw_offset", "path": "../../etc/x", "line": 1, "text": "(u8 *)q + 0x8"}],
+        "new_total": 2}
+
+    def test_quality_lists_the_moved_checks_and_every_check_collapsed(self):
+        result = {"result": "pass", "checks": [{"name": n, "ok": True} for n in ci.CHECKS], "quality": self.QUALITY}
+        text = ci.comment(result, "0123456789abcdef", self.RUN)
+        moved, everything = text.split("<details><summary>All 3 checks by category</summary>")
+        self.assertIn("**Debt -2**: this pull request removes 3 and adds 1 across 2 changed source files", moved)
+        self.assertIn("| Byte-pointer offsets (`(u8 *)p + 0x30`) | 10 → **8** | 3 | 1 |", moved)
+        self.assertNotIn("Numbered parameters", moved)           # unchanged: only in the full table
+        self.assertNotIn("Members in the wrong class", moved)    # unchanged ownership is not shown
+        self.assertIn("| **Total debt** | **15 → 13** | **3** | **1** |", moved)
+        self.assertIn("| **Names** | | | |", everything)
+        self.assertIn("| Numbered parameters (`arg0`, `farg1`) | 5 | 0 | 0 |", everything)
+        self.assertIn("[`a.cpp:7`](https://github.com/owner/repo/blob/0123456789abcdef0123456789abcdef01234567/"
+                      "src/a.cpp#L7)", text)
+        self.assertIn("`x:1`", text)                             # a path out of the repository is not linked
+        self.assertNotIn("../../etc", text.replace("`", ""))
+
+    def test_quality_without_a_change_or_a_measure(self):
+        unchanged = {**self.QUALITY, "rows": [{**r, "after": r["before"], "removed": 0, "added": 0}
+                                              for r in self.QUALITY["rows"]],
+                     "total": {"before": 15, "after": 15, "removed": 0, "added": 0}, "new": []}
+        text = ci.comment({"result": "pass", "checks": [], "quality": unchanged})
+        self.assertIn("**No change in any check**; the tree stays at 15.", text)
+        self.assertNotIn("new finding", text)
+        for broken in ({"error": "git diff: bad revision"}, None, {"total": {"before": "1"}}):
+            text = ci.comment({"result": "pass", "checks": [], "quality": broken})
+            self.assertIn("Not measured for this run", text)
+        self.assertNotIn("Source quality", ci.comment({"result": "pass", "checks": []}))
+
+    def test_quality_values_are_escaped(self):
+        hostile = {**self.QUALITY, "rows": [{**self.QUALITY["rows"][0], "name": "<img src=x> @owner",
+                                             "example": "`x` | y", "category": "[a](http://evil)"}],
+                   "new": [{"key": "raw_offset", "path": "src/a.cpp", "line": 1, "text": "f`` | <b>"}],
+                   "after_commit": "not a commit"}
+        text = ci.comment({"result": "pass", "checks": [], "quality": hostile}, "", self.RUN)
+        self.assertNotIn("<img", text)
+        self.assertNotIn("@owner", text)
+        self.assertIn("\\[a\\](http://evil)", text)                     # brackets escaped: no link
+        self.assertNotIn("https://github.com/owner/repo/blob", text)   # no commit, no links
+        self.assertIn("`fˋˋ \\| <b>`", text)                           # inside a code span < shows as itself
 
     def test_cli_renders_a_missing_file(self):
         out = subprocess.run([os.environ.get("PYTHON", "python3"), "-m", "zkit.cli", "ci", "comment", "/nonexistent",

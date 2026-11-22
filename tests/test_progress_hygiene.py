@@ -423,6 +423,67 @@ class QualityTests(unittest.TestCase):
             self.assertEqual(quality.audit(project, "decomp", revision="HEAD")["total"],
                              quality.compare(project, "decomp", "HEAD")["total"]["before"])
 
+    def project(self, root: Path) -> Project:
+        manifest = root / "p.json"
+        manifest.write_text(json.dumps({"schema_version": 1, "id": "q", "repositories": {
+            "decomp": {"root": ".", "role": "decomp"}}}), encoding="utf-8")
+        (root / ".git/info/exclude").write_text("p.json\n", encoding="utf-8")
+        return Project.load(manifest)
+
+    def test_moved_code_is_neither_removed_nor_added(self):
+        """A change is measured by what it removes and adds, matched by text, so code that only moves to another
+        file counts as neither; the findings it adds are placed on its own lines."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src").mkdir()
+            (root / "src/a.cpp").write_text("void f() {\n    fn_80012345();\n}\n", encoding="utf-8")
+            git(root, "init", "-q")
+            git(root, "add", ".")
+            git(root, "commit", "-q", "-m", "Add a")
+            project = self.project(root)
+            (root / "src/a.cpp").write_text("void k() {\n}\n", encoding="utf-8")
+            (root / "src/b.cpp").write_text("void f() {\n    fn_80012345();\n}\nvoid g() {\n    fn_80099999();\n}\n",
+                                            encoding="utf-8")   # untracked: measured whole
+            delta = quality.compare(project, "decomp", "HEAD")
+            row = next(r for r in delta["rows"] if r["key"] == "function_placeholder")
+            self.assertEqual((row["before"], row["after"], row["removed"], row["added"]), (1, 2, 0, 1))
+            self.assertEqual(delta["new"], [{"key": "function_placeholder", "path": "src/b.cpp", "line": 5,
+                                             "text": "fn_80099999"}])
+            self.assertEqual(delta["files_changed"], 2)
+            self.assertEqual((delta["total"]["removed"], delta["total"]["added"]), (0, 1))
+            git(root, "add", ".")
+            git(root, "commit", "-q", "-m", "Move f")
+            committed = quality.compare(project, "decomp", "HEAD~1", "HEAD")
+            self.assertEqual(committed["rows"], delta["rows"])
+            self.assertEqual(committed["new"], delta["new"])
+            self.assertRegex(committed["after_commit"], r"^[0-9a-f]{40}$")
+
+    def test_members_in_the_wrong_class_are_counted_beside_the_total(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "include").mkdir()
+            (root / "src").mkdir()
+            (root / "include/obj.h").write_text(
+                "class TBase { public: void g(); };\nclass TFoo : public TBase { public: void f(); };\n"
+                "class TBar { public: void h(); };\ntypedef TBar TBarAlias;\n", encoding="utf-8")
+            (root / "src/foo.cpp").write_text(
+                '#include "obj.h"\n'
+                "void TFoo::f() {\n"
+                "    ((TBase *)this)->g();\n"            # a base: no finding
+                "    ((TBar *)this)->h();\n"             # unrelated: this_cast
+                "    ((TBarAlias *)this)->h();\n"        # unrelated through a typedef
+                "    TFoo__f((u8 *)this + 0x10);\n"      # own member on a sub-object: subobject_call
+                "    TFoo__f((u8 *)this + 0);\n"         # offset 0 is the object itself
+                "}\n", encoding="utf-8")
+            git(root, "init", "-q")
+            git(root, "add", ".")
+            git(root, "commit", "-q", "-m", "Add foo")
+            audit = quality.audit(self.project(root), "decomp")
+            owned = {r["key"]: r["count"] for r in audit["ownership"]}
+            self.assertEqual(owned, {"this_cast": 2, "subobject_call": 1})
+            self.assertEqual(audit["total"], sum(r["count"] for r in audit["counts"]))
+            self.assertNotIn("this_cast", {r["key"] for r in audit["counts"]})
+
     def test_a_name_starting_in_is_no_ghidra_register_input(self):
         """Ghidra names a register's incoming value `in_x8`, `in_w1`, `in_lr`, `in_FPCR`, `in_stack_ffffffe8`; a
         member called `in_list` (an original's own name, from its assert) is none."""

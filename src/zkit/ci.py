@@ -4,6 +4,7 @@
   compares the new report with a baseline by original address, lints the lines the change adds and looks for files
   that must not be committed. With `out` it also writes each check's result and the report delta as JSON, which
   `comment` turns into the pull request comment.
+  It also measures source quality (`zkit quality --since`): advisory, never failing the gate.
 - `comment`: that JSON as markdown. The JSON is written by the pull request's own code, so every value is checked
   and escaped; a missing or unreadable file renders as a run that stopped before the gate.
 - `fetch_report`: the report CI already made for a commit, kept as the artifact `report-<tree hash>`, so master's
@@ -49,6 +50,9 @@ COUNTS = (("new_exact", "new exact functions"), ("improved", "closer functions")
           ("newly_linked", "newly linked functions"), ("regressed", "lost matches"), ("unlinked", "lost links"),
           ("renamed", "renamed functions"))
 LISTED = 20                    # regressions named in the result and the comment
+QUALITY_NEW = 500              # added quality findings kept in the result
+QUALITY_ROWS = 30              # added findings listed in the comment (grouped by check and text)
+QUALITY_LINKS = 8              # lines linked per listed finding
 
 
 # The gate
@@ -87,6 +91,30 @@ def delta_summary(compared: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def quality_summary(compared: dict[str, Any]) -> dict[str, Any]:
+    """The part of `quality.compare` the comment shows: every check's counts, the total, the commit measured and
+    the first added findings."""
+    keys = ("key", "name", "example", "group", "category", "before", "after", "removed", "added")
+    return {
+        "rows": [{k: row[k] for k in keys} for row in compared["rows"] + compared.get("ownership", [])],
+        "total": {k: compared["total"][k] for k in ("before", "after", "removed", "added")},
+        "files_changed": compared["files_changed"], "after_commit": compared.get("after_commit"),
+        "new": compared["new"][:QUALITY_NEW], "new_total": len(compared["new"]),
+    }
+
+
+def _quality(project: Project, repo: str, base: str) -> dict[str, Any]:
+    from . import quality, render
+    print(f"== quality --since {base}", flush=True)
+    try:
+        compared = quality.compare(project, repo, base, "HEAD")
+    except (ValueError, OSError) as error:
+        print(f"not measured: {error}", flush=True)
+        return {"error": str(error)}
+    print(render.quality_compare(compared, new=1000), flush=True)
+    return quality_summary(compared)
+
+
 def outcome(checks: list[dict[str, Any]]) -> str:
     """pass when every check that ran passed and the build ran and passed."""
     ran = {c["name"]: c["ok"] for c in checks}
@@ -96,7 +124,8 @@ def outcome(checks: list[dict[str, Any]]) -> str:
 def check(project: Project, target: str, baseline: str | None, base: str, out: Path | None = None,
           steps: dict[str, Callable[..., Any]] | None = None) -> dict[str, Any]:
     """The pull request gate against `baseline` (a report file or saved baseline; default: the latest saved) and
-    the lines added since `base`. `steps` replaces the build, lint or files step (for tests)."""
+    the lines added since `base`, and the source quality since `base` (advisory: it never fails the gate). `steps`
+    replaces the build, lint, files or quality step (for tests)."""
     from . import bridge, hygiene, progress, render
     steps = steps or {}
     checks: list[dict[str, Any]] = []
@@ -133,7 +162,8 @@ def check(project: Project, target: str, baseline: str | None, base: str, out: P
     print(text, flush=True)
     checks.append(_entry("files", files["ok"], text, "" if files["ok"] else "files that must not be committed"))
 
-    result = {"schema": SCHEMA, "result": outcome(checks), "checks": checks, "delta": delta}
+    measured = (steps.get("quality") or _quality)(project, repo, base)
+    result = {"schema": SCHEMA, "result": outcome(checks), "checks": checks, "delta": delta, "quality": measured}
     if out is not None:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(result, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -171,6 +201,125 @@ def _int(value: object) -> int | None:
 
 def _signed(value: int) -> str:
     return f"**{value:+,}**" if value else "0"
+
+
+def _code(value: object, limit: int = 120) -> str:
+    """Untrusted text as an inline code span, safe inside a table cell (a code span shows `<` and `&` as they are,
+    so only backticks and pipes need changing)."""
+    value = re.sub(r"\s+", " ", str(value))[:limit].replace("`", "ˋ").replace("|", "\\|").strip()
+    return f"`{value}`" if value else ""
+
+
+def _counts(row: object, *keys: str) -> tuple[int, ...] | None:
+    values = tuple(_int(row.get(k)) for k in keys) if isinstance(row, dict) else (None,)
+    return None if None in values else values
+
+
+def _listed(value: dict, key: str) -> list[dict]:
+    items = value.get(key)
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _plural(n: int, one: str) -> str:
+    return f"{n:,} {one if n == 1 else one + 's'}"
+
+
+def _examples(value: object) -> str:
+    """`a`, `b` for an example listing several spellings; one span when a comma is inside parentheses."""
+    pieces = str(value or "")[:80].split(", ")
+    if any(piece.count("(") != piece.count(")") for piece in pieces):
+        pieces = [", ".join(pieces)]
+    return ", ".join(filter(None, (_code(piece, 60) for piece in pieces)))
+
+
+def _quality_table(rows: list[dict], categories: bool = True) -> list[str]:
+    """One row per check: what it finds with an example, the tree's count before and after, and what the pull
+    request removed and added. With categories, each category opens with a heading row."""
+    out = ["| Check | Before → after | Removed | Added |", "|---|---|---:|---:|"]
+    last = None
+    for row in rows:
+        before, after, removed, added = _counts(row, "before", "after", "removed", "added")
+        category = _text(row.get("category") or row.get("group"), 60)
+        if categories and category != last:
+            out.append(f"| **{category}** | | | |")
+        last = category
+        example = _examples(row.get("example"))
+        name = _text(row.get("name") or row.get("key"), 80) + (f" ({example})" if example else "")
+        moved = f"{before:,} → **{after:,}**" if after != before else f"{after:,}"
+        out.append(f"| {name} | {moved} | {removed:,} | {added:,} |")
+    return out
+
+
+def _moved(row: dict) -> bool:
+    before, after, removed, added = _counts(row, "before", "after", "removed", "added")
+    return bool(removed or added or after != before)
+
+
+def quality_section(quality: object, run_url: str = "") -> list[str]:
+    """The advisory source quality section for a `check` result's `quality` (untrusted, like the rest)."""
+    lines = ["", "### Source quality"]
+    quality = quality if isinstance(quality, dict) else {}
+    total = _counts(quality.get("total"), "before", "after", "removed", "added")
+    if total is None:
+        return lines + ["", "Not measured for this run (see the run log). `zkit quality --since <base>` measures it "
+                        "locally."]
+    repo = re.match(r"https://github\.com/([\w.-]+/[\w.-]+)/actions/runs/\d+", run_url)
+    commit = quality.get("after_commit")
+    commit = commit if isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit) else ""
+
+    def link(path: str, line: int, label: str) -> str:
+        if repo and commit and re.fullmatch(r"[\w.+/-]+", path) and ".." not in path.split("/"):
+            return f"[{_code(label)}](https://github.com/{repo[1]}/blob/{commit}/{path}#L{line})"
+        return _code(label)
+
+    rows = [r for r in _listed(quality, "rows") if _counts(r, "before", "after", "removed", "added")]
+    debt = [r for r in rows if r.get("group") != "ownership"]
+    owned = [r for r in rows if r.get("group") == "ownership"]
+    before, after, removed, added = total
+    files = _int(quality.get("files_changed")) or 0
+    total_row = f"| **Total debt** | **{before:,} → {after:,}** | **{removed:,}** | **{added:,}** |"
+    owned_title = "**Members in the wrong class**, read from the class declarations (not in the total):"
+    moved = [r for r in debt if _moved(r)]
+    if not moved and not any(_moved(r) for r in owned):
+        lines += ["", f"Advisory: never fails a pull request. **No change in any check**; the tree stays at "
+                  f"{after:,}."]
+    else:
+        lines += ["", f"Advisory: never fails a pull request. **Debt {after - before:+,}**: this pull request "
+                  f"removes {removed:,} and adds {added:,} across {_plural(files, 'changed source file')}; the tree "
+                  f"goes from {before:,} to {after:,}."]
+    if moved:   # what the pull request did, the largest change first
+        lines += [""] + _quality_table(sorted(moved, key=lambda r: -sum(_counts(r, "removed", "added"))),
+                                       categories=False) + [total_row]
+    if any(_moved(r) for r in owned):
+        lines += ["", owned_title, ""] + _quality_table([r for r in owned if _moved(r)], categories=False)
+    if debt:   # every check with the tree's count, one click away
+        lines += ["", f"<details><summary>All {len(debt) + len(owned)} checks by category</summary>", ""]
+        lines += _quality_table(debt) + [total_row]
+        if owned:
+            lines += ["", owned_title, ""] + _quality_table(owned, categories=False)
+        lines.append("</details>")
+
+    new = _listed(quality, "new")
+    if new:
+        names = {r.get("key"): r.get("name") for r in rows}
+        spots: dict[tuple[str, str], list[tuple[str, int]]] = {}
+        for f in new:
+            if isinstance(f.get("path"), str) and _int(f.get("line")):
+                spots.setdefault((str(f.get("key")), str(f.get("text"))), []).append((f["path"], f["line"]))
+        count = max(_int(quality.get("new_total")) or 0, len(new))
+        lines += ["", f"<details><summary>{_plural(count, 'new finding')} on lines this pull request adds"
+                  "</summary>", "", "| Check | Text | Where |", "|---|---|---|"]
+        for (key, found), where in list(spots.items())[:QUALITY_ROWS]:
+            places, path = [], None
+            for spot, line in where[:QUALITY_LINKS]:
+                places.append(link(spot, line, f"{spot.rsplit('/', 1)[-1]}:{line}" if spot != path else f":{line}"))
+                path = spot
+            more = f" … {len(where) - QUALITY_LINKS:,} more" if len(where) > QUALITY_LINKS else ""
+            lines.append(f"| {_text(names.get(key) or key, 60)} | {_code(found, 80)} | {' '.join(places)}{more} |")
+        if len(spots) > QUALITY_ROWS or count > len(new):
+            lines.append("| … more in the run log | | |")
+        lines.append("</details>")
+    return lines + ["", "`zkit quality --since <base>` prints the same report locally."]
 
 
 def comment(result: object, sha: str = "", run_url: str = "", marker: str = MARKER) -> str:
@@ -226,6 +375,8 @@ def comment(result: object, sha: str = "", run_url: str = "", marker: str = MARK
             label = re.sub(r"\s*\(`[^`]*`\)", "", CHECKS.get(name, _text(name)))
             lines += ["", f"<details><summary>{label}: output</summary>", "", "```", _block(c["output"]), "```",
                       "</details>"]
+    if "quality" in result:
+        lines += quality_section(result["quality"], run_url)
     return "\n".join(lines) + "\n"
 
 

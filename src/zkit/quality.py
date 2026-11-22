@@ -140,6 +140,51 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
        r"\basm\s*\{|\b__asm__\b|\basm\s+[\w\s\*&:~<>,]+?\w+\s*\([^;]*\)\s*\{", "asm"),
 )
 SUMMARY_GROUPS = ("linkage", "layout", "types", "names", "vtables", "decompiler", "placement", "asm")
+# How a report names each check, with what it looks like (a manifest's own pattern shows its label), and each
+# group's title.
+DISPLAY = {   # key -> (name, example)
+    "extern_c": ('extern "C" declarations', 'extern "C" void TEnemy__update(void *);'),
+    "local_decl": ("Prototypes and externs in source files", "void heap_free(void *);"),
+    "mangled_member": ("Hand-mangled member names", "update__6TEnemyFv"),
+    "mangled_free": ("Hand-mangled free functions", "helper__Fv"),
+    "mangled_itanium": ("Itanium-mangled names", "_ZN6TEnemy6updateEv"),
+    "flat_name": ("Members spelled as C names", "TEnemy__update"),
+    "raw_offset": ("Byte-pointer offsets", "(u8 *)p + 0x30"),
+    "offset_cast": ("Casts of pointer plus offset", "(Vec *)(p + 0x178)"),
+    "punned_deref": ("Type-punned dereferences", "*(f32 *)&x, *(s32 *)(p + 0x18)"),
+    "offset_member": ("Offset-named fields", "unk_30, m_c, field_96, set_field_378"),
+    "fp_cast": ("Function-pointer casts", "((void (*)(T *))p)(x)"),
+    "string_cast": ("Strings cast to integers", '(saddr)"file.gvm"'),
+    "ghidra_type": ("Ghidra types", "undefined4"),
+    "address_type": ("Address-named types", "TUnk_804806E8"),
+    "retype_macro": ("Re-typing macros", "#define g (*(T *)&g)"),
+    "decomp_temp": ("m2c temporaries", "temp_r3, var_f31"),
+    "stack_local": ("Stack-slot locals", "sp1C"),
+    "arg_name": ("Numbered parameters", "arg0, farg1"),
+    "ghidra_temp": ("Ghidra temporaries", "iVar1, param_1"),
+    "m2c_macro": ("m2c macros", "M2C_FIELD"),
+    "address_comment": ("Address comments", "// moved from 0x8043E828"),
+    "data_label": ("Address-named data", "lbl_8045A010"),
+    "function_placeholder": ("Address-named functions", "fn_80123456, TEnemy__sub_80123456"),
+    "address_in_name": ("Names built on an address", "call_36A90_with_1"),
+    "vtable_symbol": ("Vtable symbols in source", "__vt__6TEnemy"),
+    "hand_vtable": ("Hand-written vtables", "void *TEnemy_vtable[] = {"),
+    "filler_virtual": ("Filler virtuals", "virtual void reserved_3();"),
+    "slot_name": ("Slot-numbered names", "vfunc_67, TEnemy__vt82"),
+    "local_virtual": ("Virtuals in source files", "virtual void draw();"),
+    "address_unit": ("Units named after an address", "TEnemy_80123456.cpp"),
+    "local_class": ("Classes declared in source files", "struct EnemyView : TObject {"),
+    "duplicate_class": ("Classes declared in more than one file", "class TEnemy {"),
+    "inline_asm": ("Inline assembly", "asm { ... }"),
+}
+GROUP_TITLES = {"linkage": "Linkage", "layout": "Layout", "types": "Types", "decompiler": "Decompiler output",
+                "names": "Names", "vtables": "Vtables", "placement": "Units and classes", "asm": "Assembly",
+                "ownership": "Members in the wrong class (not in the total)"}
+# Members written in the wrong class, read from the class declarations: reported beside the debt, not in its total.
+OWNERSHIP = {   # key -> (name, example)
+    "this_cast": ("Casts of this to an unrelated class", "((TObjPlayer *)this)->f()"),
+    "subobject_call": ("Own member called on a sub-object", "TEnemy__f((char *)this + 0x3C)"),
+}
 _DEFAULTS = {p.key: p for p in DEFAULT_PATTERNS}
 _STRING_CAST = re.compile(_DEFAULTS["string_cast"].regex.pattern + r'(?:\\.|[^"\\\n])*"')   # with the literal
 CPP_SUFFIXES = {".cc", ".cp", ".cpp", ".cxx"}
@@ -532,6 +577,123 @@ def duplicates(bodies: dict[str, dict[str, int]]) -> dict[str, list[tuple[int, s
     return dict(out)
 
 
+_CAST_TYPE = r"\(\s*(?:const\s+)?([A-Za-z_]\w*)\s*\*\s*\)\s*"
+_THIS_CAST = re.compile(_CAST_TYPE + r"(?:\(\s*this\s*\)|this\b(?!\s*(?:->|\.|\[)))"
+                        r"|\b(?:static|reinterpret)_cast\s*<\s*(?:const\s+)?([A-Za-z_]\w*)\s*\*\s*>\s*\(\s*this\s*\)")
+_BYTE_THIS = (r"\(\s*\(?\s*(?:const\s+)?(?:u8|s8|char|unsigned\s+char|signed\s+char)\s*\*\s*\)\s*\(?\s*this\s*\)?"
+              r"\s*\+\s*(0x[0-9A-Fa-f]+|\d+)\s*\)?")
+_SUB_CALLS = (   # a member of the class called on `(u8 *)this + offset`: flat C name, hand-mangled, or through a cast
+    ("flat", re.compile(r"\b([A-Z][A-Za-z0-9]*[a-z0-9])__[a-z_]\w*\s*\(\s*" + _BYTE_THIS)),
+    ("mangled", re.compile(r"\b[A-Za-z_~]\w*?__(\d+)([A-Za-z_]\w*?)F\w*\s*\(\s*" + _BYTE_THIS)),
+    ("cast", re.compile(r"\(\s*\(\s*([A-Za-z_]\w*)\s*\*\s*\)\s*" + _BYTE_THIS + r"\s*\)\s*->\s*~?\w+\s*\(")),
+)
+_CLASS_DECL = re.compile(r"\b(?:class|struct|union)\s+([A-Za-z_]\w*)\s*(?:final\s*)?(?::(?!:)\s*([^{;]*))?\{")
+_TYPEDEF = re.compile(r"\btypedef\s+(?:(?:struct|class|union)\s+)?([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*;")
+_TYPEDEF_BODY = re.compile(r"\btypedef\s+(?:struct|class|union)\s*\w*\s*\{")
+_USING = re.compile(r"\busing\s+([A-Za-z_]\w*)\s*=\s*(?:(?:struct|class|union)\s+)?([A-Za-z_]\w*)\s*;")
+
+
+@dataclass
+class ClassFacts:
+    """What one file says about classes: those it declares with their direct bases, its typedef and using names,
+    and its members' casts of `this` and calls on a sub-object of their own class."""
+    bases: dict[str, set[str]]
+    aliases: dict[str, str]
+    this_casts: list[tuple[str, str, int]]     # (owner class, cast type, line)
+    subobject_calls: list[tuple[str, int]]     # (call text, line)
+
+
+def class_facts(rel: str, source: _Source) -> ClassFacts:
+    from .cxx import _matching
+    text = source.text
+    bases: dict[str, set[str]] = collections.defaultdict(set)
+    aliases: dict[str, str] = {}
+    this_casts, calls = [], []
+    if any(word in text for word in ("class", "struct", "union", "typedef", "using")):
+        code = source.code
+        for match in _CLASS_DECL.finditer(code):
+            found = bases[match[1]]
+            for base in (match[2] or "").split(","):
+                base = re.sub(r"<.*", "", re.sub(r"\b(?:public|private|protected|virtual)\b", "", base))
+                base = base.split("::")[-1].strip()
+                if base:
+                    found.add(base)
+        for match in _TYPEDEF.finditer(code):
+            aliases[match[2]] = match[1]
+        for match in _USING.finditer(code):
+            aliases[match[1]] = match[2]
+        for match in _TYPEDEF_BODY.finditer(code):
+            close = _matching(code, match.end() - 1)
+            name = re.match(r"\s*([A-Za-z_]\w*)\s*;", code[close + 1:close + 200])
+            if name:
+                bases.setdefault(name[1], set())
+    if "this" in text and (Path(rel).suffix.lower() not in HEADER_SUFFIXES or "{" in text):
+        code = source.code
+        if _THIS_CAST.search(code) or re.search(_BYTE_THIS, code):
+            for definition in source.defs:
+                parts = [re.sub(r"<.*", "", part) for part in definition.qualified.split("::")]
+                if len(parts) < 2:
+                    continue
+                owner, (start, end) = parts[-2], definition.span
+                body = code[start:end]
+                for match in _THIS_CAST.finditer(body):
+                    this_casts.append((owner, match[1] or match[2], source.line(start + match.start())))
+                for kind, regex in _SUB_CALLS:
+                    for match in regex.finditer(body):
+                        target = match[2][:int(match[1])] if kind == "mangled" else match[1]
+                        offset = int(match[3] if kind == "mangled" else match[2], 0)
+                        if target == owner and offset:
+                            calls.append((f"{owner}: {' '.join(match[0].split())}", source.line(start + match.start())))
+    return ClassFacts(dict(bases), aliases, this_casts, calls)
+
+
+class ClassMap:
+    """Declared classes and their bases, merged over every file (a class declared twice keeps every base)."""
+
+    def __init__(self, facts: Iterable[ClassFacts]):
+        self.bases: dict[str, set[str]] = collections.defaultdict(set)
+        self.aliases: dict[str, str] = {}
+        for one in facts:
+            for name, bases in one.bases.items():
+                self.bases[name].update(bases)
+            self.aliases.update(one.aliases)
+        self._ancestors: dict[str, set[str]] = {}
+
+    def resolve(self, name: str) -> str:
+        seen = set()
+        while name in self.aliases and name not in seen:
+            seen.add(name)
+            name = self.aliases[name]
+        return name
+
+    def ancestors(self, name: str) -> set[str]:
+        if name not in self._ancestors:
+            out, todo = set(), [name]
+            while todo:
+                for base in self.bases.get(todo.pop(), ()):
+                    base = self.resolve(base)
+                    if base not in out:
+                        out.add(base)
+                        todo.append(base)
+            self._ancestors[name] = out
+        return self._ancestors[name]
+
+    def unrelated(self, owner: str, target: str) -> bool:
+        """True only when both are declared classes and neither derives from the other."""
+        owner, target = self.resolve(owner), self.resolve(target)
+        if owner not in self.bases or target not in self.bases or owner == target:
+            return False
+        return target not in self.ancestors(owner) and owner not in self.ancestors(target)
+
+
+def ownership(facts: ClassFacts, classes: ClassMap) -> list[tuple[int, str, str]]:
+    """(line, key, text) of a file's members written in the wrong class: a cast of `this` to a class neither derived
+    from nor a base of the member's own, and a member of its own class called on a sub-object of `this`."""
+    out = [(line, "this_cast", f"{owner}: ({target} *)this")
+           for owner, target, line in facts.this_casts if classes.unrelated(owner, target)]
+    return out + [(line, "subobject_call", call[:120]) for call, line in facts.subobject_calls]
+
+
 # Checks a parser judges, with what it needs: "file" a whole file and its path, "image" the image's address range.
 # Each takes (path or None, text, source, image) and gives [(1-based line, text of the finding)].
 PARSED = {
@@ -569,20 +731,29 @@ def parsed_findings(text: str, catalog: Iterable[Pattern], rel: str | None = Non
     return out
 
 
-def count(text: str, catalog: Iterable[Pattern], header: bool = False, rel: str | None = None,
-          image: tuple[int, int] | None = None, source: _Source | None = None) -> collections.Counter:
-    """Debt per pattern in a file (`rel` its path, which also says whether it is a header) or a piece of one."""
+def located(text: str, catalog: Iterable[Pattern], header: bool = False, rel: str | None = None,
+            image: tuple[int, int] | None = None, source: _Source | None = None) -> list[tuple[int, str, str]]:
+    """(1-based line, key, text) of every finding in a file (`rel` its path, which also says whether it is a header)
+    or a piece of one. Comments and string literals are blanked with every line kept in place."""
     catalog = list(catalog)
     if rel is not None:
         header = Path(rel).suffix.lower() in HEADER_SUFFIXES
-    code = _strip_comments(text)
-    found = collections.Counter()
+    code = blank_comments(text)
+    line = None
+    out = []
     for pattern in catalog:
         if (header and pattern.sources_only) or _parsed(pattern) or pattern.key in TREE_CHECKS:
             continue
-        found[pattern.key] += sum(1 for _ in pattern.regex.finditer(code))
-    found.update(key for _, key, _ in parsed_findings(text, catalog, rel, header, image, source))
-    return found
+        for match in pattern.regex.finditer(code):
+            line = line or _line_index(code)
+            out.append((line(match.start()), pattern.key, match[0][:80]))
+    return out + parsed_findings(text, catalog, rel, header, image, source)
+
+
+def count(text: str, catalog: Iterable[Pattern], header: bool = False, rel: str | None = None,
+          image: tuple[int, int] | None = None, source: _Source | None = None) -> collections.Counter:
+    """Debt per pattern in a file (`rel` its path, which also says whether it is a header) or a piece of one."""
+    return collections.Counter(key for _, key, _ in located(text, catalog, header, rel, image, source))
 
 
 def image_range(project: Project | None, repo: str | None) -> tuple[int, int] | None:
@@ -670,55 +841,200 @@ def _revision_files(root: Path, revision: str, roots: list[str], exclude: list[r
     process.wait()
 
 
+@dataclass
+class _Scan:
+    counts: collections.Counter                   # finding counts by key
+    bodies: dict[str, int]                        # class with a body here, not nested in another -> its line
+    classes: ClassFacts
+    found: list[tuple[int, str, str]] | None      # every finding (line, key, text), kept for changed files only
+
+
+def _scan(rel: str, text: str, catalog: list[Pattern], image: tuple[int, int] | None, keep: bool = False) -> _Scan:
+    source = _Source(text)
+    found = located(text, catalog, rel=rel, image=image, source=source)
+    bodies: dict[str, int] = {}
+    for offset, _, name in source.bodies:
+        bodies.setdefault(name, source.line(offset))
+    return _Scan(collections.Counter(key for _, key, _ in found), bodies, class_facts(rel, source),
+                 found if keep else None)
+
+
+def _checks(project: Project | None, repo: str | None) -> tuple[list[Pattern], set[str], list[str]]:
+    """The catalog, its checks judged over the whole tree, and the ownership checks the manifest keeps."""
+    catalog = patterns(project, repo)
+    config = (project.config["repositories"][repo].get("quality", {}) if project and repo else {})
+    tree = {p.key for p in catalog if p.key in TREE_CHECKS and p.regex.pattern == _NEVER}
+    return catalog, tree, [k for k in OWNERSHIP if k not in set(config.get("disable", []))]
+
+
+def _relations(scans: dict[str, _Scan], tree: set[str], owned: list[str]) -> dict[str, list[tuple[int, str, str]]]:
+    """Findings that depend on more than one file, by the file holding them: copies of a class declared in more than
+    one file (debt) and members in the wrong class (ownership)."""
+    out: dict[str, list[tuple[int, str, str]]] = collections.defaultdict(list)
+    if "duplicate_class" in tree:
+        for rel, copies in duplicates({rel: scan.bodies for rel, scan in scans.items() if scan.bodies}).items():
+            out[rel] += [(line, "duplicate_class", name) for line, name in copies]
+    if owned:
+        classes = ClassMap(scan.classes for scan in scans.values())
+        for rel, scan in scans.items():
+            found = [f for f in ownership(scan.classes, classes) if f[1] in owned]
+            if found:
+                out[rel] += found
+    return dict(out)
+
+
+def _totals(scans: dict[str, _Scan], related: dict[str, list[tuple[int, str, str]]]) -> collections.Counter:
+    totals: collections.Counter = collections.Counter()
+    for scan in scans.values():
+        totals.update(scan.counts)
+    for found in related.values():
+        totals.update(key for _, key, _ in found)
+    return totals
+
+
+def describe(key: str, catalog: Iterable[Pattern] = ()) -> dict[str, str]:
+    """A check's key, name, example, group and category (its group's title), for a report."""
+    if key in OWNERSHIP:
+        name, example, group = *OWNERSHIP[key], "ownership"
+    else:
+        pattern = next((p for p in catalog if p.key == key), None) or _DEFAULTS.get(key)
+        group = pattern.group if pattern else "custom"
+        name, example = DISPLAY.get(key) or ((pattern.label if pattern else key), "")
+    return {"key": key, "name": name, "example": example, "group": group,
+            "category": GROUP_TITLES.get(group, group.capitalize())}
+
+
 def audit(project: Project, repo: str, paths: list[str] | None = None, revision: str | None = None,
           top: int = 15) -> dict[str, Any]:
-    """Counts per pattern for the working tree (or a revision), and the files holding the most debt."""
-    catalog = patterns(project, repo)
+    """Counts per pattern for the working tree (or a revision), the files holding the most debt, and the members in
+    the wrong class (beside the total, not in it)."""
+    catalog, tree, owned = _checks(project, repo)
     roots, exclude = _paths(project, repo, paths)
     root = project.root(repo)
     files = _revision_files(root, revision, roots, exclude) if revision else _tree_files(root, roots, exclude)
     image = image_range(project, repo)
-    tree = {p.key for p in catalog if p.key in TREE_CHECKS and p.regex.pattern == _NEVER}
-    totals: collections.Counter = collections.Counter()
-    per_file: dict[str, collections.Counter] = {}
-    bodies: dict[str, dict[str, int]] = {}
-    scanned = 0
-    for rel, text in files:
-        scanned += 1
-        source = _Source(text)
-        found = +count(text, catalog, rel=rel, image=image, source=source)   # zero counts dropped
+    scans = {rel: _scan(rel, text, catalog, image) for rel, text in files}
+    related = _relations(scans, tree, owned)
+    totals = _totals(scans, related)
+    keys = {p.key for p in catalog}
+    per_file = {}
+    for rel, scan in scans.items():
+        found = scan.counts + collections.Counter(key for _, key, _ in related.get(rel, []) if key in keys)
         if found:
-            totals.update(found)
             per_file[rel] = found
-        if "duplicate_class" in tree and source.bodies:
-            bodies[rel] = {}
-            for offset, _, name in source.bodies:
-                bodies[rel].setdefault(name, source.line(offset))
-    for rel, copies in (duplicates(bodies) if "duplicate_class" in tree else {}).items():
-        totals["duplicate_class"] += len(copies)
-        per_file.setdefault(rel, collections.Counter())["duplicate_class"] += len(copies)
     groups = collections.Counter()
     for pattern in catalog:
         groups[pattern.group] += totals[pattern.key]
     worst = sorted(per_file.items(), key=lambda item: -sum(item[1].values()))[:top]
-    return {"repo": repo, "revision": revision or "working tree", "paths": roots, "files": scanned,
+    return {"repo": repo, "revision": revision or "working tree", "paths": roots, "files": len(scans),
             "files_with_debt": len(per_file),
-            "counts": [{"key": p.key, "label": p.label, "group": p.group, "count": totals[p.key]} for p in catalog],
-            "groups": dict(groups), "total": sum(totals.values()),
+            "counts": [{**describe(p.key, catalog), "label": p.label, "count": totals[p.key]} for p in catalog],
+            "ownership": [{**describe(k), "label": OWNERSHIP[k][0], "count": totals[k]} for k in owned],
+            "groups": dict(groups), "total": sum(totals[p.key] for p in catalog),
             "worst_files": [{"path": rel, "total": sum(c.values()), "top": c.most_common(3)} for rel, c in worst]}
+
+
+def _git(root: Path, *args: str) -> str:
+    result = subprocess.run(["git", "-C", str(root), "-c", "core.quotePath=false", *args], capture_output=True,
+                            check=False)
+    if result.returncode:
+        raise ValueError(f"git {args[0]}: {result.stderr.decode(errors='replace').strip()}")
+    return result.stdout.decode("utf-8", errors="surrogateescape")
+
+
+def _diff(root: Path, before: str, after: str | None, roots: list[str],
+          exclude: list[re.Pattern]) -> dict[str, set[int] | None]:
+    """{source file that differs between `before` and `after` (None: the working tree, untracked files included):
+    the lines `after` added to it}, None for an untracked file (all of it)."""
+    out: dict[str, set[int] | None] = {}
+    current = old = None
+    for line in _git(root, "diff", "-U0", "--no-renames", "--no-color", "--no-ext-diff", before,
+                     *([after] if after else []), "--", *roots).splitlines():
+        if line.startswith("diff --git "):
+            current = None
+        elif line.startswith("--- "):
+            old = line[4:]
+        elif line.startswith("+++ "):
+            path = line[4:] if line[4:] != "/dev/null" else old or ""
+            current = path[2:] if path[:2] in ("a/", "b/") else path
+            if _keep(current, exclude):
+                out.setdefault(current, set())
+            else:
+                current = None
+        elif line.startswith("@@") and current is not None:
+            hunk = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+            if hunk:
+                begin, count = int(hunk[1]), int(hunk[2] if hunk[2] is not None else 1)
+                out[current].update(range(begin, begin + count))
+    if not after:
+        for rel in _git(root, "ls-files", "-z", "-o", "--exclude-standard", "--", *roots).split("\0"):
+            if rel and _keep(rel, exclude) and (root / rel).is_file():
+                out[rel] = None
+    return out
 
 
 def compare(project: Project, repo: str, before: str, after: str | None = None,
             paths: list[str] | None = None) -> dict[str, Any]:
-    """Debt at `before` (a revision) and `after` (a revision, or the working tree), pattern by pattern."""
-    first = audit(project, repo, paths, before, top=0)
-    last = audit(project, repo, paths, after, top=0)
-    rows = []
-    for a, b in zip(first["counts"], last["counts"]):
-        rows.append({**b, "before": a["count"], "after": b["count"], "delta": b["count"] - a["count"]})
-    return {"repo": repo, "before": before, "after": after or "working tree", "rows": rows,
-            "total": {"before": first["total"], "after": last["total"], "delta": last["total"] - first["total"]},
-            "worse": [r for r in rows if r["delta"] > 0]}
+    """Debt at `before` (a revision) and `after` (a revision, or the working tree), check by check: the tree's count
+    at each, and what the change between them removed and added. Findings are matched by their text, so code that
+    only moves (between functions or files) counts as neither. Also the findings the change added on its own lines,
+    and the members in the wrong class (beside the total, not in it)."""
+    catalog, tree, owned = _checks(project, repo)
+    roots, exclude = _paths(project, repo, paths)
+    root = project.root(repo)
+    image = image_range(project, repo)
+    added_lines = _diff(root, before, after, roots, exclude)
+    changed = set(added_lines)
+    files = _revision_files(root, after, roots, exclude) if after else _tree_files(root, roots, exclude)
+    head = {rel: _scan(rel, text, catalog, image, keep=rel in changed) for rel, text in files}
+    wanted = sorted(changed) if len(changed) <= 500 else roots
+    base_changed = {rel: _scan(rel, text, catalog, image, keep=True)
+                    for rel, text in (_revision_files(root, before, wanted, exclude) if changed else ())
+                    if rel in changed}
+    base = {rel: scan for rel, scan in head.items() if rel not in changed} | base_changed
+    head_related, base_related = _relations(head, tree, owned), _relations(base, tree, owned)
+    head_totals, base_totals = _totals(head, head_related), _totals(base, base_related)
+
+    # Findings across files can change in files the change did not touch (a class gained a base, a class's other
+    # copy went away), so they are matched over the whole tree.
+    rise: collections.Counter = collections.Counter(
+        (key, text) for rel in changed if rel in head for _, key, text in head[rel].found)
+    fall: collections.Counter = collections.Counter(
+        (key, text) for scan in base_changed.values() for _, key, text in scan.found)
+    rise.update((key, text) for found in head_related.values() for _, key, text in found)
+    fall.update((key, text) for found in base_related.values() for _, key, text in found)
+    rise, fall = rise - fall, fall - rise
+    added, removed = collections.Counter(), collections.Counter()
+    for (key, _), n in rise.items():
+        added[key] += n
+    for (key, _), n in fall.items():
+        removed[key] += n
+
+    # Where the added findings are: on lines the change added, as many of each (key, text) as it rose by.
+    candidates = []
+    for rel in sorted(changed & head.keys()):
+        lines = added_lines[rel]
+        candidates += [(rel, f) for f in head[rel].found + head_related.get(rel, []) if lines is None or f[0] in lines]
+    candidates += [(rel, f) for rel, found in head_related.items() if rel not in changed for f in found]
+    new, left = [], collections.Counter(rise)
+    for rel, (line, key, text) in sorted(candidates, key=lambda item: (item[0], item[1][0])):
+        if left[(key, text)] > 0:
+            left[(key, text)] -= 1
+            new.append({"key": key, "path": rel, "line": line, "text": text})
+
+    def row(key: str, label: str) -> dict[str, Any]:
+        return {**describe(key, catalog), "label": label, "before": base_totals[key], "after": head_totals[key],
+                "delta": head_totals[key] - base_totals[key], "removed": removed[key], "added": added[key]}
+
+    def commit(revision: str | None) -> str | None:
+        return _git(root, "rev-parse", "--verify", f"{revision}^{{commit}}").strip() if revision else None
+
+    rows = [row(p.key, p.label) for p in catalog]
+    total = {k: sum(r[k] for r in rows) for k in ("before", "after", "delta", "removed", "added")}
+    return {"repo": repo, "before": before, "after": after or "working tree", "before_commit": commit(before),
+            "after_commit": commit(after), "files_changed": len(changed), "rows": rows,
+            "ownership": [row(k, OWNERSHIP[k][0]) for k in owned], "total": total,
+            "worse": [r for r in rows if r["delta"] > 0], "new": new}
 
 
 def findings(text: str, catalog: Iterable[Pattern], header: bool = False, skip: Iterable[str] = ()) -> list[dict]:

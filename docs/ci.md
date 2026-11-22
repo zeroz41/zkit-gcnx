@@ -7,8 +7,8 @@ carry the logic, so each workflow stays short:
 
 | | |
 | --- | --- |
-| `zkit ci check --base REV --baseline FILE --out result.json` | the gate: build; nothing matched or linked in the baseline lost; no decompiler leftovers (`zkit check` errors) in the lines added since `REV`; no files that must not be committed (`zkit hygiene --only files`). Exit 1 when it fails. |
-| `zkit ci comment result.json --sha SHA --run-url URL` | the pull request comment for that result, behind a hidden marker so it can be updated in place; a missing result is a failed run |
+| `zkit ci check --base REV --baseline FILE --out result.json` | the gate: build; nothing matched or linked in the baseline lost; no decompiler leftovers (`zkit check` errors) in the lines added since `REV`; no files that must not be committed (`zkit hygiene --only files`). Exit 1 when it fails. It also measures source quality since `REV` (`zkit quality --since`), which never fails the gate. |
+| `zkit ci comment result.json --sha SHA --run-url URL` | the pull request comment for that result, behind a hidden marker so it can be updated in place; a missing result is a failed run. Its advisory source quality section lists the checks the change moved (the tree's count before and after, what the change removed and what it added; code that only moves counts as neither), every check by category in a collapsed table, and the findings on the lines the change adds, linked to the measured commit |
 | `zkit ci report --sha SHA --out report.json` | the report a trusted run kept for a commit (needs `GITHUB_TOKEN` or `GH_TOKEN`, and `GITHUB_REPOSITORY` or `--repo`); exit 1 when there is none |
 
 and the pages: `zkit report --out site --badges site/badges` writes the progress page, the treemap and the

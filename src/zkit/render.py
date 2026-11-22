@@ -1327,6 +1327,10 @@ def quality(data: dict) -> str:
     for row in sorted(data["counts"], key=lambda r: -r["count"]):
         if row["count"]:
             out.append(f"  {row['count']:>9,}  {row['label']}")
+    owned = [row for row in data.get("ownership", []) if row["count"]]
+    if owned:
+        out.append("members in the wrong class (not in the total):")
+        out += [f"  {row['count']:>9,}  {row['name']}" for row in owned]
     if data.get("worst_files"):
         out.append("most debt:")
         for row in data["worst_files"]:
@@ -1335,12 +1339,28 @@ def quality(data: dict) -> str:
     return "\n".join(out)
 
 
-def quality_compare(data: dict) -> str:
+def quality_compare(data: dict, new: int = 20) -> str:
     t = data["total"]
-    out = [f"source quality {data['before']} -> {data['after']}: {t['before']:,} -> {t['after']:,} ({t['delta']:+,})"]
-    for row in sorted(data["rows"], key=lambda r: r["delta"]):
-        if row["delta"] or row["after"]:
-            out.append(f"  {row['before']:>9,} -> {row['after']:>9,} ({row['delta']:+,})  {row['label']}")
+    out = [f"source quality {data['before']} -> {data['after']}: {t['before']:,} -> {t['after']:,} ({t['delta']:+,});"
+           f" removed {t['removed']:,}, added {t['added']:,} in {data['files_changed']:,} changed source files"]
+
+    def lines(rows: list[dict]) -> list[str]:
+        moved = [r for r in rows if r["removed"] or r["added"] or r["delta"]]
+        return [f"  {r['before']:>9,} -> {r['after']:>9,}  -{r['removed']:<6,} +{r['added']:<6,} {r['label']}"
+                for r in sorted(moved, key=lambda r: -(r["removed"] + r["added"]))]
+
+    changed = lines(data["rows"])
+    out += changed or ["  no change in any check"]
+    if len(changed) < len(data["rows"]):
+        out.append(f"  ({len(data['rows']) - len(changed)} other checks unchanged)")
+    owned = lines(data.get("ownership", []))
+    if owned:
+        out += ["members in the wrong class (not in the total):"] + owned
+    if data.get("new"):
+        out.append(f"added findings ({len(data['new'])}):")
+        out += [f"  {f['path']}:{f['line']}  {f['key']}  {f['text']}" for f in data["new"][:new]]
+        if len(data["new"]) > new:
+            out.append(f"  ... {len(data['new']) - new} more (--json lists every one)")
     if data["worse"]:
         out.append("WORSE: " + ", ".join(r["label"] for r in data["worse"]))
     return "\n".join(out)
