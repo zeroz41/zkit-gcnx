@@ -147,14 +147,15 @@ def _matching(code: str, at: int) -> int:
     return len(code)
 
 
-def definitions(text: str) -> list[Definition]:
-    """Every function definition in a C/C++ source text, outermost first, in file order."""
-    return scan(text)[0]
+def definitions(text: str, code: str | None = None) -> list[Definition]:
+    """Every function definition in a C/C++ source text, outermost first, in file order (`code`: blank(text), when
+    the caller has it already)."""
+    return scan(text, code)[0]
 
 
-def scan(text: str) -> tuple[list[Definition], list[Block]]:
+def scan(text: str, code: str | None = None) -> tuple[list[Definition], list[Block]]:
     """definitions(), and every namespace, class and `extern "C"` block, outermost first, in file order."""
-    code = blank(text)
+    code = blank(text) if code is None else code
     starts = [0] + [m.end() for m in re.finditer(r"\n", code)]
     line = lambda offset: bisect.bisect_right(starts, offset) - 1
     out: list[Definition] = []

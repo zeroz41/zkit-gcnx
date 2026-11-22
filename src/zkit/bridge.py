@@ -1648,6 +1648,7 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
         quality_config = config.get("quality", {})
         decomp_gate = quality_config.get("gate", "warning")
         catalog = quality.patterns(project, repo)
+        image = quality.image_range(project, repo)
         roots, exclude = quality._paths(project, repo, None)
         # one source tree builds every target of its repository (other versions of the game): a placeholder any of
         # their symbols carry is that callee's naming debt
@@ -1661,16 +1662,16 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
                 rel == r or rel.startswith(r.rstrip("/") + "/") for r in roots):
             removed_text = "\n".join(old for lines_added, removed in (hunks.get(rel) or []) for old in removed)
             header = Path(rel).suffix.lower() in quality.HEADER_SUFFIXES
-            had = quality.count(removed_text, catalog, header=header)
-            externs = collections.defaultdict(list)   # read against the whole file: a forward declaration is fine
-            if not header and any(p.key == "extern_c" for p in catalog):
-                label = next(p.label for p in catalog if p.key == "extern_c")
-                for number, name in quality.extern_c_debt(texts[rel]):
-                    externs[number].append({"key": "extern_c", "label": label, "text": f'extern "C" {name}'})
+            had = quality.count(removed_text, catalog, rel=rel, image=image)   # what the replaced lines held
+            # the parser-judged checks read the whole file: a forward declaration of what it defines is fine
+            parsed = collections.defaultdict(list)
+            labels = {p.key: p.label for p in catalog}
+            for number, key, text in quality.parsed_findings(texts[rel], catalog, rel, image=image):
+                parsed[number].append({"key": key, "label": labels[key], "text": text})
             for number, line in enumerate(quality.blank_comments(texts[rel]).splitlines(), 1):
                 if added is not None and number not in added:
                     continue
-                found_here = quality.findings(line, catalog, header=header, skip=("extern_c",)) + externs[number]
+                found_here = quality.findings(line, catalog, header=header, skip=quality.PARSED) + parsed[number]
                 carried = []
                 for carrier in carriers if target else []:
                     found_here, more = symbol_placeholders(db, carrier, found_here)

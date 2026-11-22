@@ -488,6 +488,86 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(quality.findings("// raw *(u8 *)((u8 *)p + 0x10)\nreturn this->x;", catalog), [])
         self.assertTrue(quality.findings("return *(s32 *)((u8 *)p + 0x10);", catalog))
 
+    def test_offsets_casts_and_offset_names(self):
+        catalog = quality.patterns()
+        layout = ("x = (u8 *)p + 0x30; y = ((char *)(self) + 8); v = (Vec *)(p + 0x178);\n"
+                  "a[(u8 *)p + 4 ](); f(unk_30, m_c, field_96, obj->set_field_378, s.f3C);\n")
+        found = quality.count(layout, catalog)
+        self.assertEqual((found["raw_offset"], found["offset_cast"], found["offset_member"]), (3, 1, 5))
+        words = "m_face; unk_dead; m_bad; field_bead; (Vec *)(p + count); *(Vec *)(p + 0x10);"
+        found = quality.count(words, catalog)   # hex-spelled words are names; a deref is a punned_deref
+        self.assertEqual((found["offset_member"], found["offset_cast"], found["punned_deref"]), (0, 0, 1))
+        self.assertEqual([f["text"] for f in quality.findings('load((saddr)"file.gvm", (u32)"x");', catalog)
+                          if f["key"] == "string_cast"], ['(saddr)"file.gvm"', '(u32)"x"'])
+        self.assertEqual(quality.count('(const char *)"a"; f("(u32)") /* (int)"b" */', catalog)["string_cast"], 0)
+
+    def test_prototypes_and_externs_in_source_files(self):
+        """A source file's file-scope declaration of what another file defines belongs in that file's header; what
+        the file defines, a static or inline helper, a macro invocation and `extern "C"` (judged as extern_c) are
+        none."""
+        text = ('#include "enemy.h"\nvoid heap_free(void *);\nextern int g_frame;\nint a, b;\n'
+                'void local(int);\nvoid local(int x) { }\nstatic void helper(void);\n'
+                'extern int g_owned;\nint g_owned = 1;\nDECLARE_THING(TEnemy);\nextern "C" void OSReport(const char*, ...);\n'
+                'namespace ns {\nvoid hidden(int);\n}\nstruct S { void method(); };\n'
+                'void use() { extern int g_inner; void inner(int); }\n')
+        self.assertEqual(quality.local_decl_debt(text), [(2, "void heap_free(void *)"), (3, "extern int g_frame"),
+                                                         (13, "void hidden(int)")])
+        catalog = quality.patterns()
+        self.assertEqual(quality.count(text, catalog)["local_decl"], 3)
+        self.assertEqual(quality.count(text, catalog, rel="include/enemy.h")["local_decl"], 0)   # a header's job
+        self.assertEqual([f for f in quality.findings(text, catalog) if f["key"] == "local_decl"], [])
+
+    def test_address_comments_need_the_image(self):
+        image = (0x8000C000, 0x805E1224)
+        text = ("// moved from 0x8043E828\nu32 mask = 0x80000000; // 0x80000000 is the sign bit\n"
+                "/* OS global at 0x800000F8,\n   was 80123456 */\nint fn_80123456;\nconst char *s = \"0x80123456\";\n")
+        self.assertEqual(quality.address_comments(text, image), [(1, "// moved from 0x8043E828"),
+                                                                 (4, "/* OS global at 0x800000F8, was 80123456 */")])
+        self.assertEqual(quality.address_comments(text, None), [])
+        catalog = quality.patterns()
+        self.assertEqual(quality.count(text, catalog, image=image)["address_comment"], 2)
+        self.assertEqual(quality.count(text, catalog)["address_comment"], 0)
+
+    def test_units_and_classes_outside_their_home(self):
+        """A unit named after an address is a fragment not in its real unit; a class declared in a C++ source file
+        is a stand-in or a layout kept out of its header; a class with a body in two files is a copy (the header's
+        copy is the first). C files may keep their own structs, and a nested class is part of its outer one."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src").mkdir()
+            (root / "include").mkdir()
+            files = {
+                "include/enemy.h": "class TEnemy {\npublic:\n    struct Part { int hp; };\n};\n",
+                "src/enemy.cpp": '#include "enemy.h"\nclass TEnemy { };\nstruct EnemyView : TObject {\n    u8 pad_0[0x30];\n};\n'
+                                 "typedef struct { int x; } Pair;\nenum class Mode { A };\n",
+                "src/TEnemy_80123456.cpp": "struct Pair { int x; };\n",
+                "src/grid.c": "struct Cell { int x; };\n",
+                "src/grid2.c": "struct Cell { int y; };\n",
+                "src/hud.cpp": "static struct { int x; } state;\n",
+            }
+            for rel, text in files.items():
+                (root / rel).write_text(text, encoding="utf-8")
+            git(root, "init", "-q")
+            git(root, "add", ".")
+            git(root, "commit", "-q", "-m", "Add units")
+            manifest = root / "p.json"
+            manifest.write_text(json.dumps({"schema_version": 1, "id": "q", "repositories": {
+                "decomp": {"root": ".", "role": "decomp", "quality": {"image": ["0x8000C000", "0x805E1224"]}}}}),
+                encoding="utf-8")
+            project = Project.load(manifest)
+            self.assertEqual(quality.image_range(project, "decomp"), (0x8000C000, 0x805E1224))
+            data = quality.audit(project, "decomp", top=10)
+            counts = {c["key"]: c["count"] for c in data["counts"]}
+            # TEnemy, EnemyView, Pair (by its typedef) in enemy.cpp; Pair in the address unit
+            self.assertEqual((counts["address_unit"], counts["local_class"], counts["duplicate_class"]), (1, 4, 2))
+            worst = {row["path"]: dict(row["top"]) for row in data["worst_files"]}
+            self.assertEqual(worst["src/enemy.cpp"]["duplicate_class"], 2)       # TEnemy (the header's is first), Pair (src/TEnemy_80123456.cpp sorts first)
+            self.assertEqual(worst["src/enemy.cpp"]["local_class"], 3)
+            self.assertNotIn("src/grid2.c", worst)                                # C files keep their own structs
+            self.assertEqual(quality.parsed_findings(files["src/enemy.cpp"], quality.patterns(), "src/enemy.cpp"),
+                             [(2, "local_class", "class TEnemy"), (3, "local_class", "struct EnemyView"),
+                              (6, "local_class", "struct Pair")])
+
 
 class HygieneTests(unittest.TestCase):
     def setUp(self):
