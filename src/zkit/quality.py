@@ -55,6 +55,12 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
        "linkage", blocks_port=False),
     _p("mangled_itanium", "hand-mangled names (Itanium _Z...)", r"\b_Z(?:N|L|T[VIS])?\d*[A-Za-z_]\w*\b", "linkage",
        blocks_port=False),
+    # A member spelled as a C name (`TClass__method`): it is not the member's mangled symbol either, so the name must
+    # change again once the function or object becomes a real member. Mangled, address and slot spellings are
+    # counted by their own patterns.
+    _p("flat_name", "flat C spellings of members (TClass__method, TClass__instance)",
+       r"\b(?![A-Za-z0-9_]*__(?:\d|F[A-Za-z]|(?:sub|data)_[0-9A-Fa-f]{6}|vt\d))"
+       r"(?=[A-Z](?:[A-Z0-9]|_(?!_))*(?:[a-z]|\d__))[A-Z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*__[a-z_][A-Za-z0-9_]*\b", "linkage", blocks_port=False),
     _p("raw_offset", "raw pointer + offset accesses",
        r"\(\s*\(?\s*(?:const\s+)?(?:u8|s8|char|unsigned\s+char|signed\s+char|uint8_t|int8_t|byte|undefined1?)"
        r"\s*\*\s*\)\s*\(?\s*[\w.\->]+\s*\)?\s*\+\s*(?:0x[0-9A-Fa-f]+|\d+)\s*\)", "layout"),
@@ -246,12 +252,15 @@ def extern_c_debt(text: str) -> list[tuple[int, str]]:
                 else:
                     declared.append((where, name))
     if declared:   # what else the file defines: function bodies, and objects initialized outside a body
-        inside = set()
+        spans = []   # bodies by offset, not by line: `void f() { g = 1; }` on one line still holds `g = 1`
         for definition in cxx.definitions(text):
             defined.add(definition.name.split("::")[-1])
-            inside.update(range(definition.open + 1, definition.end))
+            spans.append(definition.span)
+        spans.sort()
+        opens = [a for a, _ in spans]
         for found in re.finditer(r"\b([A-Za-z_]\w*)\s*(?:\[[^\]\n]*\]\s*)*=(?!=)", code):
-            if line(found.start()) - 1 not in inside:
+            index = bisect.bisect_left(opens, found.start()) - 1
+            if index < 0 or not found.start() < spans[index][1]:
                 defined.add(found[1])
         debt += [(where, name) for where, name in declared if name not in defined]
     return sorted(debt)

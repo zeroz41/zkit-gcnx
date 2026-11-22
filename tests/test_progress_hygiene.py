@@ -464,6 +464,25 @@ class QualityTests(unittest.TestCase):
         self.assertEqual([f["text"] for f in quality.findings('extern "C" void f(int);', catalog)
                           if f["key"] == "extern_c"], ['extern "C" f'])
 
+    def test_an_assignment_in_a_one_line_body_defines_nothing(self):
+        """`g_count = 1;` inside `void reset() { ... }` written on one line assigns a global the file declares
+        `extern "C"`; it is no definition, so the declaration stays debt."""
+        one_line = 'extern "C" int g_count;\nvoid reset() { g_count = 1; }\n'
+        self.assertEqual(quality.extern_c_debt(one_line), [(1, "g_count")])
+        self.assertEqual(quality.extern_c_debt('extern "C" int g_count;\nint g_count = 1;\n'), [])
+
+    def test_flat_c_spellings_of_members(self):
+        catalog = quality.patterns()
+        flat = ("void TMainCursor__set_end_task(void *self, TObject *task);\n"
+                "TLoadCtrl *p = TLoadCtrl__instance; f(TObjCity_Season_XmasTree__create(p), TUnk_8013F08C__clear(p));\n")
+        self.assertEqual(quality.count(flat, catalog)["flat_name"], 4)   # address-named classes too
+        counted_elsewhere = ("poll_default__9TLoadCtrlFv(); hook__Fv(); TMainCursor__sub_8013E1C0(p);\n"
+                             "TEffect__data_80450000; TObj__vt12(p); __vt__9TLoadCtrl; Mtx__ident(m);\n")
+        self.assertEqual(quality.count(counted_elsewhere, catalog)["flat_name"], 1)   # Mtx__ident
+        self.assertEqual(quality.count("TAdPlayerLoadGC__load_state; TOVS2__class_name;", catalog)["flat_name"], 2)
+        not_members = "MAX__ITEMS; my__thing; GX__INIT; TRK__write_aram(p); void TClass::method() {}\n"
+        self.assertEqual(quality.count(not_members, catalog)["flat_name"], 0)   # MetroTRK's own C name
+
     def test_function_body_findings_skip_comments(self):
         catalog = quality.patterns()
         self.assertEqual(quality.findings("// raw *(u8 *)((u8 *)p + 0x10)\nreturn this->x;", catalog), [])

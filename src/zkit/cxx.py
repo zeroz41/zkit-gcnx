@@ -43,6 +43,7 @@ class Definition:
     end: int         # 0-based line of the body's closing brace
     params: str      # parameter list text, whitespace collapsed
     body: str        # text between the braces without comments, whitespace collapsed
+    span: tuple[int, int] = (0, 0)   # offsets of the body's opening and closing braces in the text
 
     @property
     def qualified(self) -> str:
@@ -208,7 +209,8 @@ def scan(text: str) -> tuple[list[Definition], list[Block]]:
                 name=re.sub(r"\s+", "", head[name_at:open_]), scope=scope,
                 in_class=bool(scopes) and scopes[-1][0] == "class", start=line(first), line=line(offset + name_at),
                 open=line(at), end=line(end), params=" ".join(head[open_ + 1:close].split()),
-                body=" ".join(_COMMENTS.sub(lambda m: m[0] if m[0][0] in "\"'" else " ", text[at + 1:end]).split())))
+                body=" ".join(_COMMENTS.sub(lambda m: m[0] if m[0][0] in "\"'" else " ", text[at + 1:end]).split()),
+                span=(at, end)))
             head_start = position = end + 1
             continue
         if "(" not in clean and re.search(r"\bnamespace\b", clean):
