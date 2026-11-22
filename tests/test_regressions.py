@@ -152,6 +152,23 @@ class AuditRegressions(unittest.TestCase):
                  if f["rule"].startswith("decomp-debt")]
         self.assertEqual(found, [("decomp-debt-added", "src/Doc.cpp:4")])
 
+    def test_check_judges_replaced_lines_against_their_whole_file(self):
+        """A definition inside an `extern "C" {` block is extern "C" debt only in its file: editing it carries the debt
+        over, adding a new definition inside the block adds it."""
+        from zkit.bridge import check
+        (self.decomp / "src/Block.cpp").write_text(
+            'extern "C" {\nint hp__6TEnemyFPv(Best_80003000 *p) {\n    return 0;\n}\n}\n', encoding="utf-8")
+        self.git(self.decomp, "init", "-q")
+        self.git(self.decomp, "add", "-A")
+        self.git(self.decomp, "commit", "-qm", "base")
+        (self.decomp / "src/Block.cpp").write_text(
+            'extern "C" {\nint hp__6TEnemyFPv(TUnk_80003000 *p) {\n    return 0;\n}\nint mp__6TEnemyFv(void) {\n'
+            '    return 1;\n}\n}\n', encoding="utf-8")
+        found = [(f["rule"], f["ref"], f["line"]) for f in check(self.project, "decomp")["findings"]
+                 if f["rule"].startswith("decomp-debt") and f["line"].startswith("extern")]
+        self.assertEqual(sorted(found), [("decomp-debt", "src/Block.cpp:2", 'extern "C" hp__6TEnemyFPv'),
+                                         ("decomp-debt-added", "src/Block.cpp:5", 'extern "C" mp__6TEnemyFv')])
+
     def test_git_worktree_is_its_own_working_tree(self):
         from zkit.bridge import check
         tree = self.native.parent / "native-wt"

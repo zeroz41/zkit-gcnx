@@ -1470,8 +1470,10 @@ def _resolve_base(root: Path, base: str) -> str:
     return result.stdout.strip()
 
 
-def _diff_hunks(root: Path, base: str = "HEAD", staged: bool = False) -> dict[str, list[tuple[set[int], list[str]]]]:
-    """{path: [(added line numbers, removed line texts)]} per hunk vs base; untracked files map to []."""
+def _diff_hunks(root: Path, base: str = "HEAD",
+                staged: bool = False) -> dict[str, list[tuple[set[int], list[str], set[int]]]]:
+    """{path: [(added line numbers, removed line texts, removed line numbers in base)]} per hunk vs base; untracked
+    files map to None."""
     out: dict[str, list] = {}
     commit = _resolve_base(root, base)
     args = ["diff", "--unified=0", "--no-color", "--no-ext-diff", "--no-renames"]
@@ -1490,10 +1492,11 @@ def _diff_hunks(root: Path, base: str = "HEAD", staged: bool = False) -> dict[st
                 out.setdefault(current, [])
         elif line.startswith("@@"):
             header = False
-            match = re.search(r"\+(\d+)(?:,(\d+))?", line)
+            match = re.search(r"-(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))?", line)
             if current and match:
-                begin, count = int(match[1]), int(match[2] or 1)
-                hunk = (set(range(begin, begin + count)), [])
+                was, gone = int(match[1]), int(match[2] or 1)
+                begin, count = int(match[3]), int(match[4] or 1)
+                hunk = (set(range(begin, begin + count)), [], set(range(was, was + gone)))
                 out[current].append(hunk)
         elif hunk is not None and line.startswith("-") and not header:
             hunk[1].append(line[1:])
@@ -1611,6 +1614,7 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
     rules = config.get("checks", {})
     from .index import platform as active_platform
     address = re.compile(config.get("address_pattern", active_platform().cite_pattern()))
+    base_commit = _resolve_base(root, base) if paths is None else None
     if paths is None:
         hunks = _diff_hunks(root, base, staged)
         changed = {p: (None if h is None else set().union(*[x[0] for x in h]) if h else set()) for p, h in hunks.items()}
@@ -1660,9 +1664,17 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
         text_lines = texts[rel].splitlines()
         if decomp_gate and decomp_gate != "off" and quality._keep(rel, exclude) and any(
                 rel == r or rel.startswith(r.rstrip("/") + "/") for r in roots):
-            removed_text = "\n".join(old for lines_added, removed in (hunks.get(rel) or []) for old in removed)
+            removed_text = "\n".join(old for _, removed, _ in (hunks.get(rel) or []) for old in removed)
             header = Path(rel).suffix.lower() in quality.HEADER_SUFFIXES
-            had = quality.count(removed_text, catalog, rel=rel, image=image)   # what the replaced lines held
+            # what the replaced lines held: the patterns on their text, the parser-judged checks on the base file
+            # (a line inside an `extern "C" {` block is one only in its file)
+            had = quality.count(removed_text, [p for p in catalog if not quality._parsed(p)], rel=rel, image=image)
+            gone = set().union(*[old for _, _, old in hunks.get(rel) or []])
+            if gone:
+                before = _git_run(root, "show", f"{base_commit}:{rel}")
+                if not before.returncode:
+                    had.update(key for number, key, _ in quality.parsed_findings(before.stdout, catalog, rel,
+                                                                                 image=image) if number in gone)
             # the parser-judged checks read the whole file: a forward declaration of what it defines is fine
             parsed = collections.defaultdict(list)
             labels = {p.key: p.label for p in catalog}
@@ -1693,7 +1705,7 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
         tier = tier_of(project, repo, rel) if native else "exact"
         wanted = (lambda n: True) if added is None else (lambda n, a=added: n in a)
         removed_by_line: dict[int, list[str]] = {}
-        for lines_added, removed in (hunks.get(rel) or []):
+        for lines_added, removed, _ in (hunks.get(rel) or []):
             for n in lines_added:
                 removed_by_line[n] = removed
         for pattern, message, where in forbidden:
@@ -1791,7 +1803,7 @@ def _include_findings(project: Project, repo: str, changed: dict, hunks: dict, t
         added = changed.get(rel)
         if added is not None and int(number) not in added:
             continue
-        removed = next((r for lines, r in (hunks.get(rel) or []) if int(number) in lines), [])
+        removed = next((r for lines, r, _ in (hunks.get(rel) or []) if int(number) in lines), [])
         carried = any(finding["include"] in old and "include" in old for old in removed)
         stats["include_debt" if carried else "include_violations"] += 1
         out.append({"severity": "info" if carried else "error",
