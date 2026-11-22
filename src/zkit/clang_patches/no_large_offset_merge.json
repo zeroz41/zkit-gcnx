@@ -10,7 +10,8 @@
     "gives up when it has; each edit makes it give up whatever the answer. zkit applies a patch to a copy of the",
     "official binary whose SHA-256 is the patch's `sha256`, checks each edit's `old` bytes first and the result",
     "against `patched_sha256` (build.patched_clang). Offsets are file offsets; each `why` names the instruction",
-    "(virtual address) it changes."
+    "(virtual address) it changes; a macOS copy's ad hoc code signature gets the changed pages' hashes",
+    "after the edits (build.refresh_code_signature), so its `patched_sha256` is of the copy with them."
   ],
   "patches": [
     {
@@ -44,7 +45,7 @@
     {
       "release": "LLVM 22.1.8 for macOS Arm64, LLVM-22.1.8-macOS-ARM64.tar.xz: bin/clang-22 (bin/clang and bin/clang++ link to it)",
       "sha256": "9a690e9e11d4774d63e95ed2ab90abd82889f949b0bb9db8208f7e18f278ea50",
-      "patched_sha256": "5f46d4e81589a94ab19ac077ce72ed36a1935076aefba2cc10f3fe15d7d95f16",
+      "patched_sha256": "2a6f960aa4fc117fca3809b4f8658f6e481bbd759853b3cbd65d373cab9273e5",
       "function": "(anonymous namespace)::AArch64LoadStoreOpt::optimizeBlock at 0x1011812e4, which has the fifth step's loop and tryToMergeIndexLdSt inlined: it calls AArch64InstrInfo::hasUnscaledLdStOffset at 0x101187468, reads aarch64-load-store-const-scan-limit (LdStConstLimit+0x78) at 0x10118748c, and gives up at 0x101185e58 (the step to the next instruction)",
       "edits": [
         {

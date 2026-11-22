@@ -368,7 +368,8 @@ def patched_clang(clang: Path, names: list[str], rules: list[str] = (),
     rule (build.clang_plugins where clang can load no plugin, a Windows clang.exe), then each of zkit's `rules`
     (build.clang_patches, or the `setting` that names them, such as build.optimizer_patches, on every system). Each
     takes zkit's patch for exactly the binary it has then (its SHA-256
-    picks the patch, each edit's old bytes are checked, and the result must have the patch's SHA-256); None when
+    picks the patch, each edit's old bytes are checked, an ad hoc code signature's page hashes are made again
+    (refresh_code_signature), and the result must have the patch's SHA-256); None when
     zkit has no patch for it. The copy lies beside `clang`, so it finds the same resource folder, named
     `<name>-<plugins and rules>` (clang's driver reads its mode from its name without the last `-` part, so a
     clang++ copy is still clang++); it is made once and made again when its bytes are not the expected ones."""
@@ -387,6 +388,7 @@ def patched_clang(clang: Path, names: list[str], rules: list[str] = (),
             if len(new) != len(old) or patched[offset:offset + len(old)] != old:
                 raise ValueError(f"{setting}: {name}'s patch for {clang} does not fit it at {edit['offset']}")
             patched[offset:offset + len(new)] = new
+        refresh_code_signature(patched)
         digest = hashlib.sha256(patched).hexdigest()
         if digest != patch["patched_sha256"]:
             raise ValueError(f"{setting}: {name}'s patch for {clang} gave SHA-256 {digest}, not "
@@ -449,6 +451,46 @@ def macho_arch(path: Path) -> str | None:
     if len(head) < 8 or head[:4] != b"\xcf\xfa\xed\xfe":
         return None
     return MACHO_ARCHES.get(int.from_bytes(head[4:8], "little"))
+
+
+# A code signature's hash types (CS_HASHTYPE_*); a slot keeps the CodeDirectory's hashSize bytes of one.
+CODE_HASHES = {1: "sha1", 2: "sha256", 3: "sha256", 4: "sha384"}
+
+
+def refresh_code_signature(data: bytearray) -> bool:
+    """Make again the code page hashes of a thin 64-bit Mach-O signed ad hoc (as the linker signs LLVM's macOS
+    release binaries), in place: an Arm Mac kills a process as soon as it reads a page whose bytes do not match its
+    hash in the code signature, so a byte-patched copy needs them for its changed pages. An ad hoc signature has no
+    certificate that the new hashes could break. True when it had such a signature; anything else (another format,
+    a universal binary, no signature, one signed with a certificate) is left as it is."""
+    if data[:4] != b"\xcf\xfa\xed\xfe":
+        return False
+    count, at = int.from_bytes(data[16:20], "little"), 32
+    for _ in range(count):
+        command, size = int.from_bytes(data[at:at + 4], "little"), int.from_bytes(data[at + 4:at + 8], "little")
+        if command == 0x1D:   # LC_CODE_SIGNATURE: the signature's file offset and size
+            break
+        at += size
+    else:
+        return False
+    start = int.from_bytes(data[at + 8:at + 12], "little")
+    big = lambda offset, width=4: int.from_bytes(data[offset:offset + width], "big")
+    if big(start) != 0xFADE0CC0:   # the embedded signature's superblob
+        return False
+    directories = [start + big(start + 16 + 8 * index) for index in range(big(start + 8))]
+    directories = [offset for offset in directories if big(offset) == 0xFADE0C02]   # its CodeDirectories
+    if not directories or any(not big(offset + 12) & 0x2 for offset in directories):   # CS_ADHOC
+        return False
+    for offset in directories:
+        hashes, slots, limit = big(offset + 16), big(offset + 28), big(offset + 32)
+        if big(offset + 8) >= 0x20300 and big(offset + 56, 8):   # codeLimit64
+            limit = big(offset + 56, 8)
+        name, width = CODE_HASHES[data[offset + 37]], data[offset + 36]
+        page = 1 << data[offset + 39]
+        for slot in range(slots):
+            digest = hashlib.new(name, data[slot * page:min((slot + 1) * page, limit)]).digest()[:width]
+            data[offset + hashes + slot * width:offset + hashes + (slot + 1) * width] = digest
+    return True
 
 
 def ninja_command() -> str:

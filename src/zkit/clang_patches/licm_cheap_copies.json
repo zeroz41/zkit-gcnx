@@ -1,0 +1,105 @@
+{
+  "about": [
+    "build.clang_patches rule `licm-cheap-copies`: machine loop-invariant code motion as LLVM 20 and earlier had it,",
+    "counting every copy as a cheap instruction (MachineLICMImpl::IsCheapInstruction: isAsCheapAsAMove or",
+    "isCopyLike, that is COPY or SUBREG_TO_REG). LLVM 21 (a38cf8573890, \"[MachineLICM] Let targets decide if copy",
+    "instructions are cheap\") keeps only SUBREG_TO_REG, so a cross-class copy of a loop-invariant value (an AArch64",
+    "`fmov s1, w22` of a float constant built in a general register) is no longer cheap and is hoisted out of the",
+    "loop, into a callee-saved register when pressure allows; with the older rule it is hoisted only when that adds",
+    "no register pressure and otherwise stays in the loop beside its use. No option restores it (hoist-cheap-insts",
+    "hoists more, not less), so the rule is a byte patch: IsProfitableToHoist has IsCheapInstruction inlined, and",
+    "the edit replaces its compare of the opcode with SUBREG_TO_REG (12) by one that also accepts COPY (20),",
+    "`(opcode - 12) & ~8 == 0`, made room for by encoding the instructions around it more compactly. zkit applies a",
+    "patch to a copy of the binary whose SHA-256 is the patch's `sha256` (the official release, or the copy",
+    "another rule made first), checks each edit's `old` bytes first and the result against `patched_sha256`",
+    "(build.patched_clang). Offsets are file offsets; each `why` names the instructions (virtual addresses) it",
+    "changes. A macOS copy's ad hoc code signature gets the changed pages' hashes after the edits",
+    "(build.refresh_code_signature), so its `patched_sha256` is of the copy with them."
+  ],
+  "patches": [
+    {
+      "release": "LLVM 22.1.8 for Linux x86-64, LLVM-22.1.8-Linux-X64.tar.xz: bin/clang-22 (bin/clang and bin/clang++ link to it)",
+      "sha256": "31a40dc31f3c15a47aa119aa148f339bf363d8f61202ddbdacbd3f24b71ba113",
+      "patched_sha256": "1dde37edb7819b910604e1d8a2948d05b24a4fa9b57b72127c1e010f293d2451",
+      "function": "(anonymous namespace)::MachineLICMImpl::IsProfitableToHoist at 0xba2cc40, which has IsCheapInstruction inlined: after TII->isAsCheapAsAMove (the call at 0xba2cc95, CheapInstr set to 1 at 0xba2cc9b) it compares the opcode (MachineInstr+0x44) with SUBREG_TO_REG at 0xba2cca6, then reads the number of defs (MCInstrDesc+4) at 0xba2ccbd for the latency test",
+      "edits": [
+        {
+          "offset": "0xba2cca6",
+          "old": "66837b440c4989db4c8b5424080f84dd000000498b43100fb658044531c985db",
+          "new": "4989db4c8b5424080fb7434483e80c83e0f7740c498b431031db4531c90a5804",
+          "why": "0xba2cca6-0xba2ccc5: `cmpw $0xc, 0x44(%rbx); mov %rbx, %r11; mov 0x8(%rsp), %r10; je 0xba2cd96; mov 0x10(%r11), %rax; movzbl 0x4(%rax), %ebx; xor %r9d, %r9d; test %ebx, %ebx` -> `mov %rbx, %r11; mov 0x8(%rsp), %r10; movzwl 0x44(%rbx), %eax; sub $0xc, %eax; and $-9, %eax; je 0xba2ccc6; mov 0x10(%r11), %rax; xor %ebx, %ebx; xor %r9d, %r9d; or 0x4(%rax), %bl`: a COPY or SUBREG_TO_REG reaches the unchanged `je 0xba2cd96` at 0xba2ccc6 with ZF set and CheapInstr still 1 (r9b), as SUBREG_TO_REG did; anything else reads the number of defs into ebx as before and tests it there"
+        }
+      ]
+    },
+    {
+      "release": "LLVM 22.1.8 for Linux x86-64 after build.clang_patches `no-large-offset-merge`",
+      "sha256": "1229ac892afa78c039cb6445d6312b96bc48d25206a60f7ba28938d9641eae44",
+      "patched_sha256": "5126f8fecf1c555d0281d88a34bff801a322bc62fa583adc378150d005ac7a00",
+      "function": "as for the official binary (the other rule's edit is elsewhere)",
+      "edits": [
+        {
+          "offset": "0xba2cca6",
+          "old": "66837b440c4989db4c8b5424080f84dd000000498b43100fb658044531c985db",
+          "new": "4989db4c8b5424080fb7434483e80c83e0f7740c498b431031db4531c90a5804",
+          "why": "as for the official binary"
+        }
+      ]
+    },
+    {
+      "release": "LLVM 22.1.8 for Windows x86-64, clang+llvm-22.1.8-x86_64-pc-windows-msvc.tar.xz: bin/clang++.exe",
+      "sha256": "8bbe086dfb0f9543a41ec470eefffe42fe15a29d40e88d4ba5dd068b0a05c63d",
+      "patched_sha256": "c424bfc7a9463465d885eb65988207fe08993de256f8014ae4dc14c116161e0f",
+      "function": "MachineLICMImpl::IsProfitableToHoist at 0x1412fa650 (no symbols; found from the hoist-cheap-insts option, whose value it reads at 0x1412fb3ab with CanCauseHighRegPressure inlined, and IsCheapInstruction inlined too): after TII->isAsCheapAsAMove (the call at 0x1412fa7d3, CheapInstr set to 1 at 0x1412fa7d9) it compares the opcode (MachineInstr+0x54) with SUBREG_TO_REG at 0x1412fa7e4, then reads the number of defs (MCInstrDesc+4, the descriptor at MachineInstr+0x18) at 0x1412fa7fb",
+      "edits": [
+        {
+          "offset": "0x12f9be4",
+          "old": "6641837c24540c4c8b5424480f84a2000000498b4424180fb670044531ed85f60f848e000000",
+          "new": "4c8b542448498b4424180fb67004410fb744245483e80c83e0f774054531ed85f6747b0f1f00",
+          "why": "0x1412fa7e4-0x1412fa809: `cmp word ptr [r12 + 0x54], 0xc; mov r10, [rsp + 0x48]; je 0x1412fa898; mov rax, [r12 + 0x18]; movzx esi, byte ptr [rax + 4]; xor r13d, r13d; test esi, esi; je 0x1412fa898` -> `mov r10, [rsp + 0x48]; mov rax, [r12 + 0x18]; movzx esi, byte ptr [rax + 4]; movzx eax, word ptr [r12 + 0x54]; sub eax, 0xc; and eax, -9; je 0x1412fa805; xor r13d, r13d; test esi, esi; je 0x1412fa882; nop`: a COPY or SUBREG_TO_REG reaches the unchanged `je 0x1412fa898` at 0x1412fa882 with ZF set and CheapInstr still 1 (r13b), as SUBREG_TO_REG did; anything else zeroes r13d and tests the number of defs, which goes there too when it is 0 (rax, esi and the flags are written again before they are read on either path; nothing branches into the range)"
+        }
+      ]
+    },
+    {
+      "release": "LLVM 22.1.8 for Windows x86-64 after build.clang_patches `no-large-offset-merge`",
+      "sha256": "50098420e5d872ba72e3ef6961ff5802c608f36023513fc2c3e0d4783834fe84",
+      "patched_sha256": "7bf6abb58cfee604f12c108aa706880fe3b2dda50aae1f2c1950c9c70136afd2",
+      "function": "as for the official binary (the other rule's edit is elsewhere)",
+      "edits": [
+        {
+          "offset": "0x12f9be4",
+          "old": "6641837c24540c4c8b5424480f84a2000000498b4424180fb670044531ed85f60f848e000000",
+          "new": "4c8b542448498b4424180fb67004410fb744245483e80c83e0f774054531ed85f6747b0f1f00",
+          "why": "as for the official binary"
+        }
+      ]
+    },
+    {
+      "release": "LLVM 22.1.8 for macOS Arm64, LLVM-22.1.8-macOS-ARM64.tar.xz: bin/clang-22 (bin/clang and bin/clang++ link to it)",
+      "sha256": "9a690e9e11d4774d63e95ed2ab90abd82889f949b0bb9db8208f7e18f278ea50",
+      "patched_sha256": "38443ed10f4c48dee4cebe3dfbb21c4969a83b4ec0d212e71ff0a664f38dde09",
+      "function": "(anonymous namespace)::MachineLICMImpl::IsProfitableToHoist at 0x10128e8cc, which has IsCheapInstruction inlined: after TII->isAsCheapAsAMove (the call at 0x10128e948, CheapInstr set to 1 at 0x10128e94c) it compares the opcode (MachineInstr+0x44) with SUBREG_TO_REG at 0x10128e958 and goes to the number-of-defs test at 0x10128ef5c for any other",
+      "edits": [
+        {
+          "offset": "0x128e944",
+          "old": "e10313aa00013fd62f00805280000037688a40791f310071",
+          "new": "00013fd62f008052a0000037688a40791f3100710419547a",
+          "why": "0x10128e944-0x10128e95b: `mov x1, x19; blr x8; mov w15, #1; tbnz w0, #0, 0x10128e960; ldrh w8, [x19, #0x44]; cmp w8, #0xc` -> `blr x8; mov w15, #1; tbnz w0, #0, 0x10128e960; ldrh w8, [x19, #0x44]; cmp w8, #0xc; ccmp w8, #0x14, #4, ne`: x1 still holds the instruction from the function's entry (x19 is its copy, and nothing branches into 0x10128e930-0x10128e95f), so the move before the call makes room for the compare with COPY; the unchanged `b.ne 0x10128ef5c` at 0x10128e95c goes to the number-of-defs test only for neither opcode"
+        }
+      ]
+    },
+    {
+      "release": "LLVM 22.1.8 for macOS Arm64 after build.clang_patches `no-large-offset-merge`",
+      "sha256": "2a6f960aa4fc117fca3809b4f8658f6e481bbd759853b3cbd65d373cab9273e5",
+      "patched_sha256": "cccd055142ca9650503eebf80bc3e10fa02c1b1b11708ee3a617c7f3d6577e87",
+      "function": "as for the official binary (the other rule's edit is elsewhere)",
+      "edits": [
+        {
+          "offset": "0x128e944",
+          "old": "e10313aa00013fd62f00805280000037688a40791f310071",
+          "new": "00013fd62f008052a0000037688a40791f3100710419547a",
+          "why": "as for the official binary"
+        }
+      ]
+    }
+  ]
+}

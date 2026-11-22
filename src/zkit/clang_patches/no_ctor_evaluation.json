@@ -9,7 +9,8 @@
     "it reads llvm.global_ctors. It changes the optimizer (build.optimizer), not the code generator. zkit applies a",
     "patch to a copy of the official binary whose SHA-256 is the patch's `sha256`, checks each edit's `old` bytes",
     "first and the result against `patched_sha256` (build.patched_clang). Offsets are file offsets; each `why` names",
-    "the instruction (virtual address) it changes."
+    "the instruction (virtual address) it changes; a macOS copy's ad hoc code signature gets the changed pages' hashes",
+    "after the edits (build.refresh_code_signature), so its `patched_sha256` is of the copy with them."
   ],
   "patches": [
     {
@@ -43,7 +44,7 @@
     {
       "release": "LLVM 19.1.7 for macOS Arm64, LLVM-19.1.7-macOS-ARM64.tar.xz: bin/clang-19 (bin/clang and bin/clang++ link to it)",
       "sha256": "572445ec045cc85b4d0948d30acaf9311d78b2731a68ba98bfc3e0cb9d011eb9",
-      "patched_sha256": "efd2e8a8f50d8d18b2b6d91e845ffe49ddc72ec945af225bec5465950c586abe",
+      "patched_sha256": "491ae5ff75dd59f1d323bfcb253fba25d1860a66c351469047bb8d64192ae25d",
       "function": "llvm::optimizeGlobalCtorsList(Module&, function_ref<bool(unsigned, Function*)>) at 0x1022cc0c4 (symbol __ZN4llvm23optimizeGlobalCtorsListERNS_6ModuleENS_12function_refIFbjPNS_8FunctionEEEE)",
       "edits": [
         {

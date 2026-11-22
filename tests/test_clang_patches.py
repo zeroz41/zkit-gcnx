@@ -12,8 +12,8 @@ from unittest import mock
 from zkit import build
 
 # An official clang release folder (bin/clang++, or bin/clang++.exe with ZKIT_TEST_PATCH_RUNNER) that the
-# no-large-offset-merge rule has a patch for, such as LLVM 22.1.8's, and what runs it when it is a Windows program
-# on another system (e.g. `wine`).
+# no-large-offset-merge and licm-cheap-copies rules have patches for, such as LLVM 22.1.8's, and what runs it when it
+# is a Windows program on another system (e.g. `wine`).
 PATCH_CLANG = os.environ.get("ZKIT_TEST_PATCH_CLANG")
 PATCH_RUNNER = os.environ.get("ZKIT_TEST_PATCH_RUNNER", "").split()
 # An official clang release folder (bin/clang++) the no-ctor-evaluation rule has a patch for, such as LLVM 19.1.7's
@@ -36,20 +36,78 @@ Counter g_counter;
 """
 
 
+# A float constant a loop compares with: stock clang 21+ hoists its `fmov s, w` (a COPY into an FP register) out of
+# the loop with the constant, keeping both live across the call; with copies counted as cheap, as SUBREG_TO_REG
+# still is, the fmov stays in the loop next to its use.
+LOOP_CONSTANT = """
+struct Item { float *value; void touch(); };
+void touch_small(Item *it, Item *end, float scale) {
+    for (; it != end; ++it)
+        if (it->value != nullptr && !(*it->value * scale > 10000.0f))
+            it->touch();
+}
+"""
+
+
 def fake_patch(data: bytes, offset: int, new: bytes) -> dict:
     patched = data[:offset] + new + data[offset + len(new):]
     return {"sha256": hashlib.sha256(data).hexdigest(), "patched_sha256": hashlib.sha256(patched).hexdigest(),
             "edits": [{"offset": hex(offset), "old": data[offset:offset + len(new)].hex(), "new": new.hex()}]}
 
 
-def far_field_asm(cc: list[str], source: Path) -> str:
+def code_asm(cc: list[str], source: Path) -> str:
     run = subprocess.run([*cc, "--target=aarch64-none-elf", "-O2", "-S", str(source), "-o", "-"], check=True,
                          capture_output=True, text=True)
     return " ".join(" ".join(line.split("//")[0].split()) for line in run.stdout.splitlines()
                     if line.startswith("\t") and not line.lstrip().startswith("."))
 
 
+def signed_macho(flags: int, code_limit64: int = 0) -> bytearray:
+    """A thin 64-bit Mach-O of three 256-byte pages and an embedded signature with one SHA-256 CodeDirectory."""
+    data = bytearray(0x300)
+    data[:4] = b"\xcf\xfa\xed\xfe"
+    data[16:20] = (1).to_bytes(4, "little")   # one load command: LC_CODE_SIGNATURE at 0x300
+    data[32:48] = b"".join(value.to_bytes(4, "little") for value in (0x1D, 16, 0x300, 0x100))
+    data[48:0x300] = bytes(range(256)) * 2 + bytes(range(208))
+    directory = bytearray(64 + 3 * 32)
+    for offset, value in ((0, 0xFADE0C02), (4, len(directory)), (8, 0x20400), (12, flags), (16, 64), (28, 3),
+                          (32, code_limit64 and 0x2ff or 0x300)):
+        directory[offset:offset + 4] = value.to_bytes(4, "big")
+    directory[36:40] = bytes((32, 2, 0, 8))   # hashSize, hashType SHA-256, platform, pageSize 2^8
+    directory[56:64] = code_limit64.to_bytes(8, "big")
+    blob = b"".join(value.to_bytes(4, "big") for value in (0xFADE0CC0, 20 + len(directory), 1, 0, 20))
+    return data + blob + directory
+
+
+def code_slots(data: bytes) -> list[bytes]:
+    return [bytes(data[0x314 + 64 + 32 * slot:0x314 + 64 + 32 * (slot + 1)]) for slot in range(3)]
+
+
 class ClangPatchesTest(unittest.TestCase):
+    def test_an_ad_hoc_signature_gets_the_changed_pages_hashes(self):
+        for code_limit64 in (0, 0x300):   # codeLimit64, when set, is the limit
+            with self.subTest(code_limit64=code_limit64):
+                data = signed_macho(0x20002, code_limit64)
+                self.assertTrue(build.refresh_code_signature(data))
+                self.assertEqual(code_slots(data), [hashlib.sha256(data[page:page + 0x100]).digest()
+                                                    for page in (0, 0x100, 0x200)])
+                before = code_slots(data)
+                data[0x150] ^= 0xFF
+                self.assertTrue(build.refresh_code_signature(data))
+                after = code_slots(data)
+                self.assertEqual((after[0], after[2]), (before[0], before[2]))
+                self.assertEqual(after[1], hashlib.sha256(data[0x100:0x200]).digest())
+
+    def test_anything_but_an_ad_hoc_signed_thin_macho_is_left_alone(self):
+        for name, data in (("certificate", signed_macho(0x20000)), ("elf", bytearray(b"\x7fELF" + bytes(60))),
+                           ("pe", bytearray(b"MZ" + bytes(62))), ("unsigned", signed_macho(0x20002)[:0x300])):
+            with self.subTest(name=name):
+                if name == "unsigned":
+                    data[16:20] = bytes(4)   # no load commands
+                original = bytes(data)
+                self.assertFalse(build.refresh_code_signature(data))
+                self.assertEqual(bytes(data), original)
+
     def test_units_compile_with_the_patched_copy_on_every_system(self):
         data = bytes(range(256)) * 4
         for platform, exe in (("linux", "clang++"), ("darwin", "clang++"), ("win32", "clang++.exe")):
@@ -253,10 +311,29 @@ class ClangPatchesTest(unittest.TestCase):
             source.write_text(FAR_FIELD, encoding="utf-8")
             copy = build.patched_clang(clang, [], ["no-large-offset-merge"])
             self.assertIsNotNone(copy, f"no patch for this {exe}")
-            self.assertEqual(far_field_asm([*PATCH_RUNNER, str(clang)], source),
+            self.assertEqual(code_asm([*PATCH_RUNNER, str(clang)], source),
                              "add x8, x0, #76, lsl #12 ldr w0, [x8, #2904] ret")
-            self.assertEqual(far_field_asm([*PATCH_RUNNER, str(copy)], source),
+            self.assertEqual(code_asm([*PATCH_RUNNER, str(copy)], source),
                              "mov w8, #52056 movk w8, #4, lsl #16 ldr w0, [x0, x8] ret")
+
+    @unittest.skipUnless(PATCH_CLANG, "set ZKIT_TEST_PATCH_CLANG to an official clang release folder the "
+                                      "licm-cheap-copies rule has a patch for (ZKIT_TEST_PATCH_RUNNER: e.g. wine)")
+    def test_licm_cheap_copies_keeps_the_copy_in_the_loop_alone_and_after_another_rule(self):
+        exe = "clang++.exe" if PATCH_RUNNER else "clang++"
+        with tempfile.TemporaryDirectory() as temp:
+            clang = Path(temp) / "bin" / exe
+            clang.parent.mkdir()
+            shutil.copyfile(Path(PATCH_CLANG) / "bin" / exe, clang)
+            shutil.copymode(Path(PATCH_CLANG) / "bin" / exe, clang)
+            source = Path(temp) / "loop.cpp"
+            source.write_text(LOOP_CONSTANT, encoding="utf-8")
+            self.assertIn("ldr s0, [x8] fmul s0, s8, s0 fcmp s0, s9", code_asm([*PATCH_RUNNER, str(clang)], source))
+            for rules in (["licm-cheap-copies"], ["no-large-offset-merge", "licm-cheap-copies"]):
+                with self.subTest(rules=rules):
+                    copy = build.patched_clang(clang, [], rules)
+                    self.assertIsNotNone(copy, f"no patch for this {exe}")
+                    self.assertIn("ldr s0, [x8] fmov s1, w21 fmul s0, s8, s0 fcmp s0, s1",
+                                  code_asm([*PATCH_RUNNER, str(copy)], source))
 
     @unittest.skipUnless(OPTIMIZER_PATCH_CLANG, "set ZKIT_TEST_OPTIMIZER_PATCH_CLANG to an official clang release "
                                                 "folder the no-ctor-evaluation rule has a patch for")
