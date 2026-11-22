@@ -894,7 +894,6 @@ def _reachable(obj: _Object, placed: dict) -> set[int]:
 
 def _write_nso(linker: Linker, path: Path) -> None:
     """The rebuilt module as an uncompressed NSO: the original's header (hashes, build id) and segments."""
-    module = linker.module
     config = linker.config
     source = linker.project.file(config["repository"], config["original"]).read_bytes()
     if source[:4] != b"NSO0":

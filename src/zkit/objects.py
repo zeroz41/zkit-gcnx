@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .elf import Elf, Relocation, Section, Symbol, with_got_loads_relaxed
+from .elf import Elf, Section, Symbol, with_got_loads_relaxed
 from .project import Project
 
 # Sections that never carry the program: compiler notes, debug info, line tables, address-significance tables.

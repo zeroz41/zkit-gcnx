@@ -18,7 +18,7 @@ import json
 import re
 from typing import Any
 
-from .bridge import HEX, _status, _symbol_table, default_target, resolve, status_word
+from .bridge import HEX, _status, _symbol_table, default_target, resolve
 from .gc import read_splits
 from .index import MODULE_SHIFT, address_text, connect, containing, is_dol_unit, refresh
 from .platform import for_target

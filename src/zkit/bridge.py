@@ -24,7 +24,7 @@ from typing import Any
 
 from .gc import Symbol, read_symbols
 from .index import (MODULE_SHIFT, address_text, cache_path, connect, containing, fts_query, module_address, refresh,
-                    report_age_hours, report_staleness, use_platform)
+                    report_age_hours, report_staleness)
 from .platform import platform_name
 from .project import Project
 
@@ -388,16 +388,6 @@ def resolve_address(project: Project, query: str, target: str | None = None) -> 
     if len(found) > 1:
         raise _ambiguous(project, query, target, found)
     return found[0] if found else None
-
-
-def resolve_one(project: Project, query: str, target: str | None = None) -> int:
-    """The one function (or data) address a query names, or an error saying nothing or several match."""
-    found = resolve(project, query, target, limit=CANDIDATES + 1)
-    if not found:
-        raise ValueError(f"No function or symbol matches {query}")
-    if len(found) > 1:
-        raise _ambiguous(project, query, target, found)
-    return found[0]
 
 
 # ----------------------------------------------------------------------------
@@ -787,11 +777,6 @@ def readiness_of(project: Project, target: str, row) -> dict[str, Any]:
             "library": library, "definition": f"{found.get('path', row['source'])}:{found['line']}" if found else None}
 
 
-def _source_line(project: Project, repo: str, source: str | None, name: str, demangled: str | None) -> int | None:
-    found = source_definition(project, repo, source, name, demangled)
-    return found["line"] if found else None
-
-
 # ----------------------------------------------------------------------------
 
 def _cites(db, address: int, size: int, exclude_repo: str | None = None, limit: int = 30,
@@ -827,14 +812,6 @@ def _native_file_counts(db, rows: list, native: list[str]) -> dict[int, int]:
         for start, count in db.execute(query, (*[v for span in part for v in span], *native)):
             out[start] = count
     return out
-
-
-def _cite_count(db, address: int, size: int, repos: list[str]) -> int:
-    if not repos:
-        return 0
-    marks = ",".join("?" * len(repos))
-    return db.execute(f"SELECT count(DISTINCT path) FROM cites WHERE address>=? AND address<? AND repo IN ({marks})",
-                      (address, address + max(size, 4), *repos)).fetchone()[0]
 
 
 def _holders(project: Project, target: str, db, pointee: int) -> list[dict]:

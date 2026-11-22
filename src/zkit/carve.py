@@ -20,7 +20,6 @@ from __future__ import annotations
 import collections
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from . import cxx
 from .units import PIECE

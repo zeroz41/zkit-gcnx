@@ -317,10 +317,6 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--splits", type=Path, help="default: the target's splits file")
     c.add_argument("--build", type=Path, help="the build.ninja holding the link command (default: the repository's)")
     c.add_argument("--no-mark", action="store_true", help="Switch: leave the report as objdiff wrote it")
-    c = add("asmfile", help="An assembly file of original functions for a decompiler (m2c): references as symbols, "
-                            "labels, and the data they read (GameCube)")
-    c.add_argument("addresses", nargs="+", help="addresses or names of functions")
-    c.add_argument("--out", type=Path, help="write here instead of printing")
     c = add("m2c", help="m2c's C for original functions: the seed to match from (GameCube). Where m2c fails or "
                         "emits goto, Ghidra's reading of the same bytes follows when Ghidra is set up")
     c.add_argument("addresses", nargs="+", help="addresses or names of functions")
@@ -409,7 +405,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("repo")
     c.add_argument("names", nargs="+")
     c.add_argument("--jobs", type=int, default=2, help="parallel jobs for suggested prebuilds (nothing is executed)")
-    c = add("grounding", aliases=["suspects"],
+    c = add("grounding",
             help="Native: how much cited original behavior is a ready reference in the decomp, and the units most "
                  "likely to behave slightly off, with the next action")
     c.add_argument("repo", nargs="?")
@@ -522,15 +518,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("repository", nargs="?")
     c.add_argument("--query", default="")
     c.add_argument("--limit", type=int, default=20)
-    c = add("check-recipe", aliases=["recipe-preflight"], help="Preflight one fidelity recipe (does not run it)")
+    c = add("check-recipe", help="Preflight one fidelity recipe (does not run it)")
     c.add_argument("reference")
     c.add_argument("--catalog")
     c = add("plan", help="Show a configured command's argv/cwd without running it")
     c.add_argument("name")
-    c = add("snapshot")
-    c.add_argument("--reference", action="append", default=[])
-    c = add("check-snapshot")
-    c.add_argument("path", type=Path)
     add("serve", help="Run the MCP server on stdio")
     c = add("hook", help="Client hook entry points")
     c.add_argument("event", choices=["session-start", "subagent-start"])
@@ -709,8 +701,8 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
     use_platform(project)
 
     target = bridge.default_target(project, args.target) if project.config.get("targets") else None
-    command = "check-recipe" if args.command == "recipe-preflight" else args.command
-    native_only = ("impact", "grounding", "suspects", "consts", "tiers", "stale")
+    command = args.command
+    native_only = ("impact", "grounding", "consts", "tiers", "stale")
     path_commands = ("check", "quality") + native_only
     here, worktree = project.locate(Path.cwd())
     if getattr(args, "repo", None):
@@ -948,7 +940,7 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
                          args.splits.expanduser().resolve() if args.splits else None,
                          args.build.expanduser().resolve() if args.build else None)
         return data, render.link(data)
-    if command in ("asmfile", "m2c"):
+    if command == "m2c":
         from . import asmfile
         def resolve(query: str) -> int:
             exact = bridge.HEX.match(query.strip())
@@ -956,12 +948,6 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
             if not found:
                 raise ValueError(f"No function matches {query}")
             return found[0]
-        if command == "asmfile":
-            text = asmfile.write(project, target, [resolve(a) for a in args.addresses])
-            if args.out:
-                args.out.write_text(text, encoding="utf-8")
-                return {"written": str(args.out)}, f"wrote {args.out}"
-            return {"text": text}, text.rstrip()
         data = asmfile.m2c(project, target, [resolve(a) for a in args.addresses], args.language,
                            args.context.expanduser() if args.context else None, not args.no_ghidra)
         return data, render.m2c(data)
@@ -1050,7 +1036,7 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from .native import test_plan
         data = test_plan(project, args.repo, args.names, args.jobs)
         return data, render.test_plan(data)
-    if command in ("grounding", "suspects"):
+    if command == "grounding":
         from .fidelity import grounding
         data = grounding(project, args.repo, args.paths or None, target, args.limit)
         return data, render.grounding(data)
@@ -1209,14 +1195,6 @@ def run(args: argparse.Namespace) -> tuple[object, str]:
         from .workflows import command_plan
         data = command_plan(project, args.name)
         return data, data["shell_display"]
-    if command == "snapshot":
-        from .project import snapshot
-        data = snapshot(project, args.reference)
-        return data, render.generic(data)
-    if command == "check-snapshot":
-        from .project import check_snapshot
-        data = check_snapshot(project, json.loads(args.path.read_text(encoding="utf-8")))
-        return data, render.generic(data)
     if command == "serve":
         from .server import serve
         serve(project)

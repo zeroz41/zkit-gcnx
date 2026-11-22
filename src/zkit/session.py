@@ -13,7 +13,6 @@ import subprocess
 import re
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from .activity import activity, handoffs
@@ -22,17 +21,6 @@ from .project import Project
 
 def _role_of(project: Project, repo: str) -> str:
     return project.config["repositories"][repo].get("role", repo)
-
-
-def repo_for_cwd(project: Project, cwd: Path) -> str | None:
-    cwd = cwd.resolve()
-    best = None
-    for name in project.config["repositories"]:
-        root = project.root(name)
-        if cwd == root or cwd.is_relative_to(root):
-            if best is None or len(str(root)) > len(str(project.root(best))):
-                best = name
-    return best
 
 
 def lessons(project: Project, role: str | None = None) -> list[dict]:

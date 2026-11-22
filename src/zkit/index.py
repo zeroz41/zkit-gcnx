@@ -25,7 +25,6 @@ import os
 import re
 import sqlite3
 import stat as statmod
-import struct
 import tempfile
 import threading
 import time
@@ -265,10 +264,6 @@ def cw_demangle(symbol: str) -> str | None:
 
 def provisional_pattern(project: Project, target: str) -> re.Pattern:
     return re.compile(project.target(target).get("provisional_name_pattern", DEFAULT_PROVISIONAL))
-
-
-def is_provisional(project: Project, target: str, name: str) -> bool:
-    return bool(provisional_pattern(project, target).search(name or ""))
 
 
 def _target_file(project: Project, target: dict, field: str) -> Path | None:

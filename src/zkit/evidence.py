@@ -103,26 +103,6 @@ def lookup(project: Project, target_name: str, value: str | int) -> dict[str, An
                        "Names remain provisional until caller, vtable or typed-this evidence confirms them"]}
 
 
-def read_document(project: Project, reference: str, start: int = 1, lines: int = 80) -> dict:
-    if start < 1 or not 1 <= lines <= 200:
-        raise ValueError("Use start >= 1 and 1..200 lines")
-    repository, _, relative = reference.partition(":")
-    path = project.reference(reference)
-    repo = project.config["repositories"][repository]
-    permitted = any(path == project.file(repository, root) or
-                    path.is_relative_to(project.file(repository, root))
-                    for root in repo.get("search_paths", []) + repo.get("required_docs", []))
-    if not permitted or path.suffix.lower() not in {".md", ".txt", ".c", ".h", ".cpp", ".hpp", ".json", ".py"}:
-        raise ValueError("Document is outside configured text evidence paths")
-    if path.stat().st_size > 2 * 1024 * 1024:
-        raise ValueError("Document exceeds the 2 MiB read limit")
-    raw = path.read_bytes()
-    content = raw.decode("utf-8").splitlines()
-    return {"reference": reference, "sha256": hashlib.sha256(raw).hexdigest(),
-            "start": start, "total_lines": len(content),
-            "text": "\n".join(f"{i}: {line}" for i, line in enumerate(content[start-1:start-1+lines], start))}
-
-
 def search(project: Project, query: str, limit: int = 10) -> dict:
     terms = query.lower().split()
     if not 1 <= len(terms) <= 8 or not 1 <= limit <= 30 or len(query) > 256:

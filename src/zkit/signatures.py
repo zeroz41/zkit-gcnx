@@ -62,7 +62,7 @@ from typing import Iterable
 
 from . import ppc
 from .platform import platform_name
-from .program import CODE_SECTIONS, Function, Program
+from .program import Function, Program
 
 VERSION = 5
 MINIMUM_WORDS = 16       # a shorter shape proves nothing alone: copies and setters repeat in every game

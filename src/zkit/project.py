@@ -246,36 +246,3 @@ def file_record(path: Path) -> dict[str, Any]:
     if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
         raise ValueError(f"File changed while reading: {path}")
     return {"exists": True, "sha256": checksum, "size": after.st_size}
-
-
-def snapshot(project: Project, references: list[str] | None = None) -> dict[str, Any]:
-    if digest(project.path) != project.fingerprint:
-        raise ValueError("Project manifest changed; reload it before taking a snapshot")
-    refs = set(references or [])
-    for name, repo in project.config["repositories"].items():
-        refs.update(f"{name}:{p}" for p in repo.get("required_docs", []))
-    for target in project.config.get("targets", {}).values():
-        refs.update(f"{target['repository']}:{target[field]}"
-                    for field in ("report", "symbols", "splits", "original") if target.get(field))
-    initial = {name: repository_state(project.root(name)) for name in project.config["repositories"]}
-    files = {ref: file_record(project.reference(ref)) for ref in sorted(refs)}
-    final = {name: repository_state(project.root(name)) for name in project.config["repositories"]}
-    if initial != final or digest(project.path) != project.fingerprint:
-        raise ValueError("Repository changed during snapshot; retry after the writer finishes")
-    return {"schema_version": 1, "project": project.config["id"],
-            "manifest_sha256": project.fingerprint, "repositories": final, "files": files,
-            "scope": "Repository state and named files; not a build, test result, or full asset inventory"}
-
-
-def check_snapshot(project: Project, previous: dict[str, Any]) -> dict[str, Any]:
-    if previous.get("schema_version") != 1 or previous.get("project") != project.config["id"]:
-        raise ValueError("Snapshot belongs to a different project or schema")
-    if previous.get("manifest_sha256") != digest(project.path):
-        return {"current": False, "changes": ["project manifest changed"]}
-    current = snapshot(project, list(previous["files"]))
-    changes = []
-    for section in ("repositories", "files"):
-        for key in sorted(previous[section].keys() | current[section].keys()):
-            if previous[section].get(key) != current[section].get(key):
-                changes.append(f"{section}:{key}")
-    return {"current": not changes, "changes": changes}

@@ -56,7 +56,6 @@ OBJDUMP_NAMES = ("powerpc-eabi-objdump", "powerpc-linux-gnu-objdump", "powerpc-e
 
 
 def saved_objdump_path() -> Path:
-    import os
     from .paths import config_home
     return config_home() / "objdump"
 
@@ -368,7 +367,6 @@ def _disasm_module(project: Project, target: str, row, start: int, size: int, ad
     """A REL function from the module's own bytes, through the same objdump as the DOL: each relocated field named
     from the module's relocation table (DOL symbols, functions of this or another module, a section offset for
     module data, the value a float load reads) and each call makerel applied named by its target."""
-    from . import rel
     from .bridge import _status
     db = connect(project)
     number = start >> MODULE_SHIFT

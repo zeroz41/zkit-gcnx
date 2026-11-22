@@ -2320,7 +2320,6 @@ def _through_gaps(program: Program, ev: Evidence, out: list[tuple[int, int, str,
     names. Repeated as far as the pointers reach."""
     rows = out
     while True:
-        index = {(start, section): k for k, (start, _, _, section) in enumerate(rows)}
         starts = [r[0] for r in rows]
         placed: dict[int, list[tuple[int, int, str]]] = collections.defaultdict(list)
         for start, stop, unit, section in _through_data(program, ev, rows, deep=False):
