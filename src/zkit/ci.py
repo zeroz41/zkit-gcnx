@@ -284,10 +284,10 @@ def quality_section(quality: object, run_url: str = "") -> list[str]:
     advisory_title = "**Advisory checks**, signs worth a look that also fire on clean code (not in the total):"
     moved = [r for r in debt if _moved(r)]
     if not moved and not any(_moved(r) for r in owned + advisory):
-        lines += ["", f"Advisory: never fails a pull request. **No change in any check**; the tree stays at "
+        lines += ["", f"This section never fails a pull request. **No change in any check**; the tree stays at "
                   f"{after:,}."]
     else:
-        lines += ["", f"Advisory: never fails a pull request. **Debt {after - before:+,}**: this pull request "
+        lines += ["", f"This section never fails a pull request. **Debt {after - before:+,}**: this pull request "
                   f"removes {removed:,} and adds {added:,} across {_plural(files, 'changed source file')}; the tree "
                   f"goes from {before:,} to {after:,}."]
     if moved:   # what the pull request did, the largest change first
