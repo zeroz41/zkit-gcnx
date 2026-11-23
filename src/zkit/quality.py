@@ -22,6 +22,8 @@ from .project import Project
 
 SOURCE_SUFFIXES = {".c", ".cc", ".cp", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".inc", ".inl"}
 HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx", ".inc", ".inl"}
+CPP_SUFFIXES = {".cc", ".cp", ".cpp", ".cxx"}           # C++ source files
+CXX_FILES = CPP_SUFFIXES | {".hh", ".hpp", ".hxx"}      # C++ files: sources and C++-only headers (.h is either)
 
 
 @dataclass(frozen=True)
@@ -49,10 +51,11 @@ _HEX_OFFSET = (r"(?:0x)?(?!(?i:add|bad|bed|cab|dab|dad|ebb|fab|fad|fed|fee|ace|b
 _BYTE_TYPE = r"(?:u8|s8|char|unsigned\s+char|signed\s+char|uint8_t|int8_t|byte|undefined1?)"
 _BYTE_CAST = r"\(\s*(?:const\s+)?" + _BYTE_TYPE + r"\s*\*\s*\)\s*(?:\(\s*[\w.\->]+\s*\)|[\w.\->]+)\s*"
 _PLUS_OFFSET = r"\+\s*(?:0x[0-9A-Fa-f]+|\d+)\b(?!\s*[\[(])"
-_THIS_INIT = (r"(?:\(\s*(?:const\s+)?[A-Za-z_][\w:]*\s*\*\s*\)|(?:reinterpret|static)_cast\s*<[^>]*\*\s*>\s*)"
-              r"\(?\s*this\b")   # (T *)this, static_cast<T *>(this)
-_SUFFIX_EXCLUDED = (r"lbl|fn|FUN|func|sub|DAT|PTR|dat|temp|var|arg|sp|unk|unknown|field|m|pad|vfunc|ByteBlock|Stack|"
-                    r"text|data|bss|rodata|sdata|sbss|tl")
+_THIS_INIT = (r"(?:\(\s*(?:const\s+)?(?:(?:struct|class)\s+)?[A-Za-z_][\w:]*\s*\*\s*\)"
+              r"|(?:reinterpret|static)_cast\s*<[^>]*\*\s*>\s*)\(?\s*this\b")   # (T *)this, static_cast<T *>(this)
+_SELF_THIS = r"self\s*=\s*this\s*;"   # self = this; (any other name set to a bare this is often a cursor)
+# The integer types a pointer is cast to and back from.
+_INT_TYPE = r"(?:[su]addr|u32|s32|u?intptr_t|int|long|unsigned(?:\s+(?:int|long))?)"
 
 # Defaults cover CodeWarrior (GameCube/Wii) and Clang/GCC (Itanium ABI) decomps and both m2c and Ghidra output.
 # A project adds or replaces patterns in its manifest (`quality.patterns`: key -> {label, regex, group}).
@@ -70,11 +73,8 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
     # defines: it belongs in that file's header (`local_decl_debt`, `block_decls`)
     _p("local_decl", "prototypes and externs in source files and function bodies (void heap_free(void *);)", _NEVER,
        "linkage", blocks_port=False, sources_only=True),
-    # a member written as a C function on a `self` receiver (`self_params`), and a function symbol a C++ unit
-    # defines under a C name (read from the config's symbols and splits)
+    # a member written as a C function on a `self` receiver (`self_params`)
     _p("self_param", "self receivers in C++ files (void widget_draw(TWidget *self))", _NEVER, "linkage",
-       blocks_port=False),
-    _p("c_name_in_cpp", "C names for functions in C++ units (update_widget in Widget.cpp)", _NEVER, "linkage",
        blocks_port=False),
     # A hand-mangled spelling names its callee in full: spelling debt that does not hide what the code does.
     _p("mangled_member", "hand-mangled member names (CodeWarrior)",
@@ -101,20 +101,19 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
        r"\b(?:m_|unk_?|unknown_?|field_?|mbr_)" + _HEX_OFFSET +
        r"|\b[A-Za-z]\w*?_(?:field|unk|unknown)_?" + _HEX_OFFSET +
        r"|(?:->|\.)\s*f(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{2,4}\b|\b[a-z]\w*Field_?(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{1,4}\b"
-       r"|(?:->|\.)\s*(?!f[0-9A-Fa-f]{2,4}\b)(?![usf](?:8|16|32|64)\b)(?!m[0-3][0-3]\b)(?!ip\d+\b)[a-z]{1,2}(?=[0-9A-F])"
-       r"(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{2,4}\b", "layout"),
+       r"|(?:->|\.)\s*(?!f[0-9A-Fa-f]{2,4}\b)(?![usf](?:8|16|32|64)\b)(?!m[0-3][0-3]\b)(?!ip\d+\b)(?!sp[0-9A-F])"
+       r"[a-z]{1,2}(?=[0-9A-F])(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{2,4}\b", "layout"),
     # a padding field a function body reads or writes has a meaning (`pad_accesses`)
     _p("pad_access", "padding fields read or written (p->pad_3E = 0)", _NEVER, "layout"),
     _p("size_assert", "hand-written size asserts (typedef char check[sizeof(T) == 8 ? 1 : -1];)", _NEVER, "layout",
        blocks_port=False),
-    _p("blob_type", "size-named blob types (Bytes_28)",
-       r"\b(?:ByteBlock|Bytes|Blob|Block|Words|Chunk)_?(?:0x)?[0-9A-Fa-f]{1,4}\b", "layout",
-       needle=r"Bytes|Blob|Block|Words|Chunk"),
+    _p("blob_type", "size-named blob types (ByteBlock_28)", r"\bByteBlock_?(?:0x)?[0-9A-Fa-f]{1,4}\b", "layout",
+       needle=r"ByteBlock"),
     _p("fp_cast", "calls through function-pointer casts ((void (*)(T *))p)",
        r"\(\s*[A-Za-z_][\w:\s\*&<>,]*\(\s*\*+\s*\)\s*\([^()]*\)\s*\)\s*[\w(*&]", "types"),
     # counted on the text with its string literals kept (`string_casts`)
     _p("string_cast", "string literals cast to integers ((saddr)\"file.gvm\")",
-       r"\(\s*(?:[su]addr|u32|s32|int|long|unsigned(?:\s+(?:int|long))?|u?intptr_t)\s*\)\s*\"", "types"),
+       r"\(\s*" + _INT_TYPE + r"\s*\)\s*\"", "types"),
     _p("ghidra_type", "Ghidra placeholder types (undefined4, code *)", r"\bundefined[1248]?\b", "types"),
     _p("address_type", "address-named types (Obj_800EB910 *, TUnk_804806E8::, VObj_18_...)",
        r"\b(?:struct|class|union)\s+[A-Za-z]\w*?_[0-9A-Fa-f]{8}\w*"
@@ -129,12 +128,12 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
        r"(?!\(\s*\*\s*\([^)]*\*\s*\)\s*&\s*\1\s*\)|\(\s*\([^)]*\(\s*\*\s*\)\s*\([^)]*\)\s*\)\s*\1\s*\))\S[^\n]*",
        "types", needle=r"define[ \t]+[a-z]"),
     _p("this_alias", "aliases of this (TWidget *self = (TWidget *)this;)",
-       r"\b[A-Za-z_][\w:]*\s*\*\s*(?:const\s+)?\w+\s*=\s*" + _THIS_INIT + r"\s*\)?\s*;", "types",
-       needle=r"this"),
-    _p("ptr_int_roundtrip", "pointer-integer round trips ((T *)(u32)p)",
-       r"\(\s*(?:const\s+)?[A-Za-z_]\w*\s*\*+\s*\)\s*\(\s*(?:uaddr|saddr|u32|s32|uintptr_t|intptr_t|int|long|"
-       r"unsigned\s+long|unsigned\s+int)\s*\)"
-       r"|\(\s*(?:uaddr|saddr|u32|s32|uintptr_t|int)\s*\)\s*\(\s*(?:const\s+)?[A-Za-z_]\w*\s*\*+\s*\)", "types"),
+       r"\b[A-Za-z_][\w:]*\s*\*\s*(?:const\s+)?(?:\w+\s*=\s*" + _THIS_INIT + r"\s*\)?\s*;|" + _SELF_THIS + ")",
+       "types", needle=r"this"),
+    # an integer cast to a pointer (a round trip when the integer was a pointer), and a pointer cast to an integer
+    _p("ptr_int_roundtrip", "casts between pointers and integers ((T *)(u32)p, (u32)(T *)p)",
+       r"\(\s*(?:const\s+)?[A-Za-z_]\w*\s*\*+\s*\)\s*\(\s*" + _INT_TYPE + r"\s*\)"
+       r"|\(\s*" + _INT_TYPE + r"\s*\)\s*\(\s*(?:const\s+)?[A-Za-z_]\w*\s*\*+\s*\)", "types"),
     _p("decomp_temp", "m2c temporaries (temp_r3, var_f31)", r"\b(?:temp|var)_[rfa]\d+(?:_\d+)?\b", "decompiler"),
     _p("stack_local", "stack-slot locals (sp8, sp1C)", r"\bsp[0-9A-F]{1,3}\b", "decompiler"),
     _p("arg_name", "argN parameters (arg0, farg1)", r"\bf?arg\d+\b", "decompiler"),
@@ -147,14 +146,14 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
     # history, what it is belongs in its name
     _p("address_comment", "comments naming an address of the image or a placeholder (// moved from 0x8043E828, "
        "// was fn_80123456)", _NEVER, "decompiler", blocks_port=False),
-    # a variable, parameter or field named after a register or its offset (`register_names`), a decompiler's
-    # labels, a permuter's variables, and statements that do nothing (`no_ops`)
-    _p("register_name", "register-style names (f32 f31; u16 f4;)", _NEVER, "decompiler"),
+    # a local or parameter named after a register (`register_names`), a decompiler's labels, a permuter's
+    # variables, and statements that do nothing (`no_ops`)
+    _p("register_name", "register-style locals and parameters (f32 f31; void f(s32 r3))", _NEVER, "decompiler"),
     _p("decomp_label", "decompiler labels (goto block_12;)",
        r"(?m)\bgoto\s+(?:block|loop|label|lbl|L|bb|jump|case|lab)_?[0-9A-Fa-f]+\b"
        r"|^\s*(?:block|loop|label|lbl|bb|lab)_?[0-9A-Fa-f]+\s*:(?!:)", "decompiler",
        needle=r"goto|(?:block|loop|label|lbl|bb|lab)_?[0-9A-Fa-f]+\s*:"),
-    _p("permuter_var", "permuter variables (new_var2, phi_r3)", r"\bnew_var\d*\b|\bsaved_reg_\w+|\bphi_\w+",
+    _p("permuter_var", "permuter variables (new_var2, phi_r3)", r"\bnew_var\d*\b|\bsaved_reg_\w+|\bphi_[rf]\d+\b",
        "decompiler", needle=r"new_var|saved_reg_|phi_"),
     _p("no_op", "no-op statements (x = x; if (1))", _NEVER, "decompiler", blocks_port=False),
     _p("data_label", "address-named data (lbl_8045A010, DAT_, Class__data_)",
@@ -166,11 +165,9 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
        r"[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_(?=[0-9A-F]*\d)[0-9A-F]{5,8}_[A-Za-z0-9]\w*\b", "names"),
     # any other identifier holding an address of the image (`address_idents`)
     _p("address_ident", "other address-named identifiers (Thing_80123456)", _NEVER, "names"),
-    # a parameter named by a placeholder in a prototype or its definition and really named in the other, and a
-    # constructor naming its object after another class (`param_names`, `ctor_names`)
+    # a parameter named by a placeholder in a prototype or its definition and really named in the other
+    # (`param_names`)
     _p("param_name_split", "placeholder parameters named on the other side (f(int arg0); / f(int count) {)", _NEVER,
-       "names", blocks_port=False),
-    _p("ctor_name_string", 'constructors naming the object after another class (m_name = "TButton")', _NEVER,
        "names", blocks_port=False),
     _p("vtable_symbol", "vtable symbols spelled in source (__vt__, _ZTV)", r"\b__vt__\d+\w+|\b_ZTV\w+|\b\w+__vtable\b",
        "vtables"),
@@ -183,9 +180,10 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
        "vtables"),
     _p("local_virtual", "virtual declarations in source files (TU-local stand-in classes)",
        r"(?m)^\s*virtual\b[^;{]*[;{]", "vtables", sources_only=True),
-    # where units and classes live: a unit named after an address is a fragment not yet in its real unit, a class
-    # declared in a C++ source file is a stand-in or a layout kept out of its header, and a class with a body in
-    # more than one file is a copy (`address_unit`, `local_classes`, `duplicates`)
+    # where units and classes live: a unit named after an address is a fragment not yet in its real unit (a header
+    # counts only when no unit has its name, since one rename fixes both), a class declared in a C++ source file is
+    # a stand-in or a layout kept out of its header, and a class with a body in more than one file is a copy
+    # (`address_unit`, `local_classes`, `duplicates`)
     _p("address_unit", "units and headers named after an address (TEnemy_80123456.cpp)", _NEVER, "placement",
        blocks_port=False),
     _p("local_class", "classes declared in C++ source files instead of a header", _NEVER, "placement",
@@ -193,22 +191,7 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
     _p("duplicate_class", "classes declared in more than one file", _NEVER, "placement", blocks_port=False),
     _p("inline_asm", "assembly in source (asm blocks, __asm__)",
        r"\basm\s*\{|\b__asm__\b|\basm\s+[\w\s\*&:~<>,]+?\w+\s*\([^;]*\)\s*\{", "asm"),
-    # advisory: shown beside the debt, not in its total (they also catch real names), and never judged by `check`
-    _p("offset_suffix_name", "offset-suffixed names (get_flag_c8, value_2e)",
-       r"\b(?!(?:" + _SUFFIX_EXCLUDED + r")_)(?![A-Z]_[A-Z])(?<!LAYOUT_ASSERT\()(?<!LAYOUT_ASSERT\( )"
-       r"[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z][A-Za-z0-9]*)*_(?![23]d\b)(?!(?:[usf]|be|le|BE|LE)(?:8|16|32|64)\b)"
-       r"(?=[0-9A-Fa-f]*\d)(?:(?=[0-9A-Fa-f]*[A-Fa-f])[0-9A-Fa-f]{2,4}|[1-9]\d\d)\b(?!\s*[:=]\s*\d)"
-       r"|\b[a-z]\w*?[a-z](?:Flags?|Field|Value|Ptr|Word|Byte|Half|S8|U8|S16|U16|S32|U32|F32)"
-       r"(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{2,3}(?:_\w+)?\b"
-       r"|\b(?:m_)?(?:flags?|value|field|word|byte|half|ptr|offs?)(?!(?:8|16|32|64)\b)(?=[0-9A-Fa-f]*\d)"
-       r"[0-9A-Fa-f]{2,3}\b"
-       r"|\b(?!(?:lbl|fn|FUN|func|sub|DAT|PTR|dat|temp|var|arg|sp|unk|field|m|pad)_)[A-Za-z][A-Za-z0-9]*"
-       r"(?:_[A-Za-z][A-Za-z0-9]*)*_(?=[0-9A-Fa-f]*\d)(?=[0-9A-Fa-f]*[A-Fa-f]|\d{3})[0-9A-Fa-f]{2,4}\b"
-       r"(?!\s*[:=]\s*\d)", "advisory", blocks_port=False),
-    _p("zero_u_compare", "compares with 0U (p != 0U)", r"[!=]=\s*0[uU][lL]?\b|\b0[uU][lL]?\s*[!=]=", "advisory",
-       blocks_port=False, needle=r"0[uU]"),
 )
-SUMMARY_GROUPS = ("linkage", "layout", "types", "names", "vtables", "decompiler", "placement", "asm")
 # How a report names each check, with what it looks like (a manifest's own pattern shows its label), and each
 # group's title.
 DISPLAY = {   # key -> (name, example)
@@ -216,7 +199,6 @@ DISPLAY = {   # key -> (name, example)
     "header_extern_c": ('extern "C" on C++ functions in headers', 'extern "C" void widget_update(TWidget *);'),
     "local_decl": ("Prototypes and externs in source files", "void heap_free(void *);"),
     "self_param": ("self receivers in C++", "void widget_draw(TWidget *self)"),
-    "c_name_in_cpp": ("C names for functions in C++ units", "update_widget (in Widget.cpp)"),
     "mangled_member": ("Hand-mangled member names", "update__6TEnemyFv"),
     "mangled_free": ("Hand-mangled free functions", "helper__Fv"),
     "mangled_itanium": ("Itanium-mangled names", "_ZN6TEnemy6updateEv"),
@@ -227,7 +209,7 @@ DISPLAY = {   # key -> (name, example)
     "offset_member": ("Offset-named fields", "unk_30, m_c, field_96, set_field_378, ->x7A"),
     "pad_access": ("Padding fields read or written", "p->pad_3E = 0"),
     "size_assert": ("Hand-written size asserts", "typedef char check[sizeof(T) == 8 ? 1 : -1];"),
-    "blob_type": ("Size-named blob types", "Bytes_28"),
+    "blob_type": ("Size-named blob types", "ByteBlock_28"),
     "fp_cast": ("Function-pointer casts", "((void (*)(T *))p)(x)"),
     "string_cast": ("Strings cast to integers", '(saddr)"file.gvm"'),
     "ghidra_type": ("Ghidra types", "undefined4"),
@@ -235,14 +217,14 @@ DISPLAY = {   # key -> (name, example)
     "retype_macro": ("Re-typing macros", "#define g (*(T *)&g)"),
     "alias_macro": ("Lower-case object macros", "#define obj ((T *)this)"),
     "this_alias": ("Aliases of this", "TWidget *self = (TWidget *)this;"),
-    "ptr_int_roundtrip": ("Pointer-integer round trips", "(T *)(u32)p"),
+    "ptr_int_roundtrip": ("Casts between pointers and integers", "(T *)(u32)p, (u32)(T *)p"),
     "decomp_temp": ("m2c temporaries", "temp_r3, var_f31"),
     "stack_local": ("Stack-slot locals", "sp1C"),
     "arg_name": ("Numbered parameters", "arg0, farg1"),
     "ghidra_temp": ("Ghidra temporaries", "iVar1, param_1"),
     "m2c_macro": ("m2c macros", "M2C_FIELD"),
     "address_comment": ("Address comments", "// moved from 0x8043E828, // was fn_80123456"),
-    "register_name": ("Register-style names", "f32 f31; u16 f4;"),
+    "register_name": ("Register-style names", "f32 f31; void f(s32 r3)"),
     "decomp_label": ("Decompiler labels", "goto block_12;"),
     "permuter_var": ("Permuter variables", "new_var2, phi_r3"),
     "no_op": ("No-op statements", "x = x; if (1)"),
@@ -251,8 +233,6 @@ DISPLAY = {   # key -> (name, example)
     "address_in_name": ("Names built on an address", "call_36A90_with_1"),
     "address_ident": ("Other address-named identifiers", "Thing_80123456"),
     "param_name_split": ("Placeholder parameters named on the other side", "f(int arg0); / f(int count) {"),
-    "ctor_name_string": ("Constructors naming the object after another class",
-                         'TWidget::TWidget() { m_name = "TButton"; }'),
     "vtable_symbol": ("Vtable symbols in source", "__vt__6TEnemy"),
     "hand_vtable": ("Hand-written vtables", "void *TEnemy_vtable[] = {"),
     "filler_virtual": ("Filler virtuals", "virtual void reserved_3();"),
@@ -262,12 +242,9 @@ DISPLAY = {   # key -> (name, example)
     "local_class": ("Classes declared in source files", "struct EnemyView : TObject {"),
     "duplicate_class": ("Classes declared in more than one file", "class TEnemy {"),
     "inline_asm": ("Inline assembly", "asm { ... }"),
-    "offset_suffix_name": ("Offset-suffixed names", "get_flag_c8, value_2e"),
-    "zero_u_compare": ("Compares with 0U", "p != 0U"),
 }
 GROUP_TITLES = {"linkage": "Linkage", "layout": "Layout", "types": "Types", "decompiler": "Decompiler output",
                 "names": "Names", "vtables": "Vtables", "placement": "Units and classes", "asm": "Assembly",
-                "advisory": "Advisory (not in the total)",
                 "ownership": "Members in the wrong class (not in the total)"}
 # Members written in the wrong class, read from the class declarations: reported beside the debt, not in its total.
 OWNERSHIP = {   # key -> (name, example)
@@ -275,10 +252,7 @@ OWNERSHIP = {   # key -> (name, example)
     "subobject_call": ("Own member called on a sub-object", "TEnemy__f((char *)this + 0x3C)"),
 }
 _DEFAULTS = {p.key: p for p in DEFAULT_PATTERNS}
-# Signs worth a look that also fire on clean code: reported beside the debt, not in its total, never judged by check.
-ADVISORY_GROUP = "advisory"
 _STRING_CAST = re.compile(_DEFAULTS["string_cast"].regex.pattern + r'(?:\\.|[^"\\\n])*"')   # with the literal
-CPP_SUFFIXES = {".cc", ".cp", ".cpp", ".cxx"}
 
 
 def patterns(project: Project | None = None, repo: str | None = None) -> list[Pattern]:
@@ -454,18 +428,9 @@ class _Source:
         return self._matches[key]
 
 
-def extern_c_debt(text: str, source: _Source | None = None) -> list[tuple[int, str]]:
-    """(1-based line, name) of each `extern "C"` in a source file that is linkage debt: a declaration of a name the
-    file does not define (a call-site prototype; it belongs in the owner's header), or a C name on a C++ function
-    (a hand-mangled spelling). A definition under `extern "C"` (a body, an initializer, an object inside an
-    `extern "C" { }` block) gives what this file owns its C name, and a forward declaration of one is fine."""
+def _extern_c_heads(text: str, code: str) -> Iterable[tuple[int, str, bool, bool]]:
+    """(offset, head, has a body, in an `extern "C" {` block) of each declaration under `extern "C"`."""
     from .cxx import _matching
-    if "extern" not in text:
-        return []
-    source = source or _Source(text)
-    code = source.code
-    mangled = [p.regex for p in DEFAULT_PATTERNS if p.key.startswith("mangled_")]
-    defined, declared, debt = set(), [], []
     for match in _EXTERN_C.finditer(text):
         if code[match.start():match.start() + 6] != "extern":   # in a comment or a string
             continue
@@ -474,24 +439,41 @@ def extern_c_debt(text: str, source: _Source | None = None) -> list[tuple[int, s
         stop = _matching(code, at) if block else len(code)
         for begin, end, body in _items(code, at + 1 if block else at, stop, single=not block):
             head = _drop_attributes(code[begin:end].split("{", 1)[0] if body else code[begin:end])
-            if not head.strip() or _NOT_DECLARED.match(head):
+            if head.strip() and not _NOT_DECLARED.match(head):
+                yield begin + len(head) - len(head.lstrip()), head, body, block
+
+
+def _declarators(head: str) -> list[str]:
+    """The pieces of a declaration between its top-level commas."""
+    commas = _top_level(head, ",")
+    return [head[a:b] for a, b in zip([0, *(i + 1 for i in commas)], [*commas, len(head)])]
+
+
+def extern_c_debt(text: str, source: _Source | None = None) -> list[tuple[int, str]]:
+    """(1-based line, name) of each `extern "C"` in a source file that is linkage debt: a declaration of a name the
+    file does not define (a call-site prototype; it belongs in the owner's header), or a C name on a C++ function
+    (a hand-mangled spelling). A definition under `extern "C"` (a body, an initializer, an object inside an
+    `extern "C" { }` block) gives what this file owns its C name, and a forward declaration of one is fine."""
+    if "extern" not in text:
+        return []
+    source = source or _Source(text)
+    code = source.code
+    mangled = [p.regex for p in DEFAULT_PATTERNS if p.key.startswith("mangled_")]
+    defined, declared, debt = set(), [], []
+    for lead, head, body, block in _extern_c_heads(text, code):
+        initialized = bool(_top_level(head, "="))
+        extern = bool(re.match(r"\s*extern\b", head))
+        for piece in (head.split("=", 1)[0],) if initialized else _declarators(head):
+            found = _declared(piece)
+            if found is None:
                 continue
-            initialized = bool(_top_level(head, "="))
-            extern = bool(re.match(r"\s*extern\b", head))
-            for piece in (head.split("=", 1)[0],) if initialized else \
-                    [head[a:b] for a, b in zip([0, *(i + 1 for i in _top_level(head, ","))],
-                                               [*_top_level(head, ","), len(head)])]:
-                found = _declared(piece)
-                if found is None:
-                    continue
-                name, function = found
-                where = source.line(begin + len(head) - len(head.lstrip()))
-                if any(r.fullmatch(name) for r in mangled):
-                    debt.append((where, name))
-                elif body or initialized or (block and not extern and not function):
-                    defined.add(name)
-                else:
-                    declared.append((where, name))
+            name, function = found
+            if any(r.fullmatch(name) for r in mangled):
+                debt.append((source.line(lead), name))
+            elif body or initialized or (block and not extern and not function):
+                defined.add(name)
+            else:
+                declared.append((source.line(lead), name))
     if declared:   # what else the file defines: function bodies, and objects initialized outside a body
         spans = []   # bodies by offset, not by line: `void f() { g = 1; }` on one line still holds `g = 1`
         for definition in source.defs:
@@ -510,23 +492,14 @@ def extern_c_debt(text: str, source: _Source | None = None) -> list[tuple[int, s
 def extern_c_functions(text: str, source: _Source) -> list[tuple[int, str]]:
     """(1-based line, name) of each function a header declares under `extern "C"` (header_extern_c judges them
     against the unit that defines each: C linkage is right for a C unit's functions, not a C++ unit's)."""
-    from .cxx import _matching
-    code, out = source.code, []
-    for match in _EXTERN_C.finditer(text):
-        if code[match.start():match.start() + 6] != "extern":   # in a comment or a string
+    out = []
+    for lead, head, body, _ in _extern_c_heads(text, source.code):
+        if body or _top_level(head, "="):
             continue
-        at = match.end()
-        block = code[at:at + 1] == "{"
-        stop = _matching(code, at) if block else len(code)
-        for begin, end, body in _items(code, at + 1 if block else at, stop, single=not block):
-            head = _drop_attributes(code[begin:end].split("{", 1)[0] if body else code[begin:end])
-            if body or not head.strip() or _NOT_DECLARED.match(head) or _top_level(head, "="):
-                continue
-            commas = _top_level(head, ",")
-            for a, b in zip([0, *(i + 1 for i in commas)], [*commas, len(head)]):
-                found = _declared(head[a:b])
-                if found and found[1]:
-                    out.append((source.line(begin + len(head) - len(head.lstrip())), found[0]))
+        for piece in _declarators(head):
+            found = _declared(piece)
+            if found and found[1]:
+                out.append((source.line(lead), found[0]))
     return out
 
 
@@ -582,17 +555,18 @@ def _unbraced(head: str) -> str:
     return "".join(out)
 
 
-def local_decl_debt(text: str, source: _Source | None = None) -> list[tuple[int, str]]:
+def local_decl_debt(text: str, source: _Source | None = None) -> tuple[list[tuple[int, str]], set[str]]:
     """(1-based line, declaration) of each prototype or `extern` at file scope of a source file, outside
     `extern "C"` (extern_c judges those), that names nothing the file defines: it belongs in the header of the
-    file that defines it, which this file should include."""
+    file that defines it, which this file should include. Also the names the file defines (its functions and its
+    data at file scope)."""
     from .cxx import _NOT_A_NAME
     source = source or _Source(text)
     code = source.code
     items: list[tuple[int, int, bool, bool]] = []
     _file_scope(text, code, 0, len(code), False, items)
+    defined = {d.name.split("::")[-1] for d in source.defs}
     declared = []
-    defined = set()
     for begin, end, body, under_c in items:
         if body:
             continue
@@ -616,15 +590,14 @@ def local_decl_debt(text: str, source: _Source | None = None) -> list[tuple[int,
             elif not (under_c or single_c or (function and internal)):
                 declared.append((lead, name, " ".join(head.split())[:80]))
     if not declared:
-        return []
-    defined |= {d.name.split("::")[-1] for d in source.defs}
-    return [(source.line(lead), found) for lead, name, found in declared if name not in defined]
+        return [], defined
+    return [(source.line(lead), found) for lead, name, found in declared if name not in defined], defined
 
 
 _LITERAL_OR_COMMENT = re.compile(r'R"(?P<d>[^ ()\\\t\r\n]{0,16})\(.*?\)(?P=d)"|"(?:\\.|[^"\\\n])*"|'
                                  r"'(?:\\.|[^'\\\n])*'|//[^\n]*|/\*.*?\*/", re.S)
-_ADDRESS = re.compile(r"\b(?:0[xX])?(8[0-3][0-9A-Fa-f]{6})\b")
-_UNIT_ADDRESS = re.compile(r"_(8[0-3][0-9A-Fa-f]{6})")
+_ADDRESS = re.compile(r"\b(?:0[xX])?(8[0-5][0-9A-Fa-f]{6})\b")
+_UNIT_ADDRESS = re.compile(r"_(8[0-5][0-9A-Fa-f]{6})")
 _COMMENT_PLACEHOLDER = re.compile(r"\b(?:fn|lbl|sub|FUN|DAT|func|loc)_[0-9A-Fa-f]{6,8}\b|\w__sub_[0-9A-Fa-f]{6,8}\b")
 
 
@@ -775,8 +748,7 @@ def pad_accesses(source: _Source) -> list[tuple[int, str]]:
 
 
 _SELF_PARAM = re.compile(r"[(,]\s*(?:const\s+)?[A-Za-z_][\w:]*\s*\*\s*(?:const\s+)?self\s*[,)]"
-                         r"|\b[A-Za-z_][\w:]*\s*\*\s*self\s*=(?!\s*" + _THIS_INIT + r")")
-CXX_FILES = {".cc", ".cp", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"}
+                         r"|\b[A-Za-z_][\w:]*\s*\*\s*(?!" + _SELF_THIS + r")self\s*=(?!\s*" + _THIS_INIT + r")")
 
 
 def self_params(rel: str, source: _Source) -> list[tuple[int, str]]:
@@ -793,7 +765,8 @@ def self_params(rel: str, source: _Source) -> list[tuple[int, str]]:
 
 _SCALAR = (r"(?:(?:unsigned|signed)\s+)?(?:u8|s8|u16|s16|u32|s32|u64|s64|f32|f64|uaddr|saddr|int|char|short|long|"
            r"float|double|bool|BOOL|uintptr_t|intptr_t|size_t|unsigned|signed|void|vu8|vu16|vu32|vs32)")
-_REGISTER = re.compile(r"\b[rf](?:[0-9]|[12][0-9]|3[01])\b")
+# no r0-r2: under the PowerPC EABI r0 is scratch, r1 the stack pointer and r2 the SDA2 base, never a named local
+_REGISTER = re.compile(r"\b(?:f(?:[0-9]|[12][0-9]|3[01])|r(?:[3-9]|[12][0-9]|3[01]))\b")
 _TYPE_BEFORE = re.compile(r"\b(?:" + _SCALAR + r"|const|struct|class|[A-Z]\w*|[a-z]\w*_t)\s*[\*&]*\s*$")
 _COMMA_BEFORE = re.compile(r",\s*[\*&]*\s*$")
 _NOT_DECLARATOR = re.compile(r"\b(?:return|case|goto)\s*$")
@@ -803,13 +776,15 @@ _ASM_BLOCK = re.compile(r"\basm\b[^;{]*\{")
 
 
 def register_names(text: str, source: _Source) -> list[tuple[int, str]]:
-    """(line, declaration) of each variable, parameter or field declared with a register's name (r3, f31) outside
-    assembly: where m2c saw the value live, or the field's offset (u16 f4;), not what it is."""
+    """(line, declaration) of each local or parameter declared with a register's name (r3, f31) outside assembly:
+    where m2c saw the value live, not what it is. Fields are left out (u16 f4; often names its offset)."""
     from .cxx import _matching
     code = source.code
     found = list(_REGISTER.finditer(code))
     if not found:
         return []
+    defs = source.defs
+    in_scope = _inside(_outermost([d.span for d in defs] + [d.parens for d in defs + source.prototypes]))
     asm: list[tuple[int, int]] = []
     for match in _ASM_BLOCK.finditer(code):
         if not asm or match.start() >= asm[-1][1]:
@@ -819,7 +794,7 @@ def register_names(text: str, source: _Source) -> list[tuple[int, str]]:
     out = []
     for m in found:
         before = code[max(0, m.start() - 60):m.start()]
-        if in_asm(m.start()) or _NOT_DECLARATOR.search(before):
+        if not in_scope(m.start()) or in_asm(m.start()) or _NOT_DECLARATOR.search(before):
             continue
         if not _TYPE_BEFORE.search(before):
             # `f32 f30, f31;`: a comma counts only in a declaration statement
@@ -835,35 +810,10 @@ def register_names(text: str, source: _Source) -> list[tuple[int, str]]:
 
 
 _SIZE_ASSERT = re.compile(r"\btypedef\s+(?:char|int|u8|s8)\s+\w+\s*\[\s*\(?\s*[^;\]]*?\?\s*1\s*:\s*-\s*1\s*\)?\s*\]")
-# Every offset_suffix_name match is one whole identifier holding one of these, so the pattern is tried only at the
-# start of the identifiers that do (the same matches, without trying it at every word).
-_SUFFIX_TAIL = re.compile(r"_[0-9A-Fa-f]{2,4}\b|(?:Flags?|Field|Value|Ptr|Word|Byte|Half|S8|U8|S16|U16|S32|U32|F32|"
-                          r"flags?|value|field|word|byte|half|ptr|offs?)[0-9A-Fa-f]{2,3}")
 
 
 def _word(c: str) -> bool:
     return c.isalnum() or c == "_"
-
-
-def suffix_names(source: _Source) -> list[tuple[int, str]]:
-    """(line, name) of each identifier offset_suffix_name's pattern matches."""
-    kept = source.kept
-    regex = _DEFAULTS["offset_suffix_name"].regex
-    out, last = [], -1
-    for tail in _SUFFIX_TAIL.finditer(kept):
-        start = tail.start()
-        while start and _word(kept[start - 1]):
-            start -= 1
-        if start <= last:
-            continue
-        last = start
-        found = regex.match(kept, start)
-        if found:
-            out.append((start, found[0][:80]))
-    if not out:
-        return []
-    line = _line_index(kept)
-    return [(line(at), name) for at, name in out]
 
 
 _SELF_ASSIGNED = re.compile(r"=\s*([A-Za-z_]\w*(?:\s*(?:->|\.)\s*[A-Za-z_]\w*|\[\s*\w+\s*\])*)\s*;")
@@ -888,26 +838,18 @@ def no_ops(source: _Source) -> list[tuple[int, str]]:
     return [(source.line(at), found) for at, found in sorted(out)]
 
 
-def on_code(regex: re.Pattern, source: _Source, needle: str) -> list[tuple[int, str]]:
-    """(line, text) of each match on the code with comments, literals and preprocessor lines blanked (a macro's
-    own definition is not counted, its hand-written expansion is)."""
-    if needle not in source.text:
-        return []
-    return [(source.line(m.start()), _normal(m[0])) for m in regex.finditer(source.code)]
-
-
 _BLOCK_EXTERN = re.compile(r"(?m)^[ \t]+extern[ \t]+[^;{}]*;")
 _BLOCK_PROTOTYPE = re.compile(
     r"(?m)^[ \t]+(?:static[ \t]+)?(?:const[ \t]+)?(?:" + _SCALAR +
-    r"|[A-Z]\w*)(?:[ \t]*\*+[ \t]*|[ \t]+)(?!return\b)[A-Za-z_]\w*[ \t]*\([ \t]*(?:void|(?:const[ \t]+)?"
+    r"|[A-Z]\w*)(?:[ \t]*\*+[ \t]*|[ \t]+)[A-Za-z_]\w*[ \t]*\([ \t]*(?:void|(?:const[ \t]+)?"
     r"(?:struct[ \t]+)?(?:" + _SCALAR + r"|[A-Z]\w*)[ \t]*[\*&]*(?:[ \t]*\w+)?(?:[ \t]*,[ \t]*(?:const[ \t]+)?"
     r"(?:struct[ \t]+)?(?:" + _SCALAR + r"|[A-Z]\w*)[ \t]*[\*&]*(?:[ \t]*\w+)?)*)?[ \t]*\)[ \t]*;")
 _MACRO_CALL = re.compile(r"\(\s*[A-Z_][A-Z0-9_]*\s*\)\s*;")   # f(MACRO); is a call, not a prototype
 
 
-def block_decls(text: str, source: _Source) -> list[tuple[int, str]]:
-    """(line, declaration) of each prototype or `extern` declared inside a function body: it belongs in the header
-    of the file that defines it."""
+def block_decls(text: str, source: _Source, defined: Container[str]) -> list[tuple[int, str]]:
+    """(line, declaration) of each prototype or `extern` declared inside a function body, of a name the file does
+    not define (`defined`): it belongs in the header of the file that defines it."""
     code = source.code
     found = list(_BLOCK_EXTERN.finditer(code)) if "extern" in text else []
     for open_, end in _outermost(d.span for d in source.defs):
@@ -918,9 +860,19 @@ def block_decls(text: str, source: _Source) -> list[tuple[int, str]]:
     out = []
     for m in found:
         lead = m.start() + len(m[0]) - len(m[0].lstrip())
-        if inside(lead) and not _EXTERN_C.match(text, lead):
+        if not inside(lead) or _EXTERN_C.match(text, lead):
+            continue
+        names = [_declared(piece[:equals[0]] if equals else piece)
+                 for piece in _declarators(m[0].strip().rstrip(";")) for equals in [_top_level(piece, "=")]]
+        if not all(name and name[0] in defined for name in names):
             out.append((source.line(lead), _normal(m[0])))
     return sorted(out)
+
+
+def local_decls(text: str, source: _Source) -> list[tuple[int, str]]:
+    """local_decl: prototypes and externs at file scope and in function bodies of names the file does not define."""
+    found, defined = local_decl_debt(text, source)
+    return sorted(found + block_decls(text, source, defined))
 
 
 def duplicates(bodies: dict[str, dict[str, int]]) -> dict[str, list[tuple[int, str]]]:
@@ -1057,18 +1009,15 @@ def ownership(facts: ClassFacts, classes: ClassMap) -> list[tuple[int, str, str]
     return out + [(line, "subobject_call", call[:120]) for call, line in facts.subobject_calls]
 
 
-# --- parameter names and class names, compared across files ------------------------------------------------------
+# --- parameter names, compared across files ----------------------------------------------------------------------
 # A prototype pairs with the one definition of the same qualified name and parameter count. A parameter named by a
-# placeholder on one side and a real name on the other is debt (param_name_split). A constructor that sets m_name
-# (the game's own name for the class) to a string other than its class's name is ctor_name_string.
+# placeholder on one side and a real name on the other is debt (param_name_split).
 
 _PARAM_PLACEHOLDER = re.compile(
     r"^_*(?:[a-z]?arg_?\d+|a\d+|param_?\d+|p\d+|var_?[rf]?\d+\w*|temp_\w+|tmp_?\d*|sp[0-9A-Fa-f]+"
-    r"|pad_?\w*|unk\w*|lbl_\w*|field_?\w*|m_[0-9A-Fa-f]+|local_\w+|r\d+|f\d+|v\d+|ptr_?\d*|unused\w*"
-    r"|\w*_[0-9A-Fa-f]{6,8}|[A-Za-z]|saved_r\d+|in_r\d+|in_f\d+)$")
+    r"|pad_?\w*|unk\w*|lbl_\w*|field_?[0-9A-Fa-f]+\w*|m_[0-9A-Fa-f]+|local_(?:res)?[0-9A-Fa-f]+|r\d+|f\d+|v\d+"
+    r"|ptr_?\d*|unused\w*|\w*_[0-9A-Fa-f]{6,8}|[A-Za-z]|saved_r\d+|in_r\d+|in_f\d+)$")
 _PARTNER_LINE = re.compile(r":\d+\)$")
-_STRING = re.compile(r'\s*"((?:\\.|[^"\\\n])*)"\s*')
-_NAME_STORE = re.compile(r"\bm_name\s*=([^;]*);")
 
 
 def _placeholder(name: str, other: str) -> bool:
@@ -1125,12 +1074,9 @@ def param_names(files: Iterable[tuple[str, list]], counted: Container[str]) -> d
                 if site not in counted or (site, line, weak[0], good) in seen:
                     continue
                 seen.add((site, line, weak[0], good))
-                out[site].append((line, "param_name_split", f"{weak[0]} ({good} at {_base(other)}:{other_line})"))
+                out[site].append((line, "param_name_split",
+                                  f"{weak[0]} ({good} at {other.rsplit('/', 1)[-1]}:{other_line})"))
     return dict(out)
-
-
-def _base(rel: str) -> str:
-    return rel.rsplit("/", 1)[-1]
 
 
 def identity(key: str, text: str) -> tuple[str, str]:
@@ -1138,70 +1084,29 @@ def identity(key: str, text: str) -> tuple[str, str]:
     return (key, _PARTNER_LINE.sub(")", text)) if key == "param_name_split" else (key, text)
 
 
-def name_strings(text: str, source: _Source) -> tuple[list[tuple[str, str]], list[tuple[int, str, str]]]:
-    """String constants defined at file scope as (name, value), and each constructor's `m_name = ...` as
-    (line, class, right-hand side)."""
-    strings, stores = [], []
-    code = source.code
-    if re.search(r'=\s*"', text):
-        items: list[tuple[int, int, bool, bool]] = []
-        _file_scope(text, code, 0, len(code), False, items)
-        for begin, end, body, _ in items:
-            equals = [] if body else _top_level(code[begin:end], "=")
-            found = _declared(code[begin:begin + equals[0]]) if equals else None
-            value = _STRING.fullmatch(text, begin + equals[0] + 1, end) if found and not found[1] else None
-            if value:
-                strings.append((found[0], value[1]))
-    if "m_name" in code:
-        for d in source.defs:
-            if d.owner and d.name.split("::")[-1] == d.owner:
-                stores += [(source.line(m.start()), d.owner, text[m.start(1):m.end(1)].strip())
-                           for m in _NAME_STORE.finditer(code, *d.span)]
-    return strings, stores
-
-
-def ctor_names(scans: dict[str, _Scan]) -> dict[str, list[tuple[int, str, str]]]:
-    """ctor_name_string: m_name set to a literal, or to a constant with one value over the tree, that is not the
-    constructor's class."""
-    values = collections.defaultdict(set)
-    for scan in scans.values():
-        for name, value in scan.strings:
-            values[name].add(value)
-    out: dict[str, list[tuple[int, str, str]]] = collections.defaultdict(list)
-    for rel, scan in scans.items():
-        for line, owner, rhs in scan.name_stores:
-            literal = _STRING.fullmatch(rhs)
-            found = {literal[1]} if literal else values.get(rhs.split("::")[-1], set()) \
-                if re.fullmatch(r"[\w:]+", rhs) else set()
-            if len(found) == 1 and owner not in found:
-                out[rel].append((line, "ctor_name_string", f'{owner}: m_name "{min(found)}"'))
-    return dict(out)
-
-
 # Checks a parser judges, with what it needs: "file" a whole file and its path, "image" the image's address range.
 # Each takes (path or None, text, source, image) and gives [(1-based line, text of the finding)].
 PARSED = {
     "extern_c": ((), lambda rel, text, source, image: [(n, f'extern "C" {name}')
                                                          for n, name in extern_c_debt(text, source)]),
-    "local_decl": ((), lambda rel, text, source, image: sorted(local_decl_debt(text, source)
-                                                               + block_decls(text, source))),
+    "local_decl": ((), lambda rel, text, source, image: local_decls(text, source)),
     "self_param": (("file",), lambda rel, text, source, image: self_params(rel, source)),
     "pad_access": ((), lambda rel, text, source, image: pad_accesses(source)),
-    "size_assert": ((), lambda rel, text, source, image: on_code(_SIZE_ASSERT, source, "typedef")),
+    "size_assert": ((), lambda rel, text, source, image: [] if "typedef" not in text else
+                    [(source.line(m.start()), _normal(m[0])) for m in _SIZE_ASSERT.finditer(source.code)]),
     "string_cast": ((), lambda rel, text, source, image: string_casts(text)),
     "address_comment": ((), lambda rel, text, source, image: address_comments(text, image)),
     "register_name": ((), lambda rel, text, source, image: register_names(text, source)),
     "no_op": ((), lambda rel, text, source, image: no_ops(source)),
     "address_ident": (("image",), lambda rel, text, source, image: address_idents(source, image)),
-    "address_unit": (("file", "image"), lambda rel, text, source, image: address_unit(rel, image)),
-    "offset_suffix_name": ((), lambda rel, text, source, image: suffix_names(source)),
+    "address_unit": (("file", "image"), lambda rel, text, source, image:
+                     [] if Path(rel).suffix.lower() in HEADER_SUFFIXES else address_unit(rel, image)),
     "local_class": (("file",), lambda rel, text, source, image: local_classes(rel, source)),
 }
 # judged over every file at once: copies of a class (`duplicates`), a header's extern "C" on a function a C++ unit
-# defines (`extern_c_functions` against the config), parameter names (`param_names`) and m_name (`ctor_names`)
-TREE_CHECKS = {"duplicate_class", "header_extern_c", "param_name_split", "ctor_name_string"}
-CONFIG_CHECKS = {"c_name_in_cpp"}   # read from symbols.txt and splits.txt
-ADVISORY = {p.key for p in DEFAULT_PATTERNS if p.group == ADVISORY_GROUP}
+# defines (`extern_c_functions` against the config) and parameter names (`param_names`). A header named after an
+# address (address_unit) counts only when no unit has its name, since one rename fixes both.
+TREE_CHECKS = {"duplicate_class", "header_extern_c", "param_name_split", "address_unit"}
 
 
 def _parsed(pattern: Pattern) -> bool:
@@ -1210,8 +1115,8 @@ def _parsed(pattern: Pattern) -> bool:
 
 
 def _elsewhere(pattern: Pattern) -> bool:
-    """The pattern is judged over the whole tree or from the config, not in one file."""
-    return (pattern.key in TREE_CHECKS or pattern.key in CONFIG_CHECKS) and pattern.regex.pattern == _NEVER
+    """The pattern is judged over the whole tree, not in one file."""
+    return pattern.key in TREE_CHECKS and pattern.regex.pattern == _NEVER
 
 
 def parsed_findings(text: str, catalog: Iterable[Pattern], rel: str | None = None, header: bool = False,
@@ -1350,8 +1255,6 @@ class _Scan:
     found: list[tuple[int, str, str]] | None      # every finding (line, key, text), kept for changed files only
     c_functions: list[tuple[int, str]]            # a header's functions under extern "C": (line, name)
     signatures: list = field(default_factory=list)    # see signatures()
-    strings: list = field(default_factory=list)       # see name_strings()
-    name_stores: list = field(default_factory=list)
 
 
 def _scan(rel: str, text: str, catalog: list[Pattern], image: tuple[int, int] | None, keep: bool = False) -> _Scan:
@@ -1364,8 +1267,7 @@ def _scan(rel: str, text: str, catalog: list[Pattern], image: tuple[int, int] | 
     c_functions = extern_c_functions(text, source) if header and "extern" in text else []
     tree = {p.key for p in catalog if _elsewhere(p)}
     return _Scan(collections.Counter(key for _, key, _ in found), bodies, class_facts(rel, source),
-                 found if keep else None, c_functions, signatures(source) if "param_name_split" in tree else [],
-                 *(name_strings(text, source) if "ctor_name_string" in tree else ([], [])))
+                 found if keep else None, c_functions, signatures(source) if "param_name_split" in tree else [])
 
 
 def _checks(project: Project | None, repo: str | None) -> tuple[list[Pattern], set[str], list[str]]:
@@ -1378,11 +1280,12 @@ def _checks(project: Project | None, repo: str | None) -> tuple[list[Pattern], s
 
 
 def _relations(scans: dict[str, _Scan], tree: set[str], owned: list[str], config: "Config | None" = None,
-               library: dict[str, list] | None = None) -> dict[str, list[tuple[int, str, str]]]:
+               library: dict[str, list] | None = None,
+               image: tuple[int, int] | None = None) -> dict[str, list[tuple[int, str, str]]]:
     """Findings that depend on more than one file, by the file holding them: copies of a class declared in more than
     one file, a header's extern "C" on functions a C++ unit defines, placeholder parameters named on the other side
-    (library: signatures() of files read only to pair them), constructors naming another class, and members in the
-    wrong class (ownership)."""
+    (library: signatures() of files read only to pair them), headers named after an address of the image that no
+    unit shares a name with, and members in the wrong class (ownership)."""
     out: dict[str, list[tuple[int, str, str]]] = collections.defaultdict(list)
     if "duplicate_class" in tree:
         for rel, copies in duplicates({rel: scan.bodies for rel, scan in scans.items() if scan.bodies}).items():
@@ -1392,9 +1295,13 @@ def _relations(scans: dict[str, _Scan], tree: set[str], owned: list[str], config
                  *sorted((rel, sigs) for rel, sigs in (library or {}).items() if rel not in scans)]
         for rel, found in param_names(files, scans).items():
             out[rel] += found
-    if "ctor_name_string" in tree:
-        for rel, found in ctor_names(scans).items():
-            out[rel] += found
+    if "address_unit" in tree and image:
+        units = {Path(rel).stem for rel in scans if Path(rel).suffix.lower() not in HEADER_SUFFIXES}
+        for rel in scans:
+            if Path(rel).suffix.lower() in HEADER_SUFFIXES and Path(rel).stem not in units:
+                found = [(line, "address_unit", name) for line, name in address_unit(rel, image)]
+                if found:
+                    out[rel] += found
     if owned:
         classes = ClassMap(scan.classes for scan in scans.values())
         for rel, scan in scans.items():
@@ -1415,7 +1322,6 @@ def _relations(scans: dict[str, _Scan], tree: set[str], owned: list[str], config
 _CONFIG_PATHS = re.compile(r"^(symbols|splits):\s*(\S+)", re.M)
 _SPLIT_TEXT = re.compile(r"^\s+\.text\s+start:(0x[0-9A-Fa-f]+)\s+end:(0x[0-9A-Fa-f]+)")
 _SYMBOL = re.compile(r"^(\S+)\s*=\s*([.\w]+):(0x[0-9A-Fa-f]+);\s*//(.*)$")
-_SPECIAL = re.compile(r"^(?:main|__\w+|_\w+|\w+\$\w+|@\w+|\.\w+)$")
 
 
 def split_units(text: str) -> list[tuple[int, int, str]]:
@@ -1431,22 +1337,27 @@ def split_units(text: str) -> list[tuple[int, int, str]]:
     return sorted(out)
 
 
-def c_name_in_cpp(name: str, kind: str, unit: str | None) -> bool:
-    """A function symbol with no C++ mangling in a C++ unit: a C name for what is usually a member."""
-    return bool(kind == "function" and unit and Path(unit).suffix.lower() in CPP_SUFFIXES
-                and "__" not in name.lstrip("_") and not _SPECIAL.match(name)
-                and not name.startswith(("fn_", "lbl_")))
+_MIDDLEWARE = re.compile(r"^MIDDLEWARE\b[^=\n]*=\s*\[.*?(0x[0-9A-Fa-f]+)", re.M | re.S)
+_MIDDLEWARE_END = re.compile(r"^MIDDLEWARE_END\s*=\s*(0x[0-9A-Fa-f]+)", re.M)
+
+
+def middleware(configure: str) -> tuple[int, int] | None:
+    """Where configure.py links its prebuilt C libraries: from the first start in its MIDDLEWARE list to
+    MIDDLEWARE_END (None when it does not say)."""
+    start, end = _MIDDLEWARE.search(configure), _MIDDLEWARE_END.search(configure)
+    return (int(start[1], 16), int(end[1], 16)) if start and end else None
 
 
 @dataclass
 class Config:
-    linkage: dict[str, set[str]]                       # function name -> the units defining it
-    found: list[tuple[str, tuple[int, str, str]]]      # (symbols.txt path, (line, key, text)) of the config checks
+    linkage: dict[str, set[str]]                                   # function name -> the units defining it
+    middleware: set[str] = field(default_factory=set)              # units of the prebuilt C libraries
 
     def cxx_linkage(self, name: str) -> bool:
-        """True when a C++ unit, and no C unit, defines the function."""
+        """True when a C++ unit, and no C unit, defines the function. A middleware unit is never C++: the
+        libraries are C, whatever the unit's file is called."""
         units = self.linkage.get(name, ())
-        return any(Path(u).suffix.lower() in CPP_SUFFIXES for u in units) and \
+        return any(Path(u).suffix.lower() in CPP_SUFFIXES and u not in self.middleware for u in units) and \
             not any(Path(u).suffix.lower() == ".c" for u in units)
 
 
@@ -1479,7 +1390,7 @@ def _read(root: Path, revision: str | None, rels: list[str]) -> dict[str, str]:
 
 def read_config(root: Path, revision: str | None, dirs: list[str]) -> Config:
     """Every config.yml's symbols.txt and splits.txt under `dirs` at a revision (None: the working tree): which unit
-    defines each function, and the config check (c_name_in_cpp)."""
+    defines each function, and which units start in configure.py's middleware range."""
     if revision is None:
         configs = sorted(p.relative_to(root).as_posix() for d in dirs if (root / d).is_dir()
                          for p in (root / d).rglob("config.yml"))
@@ -1494,36 +1405,28 @@ def read_config(root: Path, revision: str | None, dirs: list[str]) -> Config:
         if "symbols" in paths:
             pairs.append((paths["symbols"], paths.get("splits")))
     texts = _read(root, revision, sorted({p for pair in pairs for p in pair if p}))
-    config = Config(collections.defaultdict(set), [])
+    config = Config(collections.defaultdict(set))
+    libraries = middleware(_read(root, revision, ["configure.py"]).get("configure.py", ""))
     for symbols_path, splits_path in sorted(set(pairs)):
         units = split_units(texts.get(splits_path, "")) if splits_path else []
         starts = [u[0] for u in units]
-        for number, line in enumerate(texts.get(symbols_path, "").splitlines(), 1):
+        if libraries:
+            config.middleware.update(unit for start, _, unit in units if libraries[0] <= start < libraries[1])
+        for line in texts.get(symbols_path, "").splitlines():
             match = _SYMBOL.match(line.strip())
-            if not match:
+            if not match or match[2] != ".text" or not re.search(r"\btype:function\b", match[4]):
                 continue
-            name, section = match[1], match[2]
-            kind = re.search(r"\btype:(\w+)", match[4])
-            kind = kind[1] if kind else ""
-            unit = None
-            if section == ".text":
-                index = bisect.bisect_right(starts, int(match[3], 16)) - 1
-                if index >= 0 and units[index][0] <= int(match[3], 16) < units[index][1]:
-                    unit = units[index][2]
-            if kind == "function" and unit:
-                config.linkage[name].add(unit)
-            if c_name_in_cpp(name, kind, unit):
-                config.found.append((symbols_path, (number, "c_name_in_cpp", name)))
+            index = bisect.bisect_right(starts, int(match[3], 16)) - 1
+            if index >= 0 and units[index][0] <= int(match[3], 16) < units[index][1]:
+                config.linkage[match[1]].add(units[index][2])
     return config
 
 
 def _config(project: Project, repo: str, revision: str | None, tree: set[str]) -> Config | None:
     """The config at a revision, when a check reads it."""
-    if not tree & (CONFIG_CHECKS | {"header_extern_c"}):
+    if "header_extern_c" not in tree:
         return None
-    config = read_config(project.root(repo), revision, _config_dirs(project, repo))
-    config.found = [(path, f) for path, f in config.found if f[1] in tree]
-    return config
+    return read_config(project.root(repo), revision, _config_dirs(project, repo))
 
 
 def _totals(scans: dict[str, _Scan], related: dict[str, list[tuple[int, str, str]]]) -> collections.Counter:
@@ -1563,8 +1466,8 @@ def describe(key: str, catalog: Iterable[Pattern] = ()) -> dict[str, str]:
 
 def audit(project: Project, repo: str, paths: list[str] | None = None, revision: str | None = None,
           top: int = 15) -> dict[str, Any]:
-    """Counts per pattern for the working tree (or a revision), the files holding the most debt, and the advisory
-    checks and members in the wrong class (beside the total, not in it)."""
+    """Counts per pattern for the working tree (or a revision), the files holding the most debt, and the members in
+    the wrong class (beside the total, not in it)."""
     catalog, tree, owned = _checks(project, repo)
     roots, exclude = _paths(project, repo, paths)
     root = project.root(repo)
@@ -1573,29 +1476,23 @@ def audit(project: Project, repo: str, paths: list[str] | None = None, revision:
     scans = {rel: _scan(rel, text, catalog, image) for rel, text in files}
     config = _config(project, repo, revision, tree)
     library = _library(root, revision, _library_roots(project, repo)) if "param_name_split" in tree else None
-    related = _relations(scans, tree, owned, config, library)
+    related = _relations(scans, tree, owned, config, library, image)
     totals = _totals(scans, related)
-    if config is not None:
-        totals.update(key for _, (_, key, _) in config.found)
-    debt = [p for p in catalog if p.group != ADVISORY_GROUP]
-    keys = {p.key for p in debt}
+    keys = {p.key for p in catalog}
     per_file = {}
     for rel, scan in scans.items():
-        found = collections.Counter({k: n for k, n in scan.counts.items() if k in keys}) + \
-            collections.Counter(key for _, key, _ in related.get(rel, []) if key in keys)
+        found = scan.counts + collections.Counter(key for _, key, _ in related.get(rel, []) if key in keys)
         if found:
             per_file[rel] = found
     groups = collections.Counter()
-    for pattern in debt:
+    for pattern in catalog:
         groups[pattern.group] += totals[pattern.key]
     worst = sorted(per_file.items(), key=lambda item: -sum(item[1].values()))[:top]
     return {"repo": repo, "revision": revision or "working tree", "paths": roots, "files": len(scans),
             "files_with_debt": len(per_file),
-            "counts": [{**describe(p.key, catalog), "label": p.label, "count": totals[p.key]} for p in debt],
-            "advisory": [{**describe(p.key, catalog), "label": p.label, "count": totals[p.key]}
-                         for p in catalog if p.group == ADVISORY_GROUP],
+            "counts": [{**describe(p.key, catalog), "label": p.label, "count": totals[p.key]} for p in catalog],
             "ownership": [{**describe(k), "label": OWNERSHIP[k][0], "count": totals[k]} for k in owned],
-            "groups": dict(groups), "total": sum(totals[p.key] for p in debt),
+            "groups": dict(groups), "total": sum(totals[p.key] for p in catalog),
             "worst_files": [{"path": rel, "total": sum(c.values()), "top": c.most_common(3)} for rel, c in worst]}
 
 
@@ -1616,20 +1513,21 @@ def _diff(root: Path, before: str, after: str | None, roots: list[str],
     its hunks}; an untracked file is one hunk adding all of it."""
     out: dict[str, list[Hunk]] = {}
     current = old = None
-    for line in _git(root, "diff", "-U0", "--no-renames", "--no-color", "--no-ext-diff", before,
+    header = False
+    for line in _git(root, "diff", "-U0", "--text", "--no-renames", "--no-color", "--no-ext-diff", before,
                      *([after] if after else []), "--", *roots).splitlines():
         if line.startswith("diff --git "):
-            current = None
-        elif line.startswith("--- "):
-            old = line[4:]
-        elif line.startswith("+++ "):
-            path = line[4:] if line[4:] != "/dev/null" else old or ""
-            current = path[2:] if path[:2] in ("a/", "b/") else path
-            if _keep(current, exclude):
+            current, header, old = None, True, None
+        elif header and line.startswith("--- "):   # ---/+++ are headers only before the first @@
+            old = _diff_path(line[4:])
+        elif header and line.startswith("+++ "):
+            current = _diff_path(line[4:]) or old
+            if current is not None and _keep(current, exclude):
                 out.setdefault(current, [])
             else:
                 current = None
         elif line.startswith("@@") and current is not None:
+            header = False
             hunk = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
             if hunk:
                 old_at, old_n, new_at, new_n = (int(n) if n is not None else 1 for n in hunk.groups())
@@ -1640,6 +1538,17 @@ def _diff(root: Path, before: str, after: str | None, roots: list[str],
                 lines = len((root / rel).read_text(encoding="utf-8", errors="replace").splitlines())
                 out[rel] = [(range(0), range(1, lines + 2))]
     return out
+
+
+def _diff_path(field: str) -> str | None:
+    """The path of a diff's ---/+++ line less its a/ or b/ (None for /dev/null). Git quotes a path holding special
+    characters and ends one holding a space with a tab."""
+    field = field.rstrip("\t")
+    if field == "/dev/null":
+        return None
+    if len(field) > 1 and field[0] == field[-1] == '"':
+        field = field[1:-1]
+    return field[2:]
 
 
 def _placed(counts: collections.Counter, found: list[tuple[str, tuple[int, str, str]]]) \
@@ -1655,7 +1564,9 @@ def _placed(counts: collections.Counter, found: list[tuple[str, tuple[int, str, 
 
 def _hunk(hunks: dict[str, list[Hunk]], rel: str, line: int, side: int) -> int | None:
     """The hunk of rel holding line among the lines `before` removed (side 0) or `after` added (side 1)."""
-    return next((index for index, hunk in enumerate(hunks.get(rel, ())) if line in hunk[side]), None)
+    found = hunks.get(rel, ())
+    index = bisect.bisect_right(found, line, key=lambda hunk: hunk[side].start) - 1   # sorted, disjoint per side
+    return index if index >= 0 and line in found[index][side] else None
 
 
 def compare(project: Project, repo: str, before: str, after: str | None = None,
@@ -1664,18 +1575,14 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
     at each, and what the change between them removed and added. Findings are matched by their text, so code that
     only moves (between functions or files) counts as neither, and neither does a hunk that rewrites a debt line
     without adding a finding of its check (a rename on the line). Also the findings the change added on its own lines,
-    and the advisory checks and members in the wrong class (beside the total, not in it). A header's extern "C" is
-    judged against the config at `after` on both sides, so only header edits move it."""
+    and the members in the wrong class (beside the total, not in it). A header's extern "C" is judged against the
+    config at `after` on both sides, so only header edits move it."""
     catalog, tree, owned = _checks(project, repo)
     roots, exclude = _paths(project, repo, paths)
     root = project.root(repo)
     image = image_range(project, repo)
     hunks = _diff(root, before, after, roots, exclude)
     head_config = _config(project, repo, after, tree)
-    base_config = head_config
-    if head_config is not None and _git(root, "diff", "--name-only", before, *([after] if after else []), "--",
-                                        *_config_dirs(project, repo)).strip():
-        base_config = _config(project, repo, before, tree)
     changed = set(hunks)
     files = _revision_files(root, after, roots, exclude) if after else _tree_files(root, roots, exclude)
     head = {rel: _scan(rel, text, catalog, image, keep=rel in changed) for rel, text in files}
@@ -1691,8 +1598,8 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
         moved = sorted(_diff(root, before, after, library_roots, [])) if library_roots else []
         base_library = {rel: sigs for rel, sigs in head_library.items() if rel not in moved} | \
             _library(root, before, moved)
-    head_related = _relations(head, tree, owned, head_config, head_library)
-    base_related = _relations(base, tree, owned, head_config, base_library)
+    head_related = _relations(head, tree, owned, head_config, head_library, image)
+    base_related = _relations(base, tree, owned, head_config, base_library, image)
     head_totals, base_totals = _totals(head, head_related), _totals(base, base_related)
 
     # Findings across files can change in files the change did not touch (a class gained a base, a class's other
@@ -1703,10 +1610,6 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
         (key, text) for scan in base_changed.values() for _, key, text in scan.found)
     rise.update(identity(key, text) for found in head_related.values() for _, key, text in found)
     fall.update(identity(key, text) for found in base_related.values() for _, key, text in found)
-    for side, config, totals in ((rise, head_config, head_totals), (fall, base_config, base_totals)):
-        if config is not None:
-            side.update((key, text) for _, (_, key, text) in config.found)
-            totals.update(key for _, (_, key, _) in config.found)
     rise, fall = rise - fall, fall - rise
     added, removed = collections.Counter(), collections.Counter()
     for (key, _), n in rise.items():
@@ -1722,7 +1625,6 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
         lines = {n for _, add in hunks[rel] for n in add}
         risen += [(rel, f) for f in head[rel].found + head_related.get(rel, []) if f[0] in lines]
     risen += [(rel, f) for rel, found in head_related.items() if rel not in changed for f in found]
-    risen += head_config.found if head_config is not None else []
     for rel, scan in base_changed.items():
         lines = {n for gone, _ in hunks[rel] for n in gone}
         fallen += [(rel, f) for f in scan.found + base_related.get(rel, []) if f[0] in lines]
@@ -1730,8 +1632,8 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
     placed = _placed(rise, risen)
     # A cross-file finding can appear on a line the change kept (its partner changed): list it there.
     rest = rise - collections.Counter(identity(f[1], f[2]) for _, f in placed)
-    kept = [(rel, f) for rel in sorted(changed & head.keys()) for f in head_related.get(rel, [])
-            if (rel, f) not in placed]
+    listed = {id(f) for _, f in placed}
+    kept = [(rel, f) for rel in sorted(changed & head.keys()) for f in head_related.get(rel, []) if id(f) not in listed]
     new = []
     for rel, (line, key, text) in placed + _placed(rest, kept):
         at = (rel, _hunk(hunks, rel, line, 1), key)
@@ -1739,7 +1641,7 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
             replaced[at] -= 1
             added[key] -= 1
             removed[key] -= 1
-        elif key not in ADVISORY:
+        else:
             new.append({"key": key, "path": rel, "line": line, "text": text})
 
     def row(key: str, label: str) -> dict[str, Any]:
@@ -1749,14 +1651,11 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
     def commit(revision: str | None) -> str | None:
         return _git(root, "rev-parse", "--verify", f"{revision}^{{commit}}").strip() if revision else None
 
-    rows = [row(p.key, p.label) for p in catalog if p.group != ADVISORY_GROUP]
-    advisory = [row(p.key, p.label) for p in catalog if p.group == ADVISORY_GROUP]
-    sums = ("before", "after", "delta", "removed", "added")
+    rows = [row(p.key, p.label) for p in catalog]
     return {"repo": repo, "before": before, "after": after or "working tree", "before_commit": commit(before),
             "after_commit": commit(after), "files_changed": len(changed), "rows": rows,
-            "advisory": advisory, "ownership": [row(k, OWNERSHIP[k][0]) for k in owned],
-            "total": {k: sum(r[k] for r in rows) for k in sums},
-            "advisory_total": {k: sum(r[k] for r in advisory) for k in sums},
+            "ownership": [row(k, OWNERSHIP[k][0]) for k in owned],
+            "total": {k: sum(r[k] for r in rows) for k in ("before", "after", "delta", "removed", "added")},
             "worse": [r for r in rows if r["delta"] > 0], "new": new}
 
 
@@ -1766,12 +1665,11 @@ def findings(text: str, catalog: Iterable[Pattern], header: bool = False, skip: 
     what is debt only in a source file (a class declared with virtuals) is none. `skip` names patterns the caller
     judges itself (check reads the parser-judged checks against the whole file, `parsed_findings`). Of those,
     `extern "C"`, string casts, register names, no-ops and padding accesses are judged in a piece; the rest need the
-    whole file, its path, the whole tree or the config. Advisory checks are never findings."""
+    whole file, its path, the whole tree or the config."""
     code = _strip_comments(text)
     out = []
     for pattern in catalog:
-        if (header and pattern.sources_only) or pattern.key in skip or _elsewhere(pattern) or \
-                pattern.group == ADVISORY_GROUP:
+        if (header and pattern.sources_only) or pattern.key in skip or _elsewhere(pattern):
             continue
         if _parsed(pattern):
             judge = {"extern_c": lambda: [f'extern "C" {name}' for _, name in extern_c_debt(text)],

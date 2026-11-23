@@ -571,8 +571,8 @@ class QualityTests(unittest.TestCase):
                 'extern int g_owned;\nint g_owned = 1;\nDECLARE_THING(TEnemy);\nextern "C" void OSReport(const char*, ...);\n'
                 'namespace ns {\nvoid hidden(int);\n}\nstruct S { void method(); };\n'
                 'void use() { extern int g_inner; void inner(int); }\n')
-        self.assertEqual(quality.local_decl_debt(text), [(2, "void heap_free(void *)"), (3, "extern int g_frame"),
-                                                         (13, "void hidden(int)")])
+        self.assertEqual(quality.local_decl_debt(text)[0], [(2, "void heap_free(void *)"), (3, "extern int g_frame"),
+                                                            (13, "void hidden(int)")])
         catalog = quality.patterns()
         self.assertEqual(quality.count(text, catalog)["local_decl"], 3)
         self.assertEqual(quality.count(text, catalog, rel="include/enemy.h")["local_decl"], 0)   # a header's job
@@ -616,28 +616,52 @@ class QualityTests(unittest.TestCase):
         plain = "void TFoo::step(int count) {\n    s32 total = count;\n    if (count) { work(total); }\n}\n"
         self.assertFalse(+quality.count(plain, catalog, rel="src/foo.cpp"))
 
-    def test_advisory_checks_are_counted_beside_the_total(self):
-        """Advisory checks also fire on clean code: counted, but neither debt in the total nor a finding to fix."""
+    def test_register_names_are_locals_and_parameters(self):
+        """A register name counts on a local or a parameter, never on a field (u16 f4; often names its offset) and
+        never r0-r2 (scratch, the stack pointer and the SDA2 base under the EABI)."""
         catalog = quality.patterns()
-        text = "void f(TFoo *p) {\n    u32 value_2e = 1;\n    if (p != 0U) g(value_2e);\n}\n"
-        found = quality.count(text, catalog, rel="src/a.cpp")
-        self.assertEqual((found["offset_suffix_name"], found["zero_u_compare"]), (1, 1))
-        self.assertEqual({"offset_suffix_name", "zero_u_compare"}, quality.ADVISORY)
-        self.assertEqual(quality.findings(text, catalog), [])
+        text = ("struct TBox {\n    u16 f4;\n    s32 r30;\n};\nvoid move(s32 r3);\n"
+                "void TBox::step(f32 f1) {\n    s32 r0 = 1;\n    s32 r31 = r0;\n}\n")
+        self.assertEqual([f for f in quality.parsed_findings(text, catalog, "src/box.cpp") if f[1] == "register_name"],
+                         [(5, "register_name", "void move(s32 r3);"), (6, "register_name", "void TBox::step(f32 f1) {"),
+                          (8, "register_name", "s32 r31 = r0;")])
 
-    def test_header_extern_c_and_c_names_read_the_config(self):
-        """A header's extern "C" on a function a C++ unit defines, and a C name for a C++ unit's function, are read
-        from config.yml's symbols.txt and splits.txt; a C unit's function keeps its C linkage."""
+    def test_this_aliases_and_self_receivers(self):
+        """`T *self = this;` and a cast of this, also through `struct T *`, alias this (this_alias); a `self`
+        parameter or a `self` set from anything else is a C-style receiver (self_param)."""
+        catalog = quality.patterns()
+        text = ("void TBox::a() {\n    TBox *self = this;\n}\nvoid TBox::b() {\n    TBox *o = (struct TBox *)this;\n}\n"
+                "void box_c(TBox *self) {\n    TBox *cursor = this;\n}\nvoid box_d(void *arg) {\n"
+                "    TBox *self = (TBox *)arg;\n}\n")
+        found = quality.count(text, catalog, rel="src/box.cpp")
+        self.assertEqual((found["this_alias"], found["self_param"]), (2, 2))
+
+    def test_block_declarations_of_the_files_own_names(self):
+        """A prototype or extern inside a function body counts only for a name the file does not define."""
+        catalog = quality.patterns()
+        text = ("static void helper(int);\nint g_count;\nvoid run() {\n    void helper(int);\n"
+                "    extern int g_count;\n    extern int g_other;\n}\nstatic void helper(int n) { }\n")
+        self.assertEqual([f for f in quality.parsed_findings(text, catalog, "src/run.cpp") if f[1] == "local_decl"],
+                         [(6, "local_decl", "extern int g_other;")])
+
+    def test_header_extern_c_reads_the_config(self):
+        """A header's extern "C" on a function a C++ unit defines is read from config.yml's symbols.txt and
+        splits.txt; a C unit's function keeps its C linkage, and so does a unit configure.py links as middleware."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             files = {
                 "config/G/config.yml": "symbols: config/G/symbols.txt\nsplits: config/G/splits.txt\n",
                 "config/G/splits.txt": "src/unit.cpp:\n\t.text       start:0x80003100 end:0x80003200\n\n"
-                                       "src/os.c:\n\t.text       start:0x80003200 end:0x80003300\n",
+                                       "src/os.c:\n\t.text       start:0x80003200 end:0x80003300\n\n"
+                                       "src/lib/codec.cpp:\n\t.text       start:0x80003300 end:0x80003400\n",
                 "config/G/symbols.txt": "update_all = .text:0x80003100; // type:function size:0x10\n"
-                                        "OSReport = .text:0x80003200; // type:function size:0x10\n",
+                                        "OSReport = .text:0x80003200; // type:function size:0x10\n"
+                                        "codec_init = .text:0x80003300; // type:function size:0x10\n",
+                "configure.py": "MIDDLEWARE: list[tuple[int, str]] = [\n    (0x80003300, 'codec'),\n]\n"
+                                "MIDDLEWARE_END = 0x80003400\n",
                 "include/unit.h": '#ifdef __cplusplus\nextern "C" {\n#endif\nvoid update_all(void);\n'
-                                  "void OSReport(const char *, ...);\n#ifdef __cplusplus\n}\n#endif\n",
+                                  "void OSReport(const char *, ...);\nvoid codec_init(void);\n"
+                                  "#ifdef __cplusplus\n}\n#endif\n",
                 "src/unit.cpp": '#include "unit.h"\nvoid update_all(void) { }\n',
             }
             for rel, text in files.items():
@@ -650,10 +674,10 @@ class QualityTests(unittest.TestCase):
             for revision in (None, "HEAD"):
                 audit = quality.audit(project, "decomp", revision=revision)
                 counts = {r["key"]: r["count"] for r in audit["counts"]}
-                self.assertEqual((counts["header_extern_c"], counts["c_name_in_cpp"]), (1, 1), revision)
+                self.assertEqual(counts["header_extern_c"], 1, revision)
                 self.assertEqual(audit["total"], sum(counts.values()))
             (root / "include/unit.h").write_text(
-                '#ifdef __cplusplus\nextern "C" {\n#endif\nvoid OSReport(const char *, ...);\n'
+                '#ifdef __cplusplus\nextern "C" {\n#endif\nvoid OSReport(const char *, ...);\nvoid codec_init(void);\n'
                 "#ifdef __cplusplus\n}\n#endif\nvoid update_all(void);\n", encoding="utf-8")
             delta = quality.compare(project, "decomp", "HEAD")
             row = next(r for r in delta["rows"] if r["key"] == "header_extern_c")
@@ -734,32 +758,11 @@ class QualityTests(unittest.TestCase):
                 self.assertEqual((row["removed"], row["added"]), (removed, added), edit)
                 self.assertEqual(len(delta["new"]), added)
 
-    def test_constructors_naming_another_class(self):
-        """A constructor setting m_name to a string other than its class's name, spelled as a literal or as a
-        constant with one value over the tree; a constant with two values is ambiguous and not judged."""
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "src").mkdir()
-            (root / "src/a.cpp").write_text(
-                'static const char *kName = "TPanel";\nstatic const char *kOther = "TBox";\n'
-                'TButton::TButton() {\n    m_name = "TButton";\n}\nTWidget::TWidget() {\n    m_name = "TLabel";\n}\n'
-                "TPanel::TPanel() {\n    m_name = kName;\n}\nTFrame::TFrame() {\n    m_name = kName;\n}\n"
-                "TShape::TShape() {\n    m_name = kOther;\n}\n", encoding="utf-8")
-            (root / "src/b.cpp").write_text('static const char *kOther = "TCircle";\n', encoding="utf-8")
-            git(root, "init", "-q")
-            project = self.project(root)
-            audit = quality.audit(project, "decomp")
-            self.assertEqual({r["key"]: r["count"] for r in audit["counts"]}["ctor_name_string"], 2)
-            scans = {rel: quality._scan(rel, (root / rel).read_text(), quality.patterns(), None)
-                     for rel in ("src/a.cpp", "src/b.cpp")}
-            self.assertEqual(quality.ctor_names(scans), {"src/a.cpp": [
-                (7, "ctor_name_string", 'TWidget: m_name "TLabel"'),
-                (13, "ctor_name_string", 'TFrame: m_name "TPanel"')]})
-
     def test_units_and_classes_outside_their_home(self):
-        """A unit named after an address is a fragment not in its real unit; a class declared in a C++ source file
-        is a stand-in or a layout kept out of its header; a class with a body in two files is a copy (the header's
-        copy is the first). C files may keep their own structs, and a nested class is part of its outer one."""
+        """A unit named after an address is a fragment not in its real unit, and so is a header named after one
+        that no unit shares a name with (one rename fixes both); a class declared in a C++ source file is a stand-in
+        or a layout kept out of its header; a class with a body in two files is a copy (the header's copy is the
+        first). C files may keep their own structs, and a nested class is part of its outer one."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "src").mkdir()
@@ -769,6 +772,8 @@ class QualityTests(unittest.TestCase):
                 "src/enemy.cpp": '#include "enemy.h"\nclass TEnemy { };\nstruct EnemyView : TObject {\n    u8 pad_0[0x30];\n};\n'
                                  "typedef struct { int x; } Pair;\nenum class Mode { A };\n",
                 "src/TEnemy_80123456.cpp": "struct Pair { int x; };\n",
+                "include/TEnemy_80123456.h": "void enemy_fragment(void);\n",
+                "include/TBoss_80124000.h": "void boss_fragment(void);\n",
                 "src/grid.c": "struct Cell { int x; };\n",
                 "src/grid2.c": "struct Cell { int y; };\n",
                 "src/hud.cpp": "static struct { int x; } state;\n",
@@ -787,7 +792,10 @@ class QualityTests(unittest.TestCase):
             data = quality.audit(project, "decomp", top=10)
             counts = {c["key"]: c["count"] for c in data["counts"]}
             # TEnemy, EnemyView, Pair (by its typedef) in enemy.cpp; Pair in the address unit
-            self.assertEqual((counts["address_unit"], counts["local_class"], counts["duplicate_class"]), (1, 4, 2))
+            self.assertEqual((counts["address_unit"], counts["local_class"], counts["duplicate_class"]), (2, 4, 2))
+            listed = {row["path"] for row in data["worst_files"]}
+            self.assertIn("include/TBoss_80124000.h", listed)
+            self.assertNotIn("include/TEnemy_80123456.h", listed)                # src/TEnemy_80123456.cpp has its name
             worst = {row["path"]: dict(row["top"]) for row in data["worst_files"]}
             self.assertEqual(worst["src/enemy.cpp"]["duplicate_class"], 2)       # TEnemy (the header's is first), Pair (src/TEnemy_80123456.cpp sorts first)
             self.assertEqual(worst["src/enemy.cpp"]["local_class"], 3)
