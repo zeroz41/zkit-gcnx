@@ -622,7 +622,7 @@ class QualityTests(unittest.TestCase):
         text = "void f(TFoo *p) {\n    u32 value_2e = 1;\n    if (p != 0U) g(value_2e);\n}\n"
         found = quality.count(text, catalog, rel="src/a.cpp")
         self.assertEqual((found["offset_suffix_name"], found["zero_u_compare"]), (1, 1))
-        self.assertEqual({"offset_suffix_name", "zero_u_compare", "param_name_mismatch"}, quality.ADVISORY)
+        self.assertEqual({"offset_suffix_name", "zero_u_compare"}, quality.ADVISORY)
         self.assertEqual(quality.findings(text, catalog), [])
 
     def test_header_extern_c_and_c_names_read_the_config(self):
@@ -663,8 +663,8 @@ class QualityTests(unittest.TestCase):
     def test_parameter_names_pair_prototypes_with_definitions(self):
         """A prototype pairs with the one definition of its name and parameter count, also one under libs/ (read to
         pair, never counted). A placeholder on one side and a real name on the other is debt on the placeholder's
-        line (param_name_split); two real names (a letter starting the other side's name is one) are advisory
-        (param_name_mismatch). A change fixing either side removes the finding and adds none."""
+        line (param_name_split); two real names (a letter starting the other side's name is one) are not flagged. A
+        change fixing either side removes the finding and adds none."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             files = {
@@ -685,16 +685,13 @@ class QualityTests(unittest.TestCase):
             project = self.project(root)
             audit = quality.audit(project, "decomp")
             counts = {r["key"]: r["count"] for r in audit["counts"]}
-            advisory = {r["key"]: r["count"] for r in audit["advisory"]}
-            self.assertEqual((counts["param_name_split"], advisory["param_name_mismatch"]), (3, 2))
+            self.assertEqual(counts["param_name_split"], 3)
             scans = {rel: quality._scan(rel, text, quality.patterns(), None) for rel, text in files.items()
                      if not rel.startswith("libs/")}
             library = {"libs/sdk/wait.c": quality.signatures(quality._Source(files["libs/sdk/wait.c"]))}
             found = quality._relations(scans, quality.TREE_CHECKS, [], None, library)
             self.assertEqual(sorted(found["include/widget.h"]), [
                 (3, "param_name_split", "arg0 (value at widget.cpp:2)"),
-                (5, "param_name_mismatch", "dx (step at widget.cpp:3)"),
-                (5, "param_name_mismatch", "x (xPos at widget.cpp:3)"),
                 (8, "param_name_split", "arg0 (ticks at wait.c:1)")])
             self.assertEqual(found["src/widget.cpp"], [(2, "param_name_split", "arg1 (count at widget.h:4)")])
             (root / "include/widget.h").write_text(files["include/widget.h"].replace("int arg0,", "int value,"),

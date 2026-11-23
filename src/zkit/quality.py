@@ -207,8 +207,6 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
        r"(?!\s*[:=]\s*\d)", "advisory", blocks_port=False),
     _p("zero_u_compare", "compares with 0U (p != 0U)", r"[!=]=\s*0[uU][lL]?\b|\b0[uU][lL]?\s*[!=]=", "advisory",
        blocks_port=False, needle=r"0[uU]"),
-    _p("param_name_mismatch", "parameters named differently in prototype and definition", _NEVER, "advisory",
-       blocks_port=False),
 )
 SUMMARY_GROUPS = ("linkage", "layout", "types", "names", "vtables", "decompiler", "placement", "asm")
 # How a report names each check, with what it looks like (a manifest's own pattern shows its label), and each
@@ -266,8 +264,6 @@ DISPLAY = {   # key -> (name, example)
     "inline_asm": ("Inline assembly", "asm { ... }"),
     "offset_suffix_name": ("Offset-suffixed names", "get_flag_c8, value_2e"),
     "zero_u_compare": ("Compares with 0U", "p != 0U"),
-    "param_name_mismatch": ("Parameters named differently in prototype and definition",
-                            "f(int count); / f(int size) {"),
 }
 GROUP_TITLES = {"linkage": "Linkage", "layout": "Layout", "types": "Types", "decompiler": "Decompiler output",
                 "names": "Names", "vtables": "Vtables", "placement": "Units and classes", "asm": "Assembly",
@@ -1063,15 +1059,13 @@ def ownership(facts: ClassFacts, classes: ClassMap) -> list[tuple[int, str, str]
 
 # --- parameter names and class names, compared across files ------------------------------------------------------
 # A prototype pairs with the one definition of the same qualified name and parameter count. A parameter named by a
-# placeholder on one side and a real name on the other is debt (param_name_split); two different real names are
-# advisory (param_name_mismatch, clang-tidy's readability-inconsistent-declaration-parameter-name). A constructor
-# that sets m_name (the game's own name for the class) to a string other than its class's name is ctor_name_string.
+# placeholder on one side and a real name on the other is debt (param_name_split). A constructor that sets m_name
+# (the game's own name for the class) to a string other than its class's name is ctor_name_string.
 
 _PARAM_PLACEHOLDER = re.compile(
     r"^_*(?:[a-z]?arg_?\d+|a\d+|param_?\d+|p\d+|var_?[rf]?\d+\w*|temp_\w+|tmp_?\d*|sp[0-9A-Fa-f]+"
     r"|pad_?\w*|unk\w*|lbl_\w*|field_?\w*|m_[0-9A-Fa-f]+|local_\w+|r\d+|f\d+|v\d+|ptr_?\d*|unused\w*"
     r"|\w*_[0-9A-Fa-f]{6,8}|[A-Za-z]|saved_r\d+|in_r\d+|in_f\d+)$")
-PARAM_CHECKS = {"param_name_split", "param_name_mismatch"}
 _PARTNER_LINE = re.compile(r":\d+\)$")
 _STRING = re.compile(r'\s*"((?:\\.|[^"\\\n])*)"\s*')
 _NAME_STORE = re.compile(r"\bm_name\s*=([^;]*);")
@@ -1108,8 +1102,7 @@ def signatures(source: _Source) -> list[tuple[bool, str, tuple[tuple[str, int], 
 
 
 def param_names(files: Iterable[tuple[str, list]], counted: Container[str]) -> dict[str, list[tuple[int, str, str]]]:
-    """param_name_split and param_name_mismatch by the file holding the line to fix (the placeholder's; the
-    prototype's for a mismatch), for files in `counted`."""
+    """param_name_split by the file holding the line to fix (the placeholder's), for files in `counted`."""
     defined, declared = collections.defaultdict(list), collections.defaultdict(list)
     for rel, sigs in files:
         for definition, name, params in sigs:
@@ -1125,11 +1118,7 @@ def param_names(files: Iterable[tuple[str, list]], counted: Container[str]) -> d
                 if not dn or not fn or dn == fn:
                     continue
                 weak = [n for n, o in ((dn, fn), (fn, dn)) if _placeholder(n, o)]
-                if len(weak) == 2:
-                    continue
-                if not weak:
-                    if rel in counted:
-                        out[rel].append((dl, "param_name_mismatch", f"{dn} ({fn} at {_base(def_rel)}:{fl})"))
+                if len(weak) != 1:
                     continue
                 site, line, good, other, other_line = (rel, dl, fn, def_rel, fl) if weak[0] == dn else \
                     (def_rel, fl, dn, rel, dl)
@@ -1146,7 +1135,7 @@ def _base(rel: str) -> str:
 
 def identity(key: str, text: str) -> tuple[str, str]:
     """What a finding is matched by between revisions: (key, text), less a partner's line (other edits move it)."""
-    return (key, _PARTNER_LINE.sub(")", text)) if key in PARAM_CHECKS else (key, text)
+    return (key, _PARTNER_LINE.sub(")", text)) if key == "param_name_split" else (key, text)
 
 
 def name_strings(text: str, source: _Source) -> tuple[list[tuple[str, str]], list[tuple[int, str, str]]]:
@@ -1210,7 +1199,7 @@ PARSED = {
 }
 # judged over every file at once: copies of a class (`duplicates`), a header's extern "C" on a function a C++ unit
 # defines (`extern_c_functions` against the config), parameter names (`param_names`) and m_name (`ctor_names`)
-TREE_CHECKS = {"duplicate_class", "header_extern_c", "param_name_split", "param_name_mismatch", "ctor_name_string"}
+TREE_CHECKS = {"duplicate_class", "header_extern_c", "param_name_split", "ctor_name_string"}
 CONFIG_CHECKS = {"c_name_in_cpp"}   # read from symbols.txt and splits.txt
 ADVISORY = {p.key for p in DEFAULT_PATTERNS if p.group == ADVISORY_GROUP}
 
@@ -1375,7 +1364,7 @@ def _scan(rel: str, text: str, catalog: list[Pattern], image: tuple[int, int] | 
     c_functions = extern_c_functions(text, source) if header and "extern" in text else []
     tree = {p.key for p in catalog if _elsewhere(p)}
     return _Scan(collections.Counter(key for _, key, _ in found), bodies, class_facts(rel, source),
-                 found if keep else None, c_functions, signatures(source) if tree & PARAM_CHECKS else [],
+                 found if keep else None, c_functions, signatures(source) if "param_name_split" in tree else [],
                  *(name_strings(text, source) if "ctor_name_string" in tree else ([], [])))
 
 
@@ -1391,18 +1380,18 @@ def _checks(project: Project | None, repo: str | None) -> tuple[list[Pattern], s
 def _relations(scans: dict[str, _Scan], tree: set[str], owned: list[str], config: "Config | None" = None,
                library: dict[str, list] | None = None) -> dict[str, list[tuple[int, str, str]]]:
     """Findings that depend on more than one file, by the file holding them: copies of a class declared in more than
-    one file, a header's extern "C" on functions a C++ unit defines, parameters named differently in a prototype and
-    its definition (library: signatures() of files read only to pair them), constructors naming another class, and
-    members in the wrong class (ownership)."""
+    one file, a header's extern "C" on functions a C++ unit defines, placeholder parameters named on the other side
+    (library: signatures() of files read only to pair them), constructors naming another class, and members in the
+    wrong class (ownership)."""
     out: dict[str, list[tuple[int, str, str]]] = collections.defaultdict(list)
     if "duplicate_class" in tree:
         for rel, copies in duplicates({rel: scan.bodies for rel, scan in scans.items() if scan.bodies}).items():
             out[rel] += [(line, "duplicate_class", name) for line, name in copies]
-    if tree & PARAM_CHECKS:
+    if "param_name_split" in tree:
         files = [*sorted((rel, scan.signatures) for rel, scan in scans.items()),
                  *sorted((rel, sigs) for rel, sigs in (library or {}).items() if rel not in scans)]
         for rel, found in param_names(files, scans).items():
-            out[rel] += [f for f in found if f[1] in tree]
+            out[rel] += found
     if "ctor_name_string" in tree:
         for rel, found in ctor_names(scans).items():
             out[rel] += found
@@ -1583,7 +1572,7 @@ def audit(project: Project, repo: str, paths: list[str] | None = None, revision:
     image = image_range(project, repo)
     scans = {rel: _scan(rel, text, catalog, image) for rel, text in files}
     config = _config(project, repo, revision, tree)
-    library = _library(root, revision, _library_roots(project, repo)) if tree & PARAM_CHECKS else None
+    library = _library(root, revision, _library_roots(project, repo)) if "param_name_split" in tree else None
     related = _relations(scans, tree, owned, config, library)
     totals = _totals(scans, related)
     if config is not None:
@@ -1696,7 +1685,7 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
                     if rel in changed}
     base = {rel: scan for rel, scan in head.items() if rel not in changed} | base_changed
     head_library = base_library = None
-    if tree & PARAM_CHECKS:
+    if "param_name_split" in tree:
         library_roots = _library_roots(project, repo)
         head_library = _library(root, after, library_roots)
         moved = sorted(_diff(root, before, after, library_roots, [])) if library_roots else []
