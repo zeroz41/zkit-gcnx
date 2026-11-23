@@ -14,9 +14,9 @@ import collections
 import itertools
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Container, Iterable
 
 from .project import Project
 
@@ -166,6 +166,12 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
        r"[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_(?=[0-9A-F]*\d)[0-9A-F]{5,8}_[A-Za-z0-9]\w*\b", "names"),
     # any other identifier holding an address of the image (`address_idents`)
     _p("address_ident", "other address-named identifiers (Thing_80123456)", _NEVER, "names"),
+    # a parameter named by a placeholder in a prototype or its definition and really named in the other, and a
+    # constructor naming its object after another class (`param_names`, `ctor_names`)
+    _p("param_name_split", "placeholder parameters named on the other side (f(int arg0); / f(int count) {)", _NEVER,
+       "names", blocks_port=False),
+    _p("ctor_name_string", 'constructors naming the object after another class (m_name = "TButton")', _NEVER,
+       "names", blocks_port=False),
     _p("vtable_symbol", "vtable symbols spelled in source (__vt__, _ZTV)", r"\b__vt__\d+\w+|\b_ZTV\w+|\b\w+__vtable\b",
        "vtables"),
     _p("hand_vtable", "hand-written function tables standing in for vtables",
@@ -199,17 +205,9 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
        r"|\b(?!(?:lbl|fn|FUN|func|sub|DAT|PTR|dat|temp|var|arg|sp|unk|field|m|pad)_)[A-Za-z][A-Za-z0-9]*"
        r"(?:_[A-Za-z][A-Za-z0-9]*)*_(?=[0-9A-Fa-f]*\d)(?=[0-9A-Fa-f]*[A-Fa-f]|\d{3})[0-9A-Fa-f]{2,4}\b"
        r"(?!\s*[:=]\s*\d)", "advisory", blocks_port=False),
-    _p("cast_call", "calls through a cast (((T *)p)->update())",
-       r"\(\s*\(\s*(?:const\s+)?[A-Za-z_][\w:]*\s*\*\s*\)\s*\(?\s*&?\s*(?!this\b)[A-Za-z_][\w.\->\[\]]*\s*\)?\s*\)"
-       r"\s*->\s*~?\w+\s*\(", "advisory", blocks_port=False),
     _p("zero_u_compare", "compares with 0U (p != 0U)", r"[!=]=\s*0[uU][lL]?\b|\b0[uU][lL]?\s*[!=]=", "advisory",
        blocks_port=False, needle=r"0[uU]"),
-    _p("pad_shape", "padding arrays (u8 reserved[8];)",
-       r"\b(?:m_)?(?:_+pad\w*|pad(?!_[0-9A-Fa-f]{1,4}(?:_\d+)?\b)\w*|padding\w*|unused\w*|reserved\w*|filler\w*|"
-       r"gap\w*|skip\w*|dummy\w*)\s*\[[^\]]+\]\s*;", "advisory", blocks_port=False,
-       needle=r"pad|unused|reserved|filler|gap|skip|dummy"),
-    _p("offset_symbol", "offset-named symbols (set_field_1c__7TWidgetFv)", _NEVER, "advisory", blocks_port=False),
-    _p("void_ptr_param", "void * parameters in symbols (create__7TWidgetFPv)", _NEVER, "advisory",
+    _p("param_name_mismatch", "parameters named differently in prototype and definition", _NEVER, "advisory",
        blocks_port=False),
 )
 SUMMARY_GROUPS = ("linkage", "layout", "types", "names", "vtables", "decompiler", "placement", "asm")
@@ -254,6 +252,9 @@ DISPLAY = {   # key -> (name, example)
     "function_placeholder": ("Address-named functions", "fn_80123456, TEnemy__sub_80123456"),
     "address_in_name": ("Names built on an address", "call_36A90_with_1"),
     "address_ident": ("Other address-named identifiers", "Thing_80123456"),
+    "param_name_split": ("Placeholder parameters named on the other side", "f(int arg0); / f(int count) {"),
+    "ctor_name_string": ("Constructors naming the object after another class",
+                         'TWidget::TWidget() { m_name = "TButton"; }'),
     "vtable_symbol": ("Vtable symbols in source", "__vt__6TEnemy"),
     "hand_vtable": ("Hand-written vtables", "void *TEnemy_vtable[] = {"),
     "filler_virtual": ("Filler virtuals", "virtual void reserved_3();"),
@@ -264,11 +265,9 @@ DISPLAY = {   # key -> (name, example)
     "duplicate_class": ("Classes declared in more than one file", "class TEnemy {"),
     "inline_asm": ("Inline assembly", "asm { ... }"),
     "offset_suffix_name": ("Offset-suffixed names", "get_flag_c8, value_2e"),
-    "cast_call": ("Calls through a cast", "((T *)p)->update()"),
     "zero_u_compare": ("Compares with 0U", "p != 0U"),
-    "pad_shape": ("Padding arrays", "u8 reserved[8];"),
-    "offset_symbol": ("Offset-named symbols", "set_field_1c__7TWidgetFv"),
-    "void_ptr_param": ("void * parameters in symbols", "create__7TWidgetFPv"),
+    "param_name_mismatch": ("Parameters named differently in prototype and definition",
+                            "f(int count); / f(int size) {"),
 }
 GROUP_TITLES = {"linkage": "Linkage", "layout": "Layout", "types": "Types", "decompiler": "Decompiler output",
                 "names": "Names", "vtables": "Vtables", "placement": "Units and classes", "asm": "Assembly",
@@ -407,6 +406,7 @@ class _Source:
     def __init__(self, text: str):
         self.text = text
         self._code = self._defs = self._bodies = self._line = self._kept = None
+        self._prototypes: list = []
         self._matches: dict[tuple[str, str], list[re.Match]] = {}
 
     @property
@@ -420,8 +420,15 @@ class _Source:
     def defs(self) -> list:
         if self._defs is None:
             from .cxx import definitions
-            self._defs = definitions(self.text, self.code)
+            self._defs = definitions(self.text, self.code, self._prototypes)
         return self._defs
+
+    @property
+    def prototypes(self) -> list:
+        """Function declarations ending in `;`, found with `defs`."""
+        if self._defs is None:
+            _ = self.defs
+        return self._prototypes
 
     @property
     def bodies(self) -> list[tuple[int, str, str]]:
@@ -992,10 +999,9 @@ def class_facts(rel: str, source: _Source) -> ClassFacts:
         code = source.code
         if _THIS_CAST.search(code) or re.search(_BYTE_THIS, code):
             for definition in source.defs:
-                parts = [re.sub(r"<.*", "", part) for part in definition.qualified.split("::")]
-                if len(parts) < 2:
+                owner, (start, end) = definition.owner, definition.span
+                if owner is None:
                     continue
-                owner, (start, end) = parts[-2], definition.span
                 body = code[start:end]
                 for match in _THIS_CAST.finditer(body):
                     this_casts.append((owner, match[1] or match[2], source.line(start + match.start())))
@@ -1055,6 +1061,134 @@ def ownership(facts: ClassFacts, classes: ClassMap) -> list[tuple[int, str, str]
     return out + [(line, "subobject_call", call[:120]) for call, line in facts.subobject_calls]
 
 
+# --- parameter names and class names, compared across files ------------------------------------------------------
+# A prototype pairs with the one definition of the same qualified name and parameter count. A parameter named by a
+# placeholder on one side and a real name on the other is debt (param_name_split); two different real names are
+# advisory (param_name_mismatch, clang-tidy's readability-inconsistent-declaration-parameter-name). A constructor
+# that sets m_name (the game's own name for the class) to a string other than its class's name is ctor_name_string.
+
+_PARAM_PLACEHOLDER = re.compile(
+    r"^_*(?:[a-z]?arg_?\d+|a\d+|param_?\d+|p\d+|var_?[rf]?\d+\w*|temp_\w+|tmp_?\d*|sp[0-9A-Fa-f]+"
+    r"|pad_?\w*|unk\w*|lbl_\w*|field_?\w*|m_[0-9A-Fa-f]+|local_\w+|r\d+|f\d+|v\d+|ptr_?\d*|unused\w*"
+    r"|\w*_[0-9A-Fa-f]{6,8}|[A-Za-z]|saved_r\d+|in_r\d+|in_f\d+)$")
+PARAM_CHECKS = {"param_name_split", "param_name_mismatch"}
+_PARTNER_LINE = re.compile(r":\d+\)$")
+_STRING = re.compile(r'\s*"((?:\\.|[^"\\\n])*)"\s*')
+_NAME_STORE = re.compile(r"\bm_name\s*=([^;]*);")
+
+
+def _placeholder(name: str, other: str) -> bool:
+    """A decompiler-style parameter name (arg0, param_1, unk_4, a lone letter). A letter that starts the other
+    side's real name abbreviates it (x / xPos) and is a name."""
+    name, other = name.rstrip("_"), other.rstrip("_")
+    return bool(_PARAM_PLACEHOLDER.match(name)) and (len(name) > 1 or not other.lower().startswith(name.lower())
+                                                     or bool(_PARAM_PLACEHOLDER.match(other)))
+
+
+def _param_names(code: str, span: tuple[int, int], line) -> tuple[tuple[str, int], ...]:
+    """(name or "", line) of each parameter in the list whose parentheses are at span."""
+    from .cxx import _NOT_A_NAME
+    inner = code[span[0] + 1:span[1]]
+    if inner.strip() in ("", "void"):
+        return ()
+    out, commas = [], _top_level(inner, ",")
+    for a, b in zip([0, *(i + 1 for i in commas)], [*commas, len(inner)]):
+        piece = inner[a:b]
+        equals = _top_level(piece, "=")
+        found = _declared(piece[:equals[0]] if equals else piece)
+        name = found[0] if found and not found[1] and found[0] not in _NOT_A_NAME else ""
+        out.append((name, line(span[0] + 1 + a + len(piece) - len(piece.lstrip()))))
+    return tuple(out)
+
+
+def signatures(source: _Source) -> list[tuple[bool, str, tuple[tuple[str, int], ...]]]:
+    """(is a definition, qualified name, parameters) of each function prototype and definition in a file."""
+    return [(definition, d.qualified, _param_names(source.code, d.parens, source.line))
+            for definition, found in ((True, source.defs), (False, source.prototypes)) for d in found]
+
+
+def param_names(files: Iterable[tuple[str, list]], counted: Container[str]) -> dict[str, list[tuple[int, str, str]]]:
+    """param_name_split and param_name_mismatch by the file holding the line to fix (the placeholder's; the
+    prototype's for a mismatch), for files in `counted`."""
+    defined, declared = collections.defaultdict(list), collections.defaultdict(list)
+    for rel, sigs in files:
+        for definition, name, params in sigs:
+            (defined if definition else declared)[(name, len(params))].append((rel, params))
+    out: dict[str, list[tuple[int, str, str]]] = collections.defaultdict(list)
+    seen = set()
+    for key, prototypes in declared.items():
+        if len(defined.get(key, ())) != 1:
+            continue
+        def_rel, def_params = defined[key][0]
+        for rel, params in prototypes:
+            for (dn, dl), (fn, fl) in zip(params, def_params):
+                if not dn or not fn or dn == fn:
+                    continue
+                weak = [n for n, o in ((dn, fn), (fn, dn)) if _placeholder(n, o)]
+                if len(weak) == 2:
+                    continue
+                if not weak:
+                    if rel in counted:
+                        out[rel].append((dl, "param_name_mismatch", f"{dn} ({fn} at {_base(def_rel)}:{fl})"))
+                    continue
+                site, line, good, other, other_line = (rel, dl, fn, def_rel, fl) if weak[0] == dn else \
+                    (def_rel, fl, dn, rel, dl)
+                if site not in counted or (site, line, weak[0], good) in seen:
+                    continue
+                seen.add((site, line, weak[0], good))
+                out[site].append((line, "param_name_split", f"{weak[0]} ({good} at {_base(other)}:{other_line})"))
+    return dict(out)
+
+
+def _base(rel: str) -> str:
+    return rel.rsplit("/", 1)[-1]
+
+
+def identity(key: str, text: str) -> tuple[str, str]:
+    """What a finding is matched by between revisions: (key, text), less a partner's line (other edits move it)."""
+    return (key, _PARTNER_LINE.sub(")", text)) if key in PARAM_CHECKS else (key, text)
+
+
+def name_strings(text: str, source: _Source) -> tuple[list[tuple[str, str]], list[tuple[int, str, str]]]:
+    """String constants defined at file scope as (name, value), and each constructor's `m_name = ...` as
+    (line, class, right-hand side)."""
+    strings, stores = [], []
+    code = source.code
+    if re.search(r'=\s*"', text):
+        items: list[tuple[int, int, bool, bool]] = []
+        _file_scope(text, code, 0, len(code), False, items)
+        for begin, end, body, _ in items:
+            equals = [] if body else _top_level(code[begin:end], "=")
+            found = _declared(code[begin:begin + equals[0]]) if equals else None
+            value = _STRING.fullmatch(text, begin + equals[0] + 1, end) if found and not found[1] else None
+            if value:
+                strings.append((found[0], value[1]))
+    if "m_name" in code:
+        for d in source.defs:
+            if d.owner and d.name.split("::")[-1] == d.owner:
+                stores += [(source.line(m.start()), d.owner, text[m.start(1):m.end(1)].strip())
+                           for m in _NAME_STORE.finditer(code, *d.span)]
+    return strings, stores
+
+
+def ctor_names(scans: dict[str, _Scan]) -> dict[str, list[tuple[int, str, str]]]:
+    """ctor_name_string: m_name set to a literal, or to a constant with one value over the tree, that is not the
+    constructor's class."""
+    values = collections.defaultdict(set)
+    for scan in scans.values():
+        for name, value in scan.strings:
+            values[name].add(value)
+    out: dict[str, list[tuple[int, str, str]]] = collections.defaultdict(list)
+    for rel, scan in scans.items():
+        for line, owner, rhs in scan.name_stores:
+            literal = _STRING.fullmatch(rhs)
+            found = {literal[1]} if literal else values.get(rhs.split("::")[-1], set()) \
+                if re.fullmatch(r"[\w:]+", rhs) else set()
+            if len(found) == 1 and owner not in found:
+                out[rel].append((line, "ctor_name_string", f'{owner}: m_name "{min(found)}"'))
+    return dict(out)
+
+
 # Checks a parser judges, with what it needs: "file" a whole file and its path, "image" the image's address range.
 # Each takes (path or None, text, source, image) and gives [(1-based line, text of the finding)].
 PARSED = {
@@ -1074,10 +1208,10 @@ PARSED = {
     "offset_suffix_name": ((), lambda rel, text, source, image: suffix_names(source)),
     "local_class": (("file",), lambda rel, text, source, image: local_classes(rel, source)),
 }
-# judged over every file at once: copies of a class (`duplicates`), and a header's extern "C" on a function a C++
-# unit defines (`extern_c_functions` against the config)
-TREE_CHECKS = {"duplicate_class", "header_extern_c"}
-CONFIG_CHECKS = {"c_name_in_cpp", "offset_symbol", "void_ptr_param"}   # read from symbols.txt and splits.txt
+# judged over every file at once: copies of a class (`duplicates`), a header's extern "C" on a function a C++ unit
+# defines (`extern_c_functions` against the config), parameter names (`param_names`) and m_name (`ctor_names`)
+TREE_CHECKS = {"duplicate_class", "header_extern_c", "param_name_split", "param_name_mismatch", "ctor_name_string"}
+CONFIG_CHECKS = {"c_name_in_cpp"}   # read from symbols.txt and splits.txt
 ADVISORY = {p.key for p in DEFAULT_PATTERNS if p.group == ADVISORY_GROUP}
 
 
@@ -1226,6 +1360,9 @@ class _Scan:
     classes: ClassFacts
     found: list[tuple[int, str, str]] | None      # every finding (line, key, text), kept for changed files only
     c_functions: list[tuple[int, str]]            # a header's functions under extern "C": (line, name)
+    signatures: list = field(default_factory=list)    # see signatures()
+    strings: list = field(default_factory=list)       # see name_strings()
+    name_stores: list = field(default_factory=list)
 
 
 def _scan(rel: str, text: str, catalog: list[Pattern], image: tuple[int, int] | None, keep: bool = False) -> _Scan:
@@ -1236,8 +1373,10 @@ def _scan(rel: str, text: str, catalog: list[Pattern], image: tuple[int, int] | 
         bodies.setdefault(name, source.line(offset))
     header = Path(rel).suffix.lower() in HEADER_SUFFIXES
     c_functions = extern_c_functions(text, source) if header and "extern" in text else []
+    tree = {p.key for p in catalog if _elsewhere(p)}
     return _Scan(collections.Counter(key for _, key, _ in found), bodies, class_facts(rel, source),
-                 found if keep else None, c_functions)
+                 found if keep else None, c_functions, signatures(source) if tree & PARAM_CHECKS else [],
+                 *(name_strings(text, source) if "ctor_name_string" in tree else ([], [])))
 
 
 def _checks(project: Project | None, repo: str | None) -> tuple[list[Pattern], set[str], list[str]]:
@@ -1249,15 +1388,24 @@ def _checks(project: Project | None, repo: str | None) -> tuple[list[Pattern], s
     return catalog, tree, [k for k in OWNERSHIP if k not in set(config.get("disable", []))]
 
 
-def _relations(scans: dict[str, _Scan], tree: set[str], owned: list[str],
-               config: "Config | None" = None) -> dict[str, list[tuple[int, str, str]]]:
+def _relations(scans: dict[str, _Scan], tree: set[str], owned: list[str], config: "Config | None" = None,
+               library: dict[str, list] | None = None) -> dict[str, list[tuple[int, str, str]]]:
     """Findings that depend on more than one file, by the file holding them: copies of a class declared in more than
-    one file and a header's extern "C" on functions a C++ unit defines (debt), and members in the wrong class
-    (ownership)."""
+    one file, a header's extern "C" on functions a C++ unit defines, parameters named differently in a prototype and
+    its definition (library: signatures() of files read only to pair them), constructors naming another class, and
+    members in the wrong class (ownership)."""
     out: dict[str, list[tuple[int, str, str]]] = collections.defaultdict(list)
     if "duplicate_class" in tree:
         for rel, copies in duplicates({rel: scan.bodies for rel, scan in scans.items() if scan.bodies}).items():
             out[rel] += [(line, "duplicate_class", name) for line, name in copies]
+    if tree & PARAM_CHECKS:
+        files = [*sorted((rel, scan.signatures) for rel, scan in scans.items()),
+                 *sorted((rel, sigs) for rel, sigs in (library or {}).items() if rel not in scans)]
+        for rel, found in param_names(files, scans).items():
+            out[rel] += [f for f in found if f[1] in tree]
+    if "ctor_name_string" in tree:
+        for rel, found in ctor_names(scans).items():
+            out[rel] += found
     if owned:
         classes = ClassMap(scan.classes for scan in scans.values())
         for rel, scan in scans.items():
@@ -1278,12 +1426,7 @@ def _relations(scans: dict[str, _Scan], tree: set[str], owned: list[str],
 _CONFIG_PATHS = re.compile(r"^(symbols|splits):\s*(\S+)", re.M)
 _SPLIT_TEXT = re.compile(r"^\s+\.text\s+start:(0x[0-9A-Fa-f]+)\s+end:(0x[0-9A-Fa-f]+)")
 _SYMBOL = re.compile(r"^(\S+)\s*=\s*([.\w]+):(0x[0-9A-Fa-f]+);\s*//(.*)$")
-_DEMANGLE = re.compile(r"^(.*?)__(\d+)([A-Za-z_]\w*?)(F.*|$)")   # name__<length><class>[F<parameters>]
 _SPECIAL = re.compile(r"^(?:main|__\w+|_\w+|\w+\$\w+|@\w+|\.\w+)$")
-_OFFSET_SYMBOL = re.compile(
-    r"(?:^|_)(?:field|unk|unknown|flags?|offs?|mode|state)_?(?:0x)?(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{1,4}(?:_|$)|"
-    r"_(?![23]d$)(?=[0-9A-Fa-f]*\d)(?:(?=[0-9A-Fa-f]*[A-Fa-f])[0-9A-Fa-f]{2,4}|[1-9]\d\d)$|"
-    r"[a-z](?:Flags?|Field|Value|Ptr|S16|U16|S32|U32|F32|Byte|Word)[0-9A-Fa-f]{2,3}(?:_|$)")
 
 
 def split_units(text: str) -> list[tuple[int, int, str]]:
@@ -1347,7 +1490,7 @@ def _read(root: Path, revision: str | None, rels: list[str]) -> dict[str, str]:
 
 def read_config(root: Path, revision: str | None, dirs: list[str]) -> Config:
     """Every config.yml's symbols.txt and splits.txt under `dirs` at a revision (None: the working tree): which unit
-    defines each function, and the config checks (c_name_in_cpp, offset_symbol, void_ptr_param)."""
+    defines each function, and the config check (c_name_in_cpp)."""
     if revision is None:
         configs = sorted(p.relative_to(root).as_posix() for d in dirs if (root / d).is_dir()
                          for p in (root / d).rglob("config.yml"))
@@ -1382,12 +1525,6 @@ def read_config(root: Path, revision: str | None, dirs: list[str]) -> Config:
                 config.linkage[name].add(unit)
             if c_name_in_cpp(name, kind, unit):
                 config.found.append((symbols_path, (number, "c_name_in_cpp", name)))
-            demangled = _DEMANGLE.match(name)
-            base = demangled[1] if demangled else name.split("__F")[0]
-            if _OFFSET_SYMBOL.search(base) and not base.startswith(("lbl_", "fn_", "@")):
-                config.found.append((symbols_path, (number, "offset_symbol", name)))
-            if kind == "function" and demangled and re.search(r"(?:^|[^P])Pv", demangled[4] or ""):
-                config.found.append((symbols_path, (number, "void_ptr_param", name)))
     return config
 
 
@@ -1407,6 +1544,20 @@ def _totals(scans: dict[str, _Scan], related: dict[str, list[tuple[int, str, str
     for found in related.values():
         totals.update(key for _, key, _ in found)
     return totals
+
+
+def _library_roots(project: Project, repo: str) -> list[str]:
+    """Where the files read only to pair a prototype with its definition are (the manifest's `quality.library`,
+    else libs)."""
+    return list(project.config["repositories"][repo].get("quality", {}).get("library", ["libs"]))
+
+
+def _library(root: Path, revision: str | None, roots: list[str]) -> dict[str, list]:
+    """signatures() of the source files under `roots` at a revision (None: the working tree)."""
+    if not roots:
+        return {}
+    files = _revision_files(root, revision, roots, []) if revision else _tree_files(root, roots, [])
+    return {rel: signatures(_Source(text)) for rel, text in files}
 
 
 def describe(key: str, catalog: Iterable[Pattern] = ()) -> dict[str, str]:
@@ -1432,7 +1583,8 @@ def audit(project: Project, repo: str, paths: list[str] | None = None, revision:
     image = image_range(project, repo)
     scans = {rel: _scan(rel, text, catalog, image) for rel, text in files}
     config = _config(project, repo, revision, tree)
-    related = _relations(scans, tree, owned, config)
+    library = _library(root, revision, _library_roots(project, repo)) if tree & PARAM_CHECKS else None
+    related = _relations(scans, tree, owned, config, library)
     totals = _totals(scans, related)
     if config is not None:
         totals.update(key for _, (_, key, _) in config.found)
@@ -1466,11 +1618,14 @@ def _git(root: Path, *args: str) -> str:
     return result.stdout.decode("utf-8", errors="surrogateescape")
 
 
+Hunk = tuple[range, range]   # a diff hunk: the lines `before` removed, the lines `after` added
+
+
 def _diff(root: Path, before: str, after: str | None, roots: list[str],
-          exclude: list[re.Pattern]) -> dict[str, set[int] | None]:
+          exclude: list[re.Pattern]) -> dict[str, list[Hunk]]:
     """{source file that differs between `before` and `after` (None: the working tree, untracked files included):
-    the lines `after` added to it}, None for an untracked file (all of it)."""
-    out: dict[str, set[int] | None] = {}
+    its hunks}; an untracked file is one hunk adding all of it."""
+    out: dict[str, list[Hunk]] = {}
     current = old = None
     for line in _git(root, "diff", "-U0", "--no-renames", "--no-color", "--no-ext-diff", before,
                      *([after] if after else []), "--", *roots).splitlines():
@@ -1482,39 +1637,57 @@ def _diff(root: Path, before: str, after: str | None, roots: list[str],
             path = line[4:] if line[4:] != "/dev/null" else old or ""
             current = path[2:] if path[:2] in ("a/", "b/") else path
             if _keep(current, exclude):
-                out.setdefault(current, set())
+                out.setdefault(current, [])
             else:
                 current = None
         elif line.startswith("@@") and current is not None:
-            hunk = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+            hunk = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
             if hunk:
-                begin, count = int(hunk[1]), int(hunk[2] if hunk[2] is not None else 1)
-                out[current].update(range(begin, begin + count))
+                old_at, old_n, new_at, new_n = (int(n) if n is not None else 1 for n in hunk.groups())
+                out[current].append((range(old_at, old_at + old_n), range(new_at, new_at + new_n)))
     if not after:
         for rel in _git(root, "ls-files", "-z", "-o", "--exclude-standard", "--", *roots).split("\0"):
             if rel and _keep(rel, exclude) and (root / rel).is_file():
-                out[rel] = None
+                lines = len((root / rel).read_text(encoding="utf-8", errors="replace").splitlines())
+                out[rel] = [(range(0), range(1, lines + 2))]
     return out
+
+
+def _placed(counts: collections.Counter, found: list[tuple[str, tuple[int, str, str]]]) \
+        -> list[tuple[str, tuple[int, str, str]]]:
+    """The findings in `found` (taken in path and line order) that account for `counts`, a multiset of identities."""
+    left, out = collections.Counter(counts), []
+    for rel, f in sorted(found, key=lambda item: (item[0], item[1][0])):
+        if left[identity(f[1], f[2])] > 0:
+            left[identity(f[1], f[2])] -= 1
+            out.append((rel, f))
+    return out
+
+
+def _hunk(hunks: dict[str, list[Hunk]], rel: str, line: int, side: int) -> int | None:
+    """The hunk of rel holding line among the lines `before` removed (side 0) or `after` added (side 1)."""
+    return next((index for index, hunk in enumerate(hunks.get(rel, ())) if line in hunk[side]), None)
 
 
 def compare(project: Project, repo: str, before: str, after: str | None = None,
             paths: list[str] | None = None) -> dict[str, Any]:
     """Debt at `before` (a revision) and `after` (a revision, or the working tree), check by check: the tree's count
     at each, and what the change between them removed and added. Findings are matched by their text, so code that
-    only moves (between functions or files) counts as neither. Also the findings the change added on its own lines,
+    only moves (between functions or files) counts as neither, and neither does a hunk that rewrites a debt line
+    without adding a finding of its check (a rename on the line). Also the findings the change added on its own lines,
     and the advisory checks and members in the wrong class (beside the total, not in it). A header's extern "C" is
     judged against the config at `after` on both sides, so only header edits move it."""
     catalog, tree, owned = _checks(project, repo)
     roots, exclude = _paths(project, repo, paths)
     root = project.root(repo)
     image = image_range(project, repo)
-    added_lines = _diff(root, before, after, roots, exclude)
+    hunks = _diff(root, before, after, roots, exclude)
     head_config = _config(project, repo, after, tree)
     base_config = head_config
     if head_config is not None and _git(root, "diff", "--name-only", before, *([after] if after else []), "--",
                                         *_config_dirs(project, repo)).strip():
         base_config = _config(project, repo, before, tree)
-    changed = set(added_lines)
+    changed = set(hunks)
     files = _revision_files(root, after, roots, exclude) if after else _tree_files(root, roots, exclude)
     head = {rel: _scan(rel, text, catalog, image, keep=rel in changed) for rel, text in files}
     wanted = sorted(changed) if len(changed) <= 500 else roots
@@ -1522,7 +1695,15 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
                     for rel, text in (_revision_files(root, before, wanted, exclude) if changed else ())
                     if rel in changed}
     base = {rel: scan for rel, scan in head.items() if rel not in changed} | base_changed
-    head_related, base_related = _relations(head, tree, owned, head_config), _relations(base, tree, owned, head_config)
+    head_library = base_library = None
+    if tree & PARAM_CHECKS:
+        library_roots = _library_roots(project, repo)
+        head_library = _library(root, after, library_roots)
+        moved = sorted(_diff(root, before, after, library_roots, [])) if library_roots else []
+        base_library = {rel: sigs for rel, sigs in head_library.items() if rel not in moved} | \
+            _library(root, before, moved)
+    head_related = _relations(head, tree, owned, head_config, head_library)
+    base_related = _relations(base, tree, owned, head_config, base_library)
     head_totals, base_totals = _totals(head, head_related), _totals(base, base_related)
 
     # Findings across files can change in files the change did not touch (a class gained a base, a class's other
@@ -1531,8 +1712,8 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
         (key, text) for rel in changed if rel in head for _, key, text in head[rel].found)
     fall: collections.Counter = collections.Counter(
         (key, text) for scan in base_changed.values() for _, key, text in scan.found)
-    rise.update((key, text) for found in head_related.values() for _, key, text in found)
-    fall.update((key, text) for found in base_related.values() for _, key, text in found)
+    rise.update(identity(key, text) for found in head_related.values() for _, key, text in found)
+    fall.update(identity(key, text) for found in base_related.values() for _, key, text in found)
     for side, config, totals in ((rise, head_config, head_totals), (fall, base_config, base_totals)):
         if config is not None:
             side.update((key, text) for _, (_, key, text) in config.found)
@@ -1544,17 +1725,32 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
     for (key, _), n in fall.items():
         removed[key] += n
 
-    # Where the added findings are: on lines the change added, as many of each (key, text) as it rose by.
-    candidates = []
+    # Where they are: the rise on lines the change added (and in files a cross-file finding moved in), the fall on
+    # lines it removed. A hunk that replaces lines nets each check within it, so rewriting a debt line (renaming a
+    # variable on it) is neither added nor removed debt.
+    risen, fallen = [], []
     for rel in sorted(changed & head.keys()):
-        lines = added_lines[rel]
-        candidates += [(rel, f) for f in head[rel].found + head_related.get(rel, []) if lines is None or f[0] in lines]
-    candidates += [(rel, f) for rel, found in head_related.items() if rel not in changed for f in found]
-    candidates += head_config.found if head_config is not None else []
-    new, left = [], collections.Counter(rise)
-    for rel, (line, key, text) in sorted(candidates, key=lambda item: (item[0], item[1][0])):
-        if key not in ADVISORY and left[(key, text)] > 0:
-            left[(key, text)] -= 1
+        lines = {n for _, add in hunks[rel] for n in add}
+        risen += [(rel, f) for f in head[rel].found + head_related.get(rel, []) if f[0] in lines]
+    risen += [(rel, f) for rel, found in head_related.items() if rel not in changed for f in found]
+    risen += head_config.found if head_config is not None else []
+    for rel, scan in base_changed.items():
+        lines = {n for gone, _ in hunks[rel] for n in gone}
+        fallen += [(rel, f) for f in scan.found + base_related.get(rel, []) if f[0] in lines]
+    replaced = collections.Counter((rel, _hunk(hunks, rel, f[0], 0), f[1]) for rel, f in _placed(fall, fallen))
+    placed = _placed(rise, risen)
+    # A cross-file finding can appear on a line the change kept (its partner changed): list it there.
+    rest = rise - collections.Counter(identity(f[1], f[2]) for _, f in placed)
+    kept = [(rel, f) for rel in sorted(changed & head.keys()) for f in head_related.get(rel, [])
+            if (rel, f) not in placed]
+    new = []
+    for rel, (line, key, text) in placed + _placed(rest, kept):
+        at = (rel, _hunk(hunks, rel, line, 1), key)
+        if at[1] is not None and replaced[at] > 0:
+            replaced[at] -= 1
+            added[key] -= 1
+            removed[key] -= 1
+        elif key not in ADVISORY:
             new.append({"key": key, "path": rel, "line": line, "text": text})
 
     def row(key: str, label: str) -> dict[str, Any]:

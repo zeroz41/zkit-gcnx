@@ -619,16 +619,15 @@ class QualityTests(unittest.TestCase):
     def test_advisory_checks_are_counted_beside_the_total(self):
         """Advisory checks also fire on clean code: counted, but neither debt in the total nor a finding to fix."""
         catalog = quality.patterns()
-        text = "void f(TFoo *p) {\n    ((TBar *)p)->update();\n    if (p != 0U) g();\n}\n"
+        text = "void f(TFoo *p) {\n    u32 value_2e = 1;\n    if (p != 0U) g(value_2e);\n}\n"
         found = quality.count(text, catalog, rel="src/a.cpp")
-        self.assertEqual((found["cast_call"], found["zero_u_compare"]), (1, 1))
-        self.assertLessEqual({"cast_call", "zero_u_compare", "offset_symbol"}, quality.ADVISORY)
+        self.assertEqual((found["offset_suffix_name"], found["zero_u_compare"]), (1, 1))
+        self.assertEqual({"offset_suffix_name", "zero_u_compare", "param_name_mismatch"}, quality.ADVISORY)
         self.assertEqual(quality.findings(text, catalog), [])
 
     def test_header_extern_c_and_c_names_read_the_config(self):
         """A header's extern "C" on a function a C++ unit defines, and a C name for a C++ unit's function, are read
-        from config.yml's symbols.txt and splits.txt; a C unit's function keeps its C linkage. Symbols named after
-        an offset or taking void * are advisory."""
+        from config.yml's symbols.txt and splits.txt; a C unit's function keeps its C linkage."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             files = {
@@ -636,8 +635,6 @@ class QualityTests(unittest.TestCase):
                 "config/G/splits.txt": "src/unit.cpp:\n\t.text       start:0x80003100 end:0x80003200\n\n"
                                        "src/os.c:\n\t.text       start:0x80003200 end:0x80003300\n",
                 "config/G/symbols.txt": "update_all = .text:0x80003100; // type:function size:0x10\n"
-                                        "field_10__5TUnitFv = .text:0x80003110; // type:function size:0x10\n"
-                                        "draw__5TUnitFPv = .text:0x80003120; // type:function size:0x10\n"
                                         "OSReport = .text:0x80003200; // type:function size:0x10\n",
                 "include/unit.h": '#ifdef __cplusplus\nextern "C" {\n#endif\nvoid update_all(void);\n'
                                   "void OSReport(const char *, ...);\n#ifdef __cplusplus\n}\n#endif\n",
@@ -653,9 +650,7 @@ class QualityTests(unittest.TestCase):
             for revision in (None, "HEAD"):
                 audit = quality.audit(project, "decomp", revision=revision)
                 counts = {r["key"]: r["count"] for r in audit["counts"]}
-                advisory = {r["key"]: r["count"] for r in audit["advisory"]}
                 self.assertEqual((counts["header_extern_c"], counts["c_name_in_cpp"]), (1, 1), revision)
-                self.assertEqual((advisory["offset_symbol"], advisory["void_ptr_param"]), (1, 1), revision)
                 self.assertEqual(audit["total"], sum(counts.values()))
             (root / "include/unit.h").write_text(
                 '#ifdef __cplusplus\nextern "C" {\n#endif\nvoid OSReport(const char *, ...);\n'
@@ -664,6 +659,105 @@ class QualityTests(unittest.TestCase):
             row = next(r for r in delta["rows"] if r["key"] == "header_extern_c")
             self.assertEqual((row["before"], row["after"], row["removed"], row["added"]), (1, 0, 1, 0))
             self.assertEqual(delta["new"], [])
+
+    def test_parameter_names_pair_prototypes_with_definitions(self):
+        """A prototype pairs with the one definition of its name and parameter count, also one under libs/ (read to
+        pair, never counted). A placeholder on one side and a real name on the other is debt on the placeholder's
+        line (param_name_split); two real names (a letter starting the other side's name is one) are advisory
+        (param_name_mismatch). A change fixing either side removes the finding and adds none."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            files = {
+                "include/widget.h": "class TWidget {\npublic:\n    void set(int arg0,\n             int count);\n"
+                                    "    void move(int x, int dx);\n    void scale(float arg0, float arg1);\n};\n"
+                                    "void sdk_wait(int arg0);\nvoid sdk_tick(int ticks);\n",
+                "src/widget.cpp": '#include "widget.h"\nvoid TWidget::set(int value, int arg1) { }\n'
+                                  "void TWidget::move(int xPos, int step) { }\n"
+                                  "void TWidget::scale(float a0, float a1) { }\n",
+                "libs/sdk/wait.c": "void sdk_wait(int ticks) { }\nvoid sdk_tick(int arg0) { }\n",
+            }
+            for rel, text in files.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text, encoding="utf-8")
+            git(root, "init", "-q")
+            git(root, "add", ".")
+            git(root, "commit", "-q", "-m", "Add widget")
+            project = self.project(root)
+            audit = quality.audit(project, "decomp")
+            counts = {r["key"]: r["count"] for r in audit["counts"]}
+            advisory = {r["key"]: r["count"] for r in audit["advisory"]}
+            self.assertEqual((counts["param_name_split"], advisory["param_name_mismatch"]), (3, 2))
+            scans = {rel: quality._scan(rel, text, quality.patterns(), None) for rel, text in files.items()
+                     if not rel.startswith("libs/")}
+            library = {"libs/sdk/wait.c": quality.signatures(quality._Source(files["libs/sdk/wait.c"]))}
+            found = quality._relations(scans, quality.TREE_CHECKS, [], None, library)
+            self.assertEqual(sorted(found["include/widget.h"]), [
+                (3, "param_name_split", "arg0 (value at widget.cpp:2)"),
+                (5, "param_name_mismatch", "dx (step at widget.cpp:3)"),
+                (5, "param_name_mismatch", "x (xPos at widget.cpp:3)"),
+                (8, "param_name_split", "arg0 (ticks at wait.c:1)")])
+            self.assertEqual(found["src/widget.cpp"], [(2, "param_name_split", "arg1 (count at widget.h:4)")])
+            (root / "include/widget.h").write_text(files["include/widget.h"].replace("int arg0,", "int value,"),
+                                                   encoding="utf-8")
+            (root / "src/widget.cpp").write_text(files["src/widget.cpp"].replace("int arg1", "int count"),
+                                                 encoding="utf-8")
+            delta = quality.compare(project, "decomp", "HEAD")
+            row = next(r for r in delta["rows"] if r["key"] == "param_name_split")
+            self.assertEqual((row["before"], row["after"], row["removed"], row["added"]), (3, 1, 2, 0))
+            self.assertEqual(delta["new"], [])
+            # Naming one side of a placeholder pair adds a finding on the other side's kept line, and lists it.
+            (root / "src/widget.cpp").write_text(files["src/widget.cpp"].replace("int arg1", "int count")
+                                                 .replace("float a0", "float factor"), encoding="utf-8")
+            delta = quality.compare(project, "decomp", "HEAD")
+            row = next(r for r in delta["rows"] if r["key"] == "param_name_split")
+            self.assertEqual((row["before"], row["after"], row["removed"], row["added"]), (3, 2, 2, 1))
+            self.assertEqual([f for f in delta["new"] if f["key"] == "param_name_split"], [
+                {"key": "param_name_split", "path": "include/widget.h", "line": 6,
+                 "text": "arg0 (factor at widget.cpp:4)"}])
+
+    def test_a_rewritten_debt_line_is_neither_removed_nor_added(self):
+        """A hunk that replaces lines nets each check within it: renaming a variable on a debt line adds and removes
+        nothing, and replacing one debt line with two adds one."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src").mkdir()
+            text = "void TFoo::f() {\n    u8 *p = (u8 *)this + 0x10;\n    g(p);\n}\n"
+            (root / "src/a.cpp").write_text(text, encoding="utf-8")
+            git(root, "init", "-q")
+            git(root, "add", ".")
+            git(root, "commit", "-q", "-m", "Add a")
+            project = self.project(root)
+            for edit, removed, added in (("    u8 *q = (u8 *)this + 0x10;\n    g(q);\n", 0, 0),
+                                         (("    u8 *p = (u8 *)this + 0x10;\n    u8 *q = (u8 *)this + 0x14;\n"
+                                           "    g(p);\n"), 0, 1)):
+                (root / "src/a.cpp").write_text(text.replace("    u8 *p = (u8 *)this + 0x10;\n    g(p);\n", edit),
+                                                encoding="utf-8")
+                delta = quality.compare(project, "decomp", "HEAD")
+                row = next(r for r in delta["rows"] if r["key"] == "raw_offset")
+                self.assertEqual((row["removed"], row["added"]), (removed, added), edit)
+                self.assertEqual(len(delta["new"]), added)
+
+    def test_constructors_naming_another_class(self):
+        """A constructor setting m_name to a string other than its class's name, spelled as a literal or as a
+        constant with one value over the tree; a constant with two values is ambiguous and not judged."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src").mkdir()
+            (root / "src/a.cpp").write_text(
+                'static const char *kName = "TPanel";\nstatic const char *kOther = "TBox";\n'
+                'TButton::TButton() {\n    m_name = "TButton";\n}\nTWidget::TWidget() {\n    m_name = "TLabel";\n}\n'
+                "TPanel::TPanel() {\n    m_name = kName;\n}\nTFrame::TFrame() {\n    m_name = kName;\n}\n"
+                "TShape::TShape() {\n    m_name = kOther;\n}\n", encoding="utf-8")
+            (root / "src/b.cpp").write_text('static const char *kOther = "TCircle";\n', encoding="utf-8")
+            git(root, "init", "-q")
+            project = self.project(root)
+            audit = quality.audit(project, "decomp")
+            self.assertEqual({r["key"]: r["count"] for r in audit["counts"]}["ctor_name_string"], 2)
+            scans = {rel: quality._scan(rel, (root / rel).read_text(), quality.patterns(), None)
+                     for rel in ("src/a.cpp", "src/b.cpp")}
+            self.assertEqual(quality.ctor_names(scans), {"src/a.cpp": [
+                (7, "ctor_name_string", 'TWidget: m_name "TLabel"'),
+                (13, "ctor_name_string", 'TFrame: m_name "TPanel"')]})
 
     def test_units_and_classes_outside_their_home(self):
         """A unit named after an address is a fragment not in its real unit; a class declared in a C++ source file

@@ -39,16 +39,23 @@ class Definition:
     in_class: bool   # defined inside a class body (an inline member)
     start: int       # 0-based line where the declarator starts (return type, template line)
     line: int        # 0-based line holding the name
-    open: int        # 0-based line of the body's opening brace
-    end: int         # 0-based line of the body's closing brace
+    open: int        # 0-based line of the body's opening brace (a prototype's `;`)
+    end: int         # 0-based line of the body's closing brace (a prototype's `;`)
     params: str      # parameter list text, whitespace collapsed
     body: str        # text between the braces without comments, whitespace collapsed
-    span: tuple[int, int] = (0, 0)   # offsets of the body's opening and closing braces in the text
+    span: tuple[int, int] = (0, 0)     # offsets of the body's opening and closing braces in the text
+    parens: tuple[int, int] = (0, 0)   # offsets of the parameter list's parentheses
 
     @property
     def qualified(self) -> str:
         """The name it defines: `void Flag::build() {` inside `namespace ns {` defines ns::Flag::build."""
         return f"{self.scope}::{self.name}" if self.scope else self.name
+
+    @property
+    def owner(self) -> str | None:
+        """The class a member belongs to (None for a free function)."""
+        parts = [re.sub(r"<.*", "", part) for part in self.qualified.split("::")]
+        return parts[-2] if len(parts) > 1 else None
 
 
 @dataclass(frozen=True)
@@ -147,13 +154,14 @@ def _matching(code: str, at: int) -> int:
     return len(code)
 
 
-def definitions(text: str, code: str | None = None) -> list[Definition]:
+def definitions(text: str, code: str | None = None, prototypes: list[Definition] | None = None) -> list[Definition]:
     """Every function definition in a C/C++ source text, outermost first, in file order (`code`: blank(text), when
-    the caller has it already)."""
-    return scan(text, code)[0]
+    the caller has it already). Function declarations ending in `;` are added to `prototypes` when it is given."""
+    return scan(text, code, prototypes)[0]
 
 
-def scan(text: str, code: str | None = None) -> tuple[list[Definition], list[Block]]:
+def scan(text: str, code: str | None = None,
+         prototypes: list[Definition] | None = None) -> tuple[list[Definition], list[Block]]:
     """definitions(), and every namespace, class and `extern "C"` block, outermost first, in file order."""
     code = blank(text) if code is None else code
     starts = [0] + [m.end() for m in re.finditer(r"\n", code)]
@@ -170,13 +178,23 @@ def scan(text: str, code: str | None = None) -> tuple[list[Definition], list[Blo
         index = scopes.pop()[2]
         entered[index] = dataclasses.replace(entered[index], end=line(at))
 
+    def function(head: str, offset: int, found: tuple[int, int, int], at: int, end: int) -> Definition:
+        name_at, open_, close = found
+        first = offset + len(head) - len(head.lstrip())
+        return Definition(
+            name=re.sub(r"\s+", "", head[name_at:open_]), scope="::".join(name for _, name, _ in scopes if name),
+            in_class=bool(scopes) and scopes[-1][0] == "class", start=line(first), line=line(offset + name_at),
+            open=line(at), end=line(end), params=" ".join(head[open_ + 1:close].split()),
+            body=" ".join(_COMMENTS.sub(lambda m: m[0] if m[0][0] in "\"'" else " ", text[at + 1:end]).split()),
+            span=(at, end), parens=(offset + open_, offset + close))
+
     head_start, position = 0, 0
     while True:
         match = _STRUCTURE.search(code, position)
         if match is None:
             break
         at, char = match.start(), match[0]
-        if char == ";":
+        if char == ";" and (prototypes is None or "(" not in code[head_start:at]):
             head_start = position = at + 1
             continue
         if char == "}":
@@ -188,6 +206,12 @@ def scan(text: str, code: str | None = None) -> tuple[list[Definition], list[Blo
         access = _ACCESS.match(raw)
         offset = head_start + (access.end() if access else 0)
         head = code[offset:at]
+        if char == ";":
+            found = _declarator(head)
+            if found:
+                prototypes.append(function(head, offset, found, at, at))
+            head_start = position = at + 1
+            continue
         clean = _clean_head(head)
         if re.search(r"\benum\b", clean):
             position = head_start = _matching(code, at) + 1
@@ -202,16 +226,8 @@ def scan(text: str, code: str | None = None) -> tuple[list[Definition], list[Blo
             position = _matching(code, at) + 1   # `member{value}` inside a constructor's initializer list
             continue
         if found:
-            name_at, open_, close = found
             end = _matching(code, at)
-            first = offset + len(head) - len(head.lstrip())
-            scope = "::".join(name for _, name, _ in scopes if name)
-            out.append(Definition(
-                name=re.sub(r"\s+", "", head[name_at:open_]), scope=scope,
-                in_class=bool(scopes) and scopes[-1][0] == "class", start=line(first), line=line(offset + name_at),
-                open=line(at), end=line(end), params=" ".join(head[open_ + 1:close].split()),
-                body=" ".join(_COMMENTS.sub(lambda m: m[0] if m[0][0] in "\"'" else " ", text[at + 1:end]).split()),
-                span=(at, end)))
+            out.append(function(head, offset, found, at, end))
             head_start = position = end + 1
             continue
         if "(" not in clean and re.search(r"\bnamespace\b", clean):
