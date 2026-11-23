@@ -684,6 +684,59 @@ class QualityTests(unittest.TestCase):
             self.assertEqual((row["before"], row["after"], row["removed"], row["added"]), (1, 0, 1, 0))
             self.assertEqual(delta["new"], [])
 
+    def test_a_member_using_only_another_class_is_misowned(self):
+        """A member whose body touches nothing of its class's hierarchy, in a unit not named after its class, is debt
+        on its definition line (misowned_member); one using its class's fields is not. Each side of a change is
+        judged against its own config, so moving the function into the class it uses removes the finding."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            files = {
+                "config/G/config.yml": "symbols: config/G/symbols.txt\nsplits: config/G/splits.txt\n",
+                "config/G/splits.txt": "TWidget.cpp:\n\t.text       start:0x80003100 end:0x80003200\n\n"
+                                       "main.cpp:\n\t.text       start:0x80003200 end:0x80003300\n\n"
+                                       "audio.cpp:\n\t.text       start:0x80003300 end:0x80003400\n",
+                "config/G/symbols.txt": "resize__7TWidgetFi = .text:0x80003100; // type:function size:0x10\n"
+                                        "draw__7TWidgetFv = .text:0x80003110; // type:function size:0x10\n"
+                                        "main = .text:0x80003200; // type:function size:0x10\n"
+                                        "set_sound_volume__7TWidgetFi = .text:0x80003300; // type:function size:0x10\n"
+                                        "clear__7TWidgetFv = .text:0x80003310; // type:function size:0x10\n",
+                "include/widget.h": "class TSound {\npublic:\n    int volume;\n};\nextern TSound g_sound;\n"
+                                    "class TWidget {\npublic:\n    int width;\n    void resize(int w);\n    void draw();\n"
+                                    "    void set_sound_volume(int value);\n    void clear();\n};\n",
+                "src/TWidget.cpp": '#include "widget.h"\nvoid TWidget::resize(int w) {\n    width = w;\n}\n'
+                                   "void TWidget::draw() {\n    width++;\n}\n",
+                "src/main.cpp": "int main() {\n    return 0;\n}\n",
+                "src/audio.cpp": '#include "widget.h"\nTSound g_sound;\n\n'
+                                 "void TWidget::set_sound_volume(int value) {\n    g_sound.volume = value;\n}\n"
+                                 "void TWidget::clear() {\n    width = 0;\n    g_sound.volume = 0;\n}\n",
+            }
+            for rel, text in files.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text, encoding="utf-8")
+            git(root, "init", "-q")
+            git(root, "add", ".")
+            git(root, "commit", "-q", "-m", "Add widget")
+            project = self.project(root)
+            for revision in (None, "HEAD"):
+                counts = {r["key"]: r["count"] for r in quality.audit(project, "decomp", revision=revision)["counts"]}
+                self.assertEqual(counts["misowned_member"], 1, revision)
+            members = quality.misowned_members(files, quality.read_config(root, "HEAD", ["config"]).pairs, files)
+            self.assertEqual(members, {"src/audio.cpp": [(4, "misowned_member", (
+                "TWidget::set_sound_volume touches nothing of TWidget's hierarchy and few callers belong to it: "
+                "likely the wrong owner class (OWNER_DEBT)"))]})
+            (root / "include/widget.h").write_text(
+                files["include/widget.h"].replace("    int volume;\n", "    int volume;\n    void set_volume(int value);\n")
+                .replace("    void set_sound_volume(int value);\n", ""), encoding="utf-8")
+            (root / "src/audio.cpp").write_text(files["src/audio.cpp"].replace(
+                "void TWidget::set_sound_volume(int value) {\n    g_sound.volume = value;",
+                "void TSound::set_volume(int value) {\n    volume = value;"), encoding="utf-8")
+            (root / "config/G/symbols.txt").write_text(files["config/G/symbols.txt"].replace(
+                "set_sound_volume__7TWidgetFi", "set_volume__6TSoundFi"), encoding="utf-8")
+            delta = quality.compare(project, "decomp", "HEAD")
+            row = next(r for r in delta["rows"] if r["key"] == "misowned_member")
+            self.assertEqual((row["before"], row["after"], row["removed"], row["added"]), (1, 0, 1, 0))
+            self.assertEqual(delta["new"], [])
+
     def test_parameter_names_pair_prototypes_with_definitions(self):
         """A prototype pairs with the one definition of its name and parameter count, also one under libs/ (read to
         pair, never counted). A placeholder on one side and a real name on the other is debt on the placeholder's

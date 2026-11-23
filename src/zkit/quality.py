@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Container, Iterable
 
+from .misowned import misowned_members
 from .project import Project
 
 SOURCE_SUFFIXES = {".c", ".cc", ".cp", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".inc", ".inl"}
@@ -182,13 +183,15 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
        r"(?m)^\s*virtual\b[^;{]*[;{]", "vtables", sources_only=True),
     # where units and classes live: a unit named after an address is a fragment not yet in its real unit (a header
     # counts only when no unit has its name, since one rename fixes both), a class declared in a C++ source file is
-    # a stand-in or a layout kept out of its header, and a class with a body in more than one file is a copy
-    # (`address_unit`, `local_classes`, `duplicates`)
+    # a stand-in or a layout kept out of its header, a class with a body in more than one file is a copy, and a
+    # member whose body uses nothing of its class's hierarchy belongs to another class (`address_unit`,
+    # `local_classes`, `duplicates`, `misowned.misowned_members`)
     _p("address_unit", "units and headers named after an address (TEnemy_80123456.cpp)", _NEVER, "placement",
        blocks_port=False),
     _p("local_class", "classes declared in C++ source files instead of a header", _NEVER, "placement",
        blocks_port=False, sources_only=True),
     _p("duplicate_class", "classes declared in more than one file", _NEVER, "placement", blocks_port=False),
+    _p("misowned_member", "member functions that belong to another class", _NEVER, "placement", blocks_port=False),
     _p("inline_asm", "assembly in source (asm blocks, __asm__)",
        r"\basm\s*\{|\b__asm__\b|\basm\s+[\w\s\*&:~<>,]+?\w+\s*\([^;]*\)\s*\{", "asm"),
 )
@@ -241,6 +244,7 @@ DISPLAY = {   # key -> (name, example)
     "address_unit": ("Units named after an address", "TEnemy_80123456.cpp"),
     "local_class": ("Classes declared in source files", "struct EnemyView : TObject {"),
     "duplicate_class": ("Classes declared in more than one file", "class TEnemy {"),
+    "misowned_member": ("Members that belong to another class", "TWidget::set_sound_volume(int)"),
     "inline_asm": ("Inline assembly", "asm { ... }"),
 }
 GROUP_TITLES = {"linkage": "Linkage", "layout": "Layout", "types": "Types", "decompiler": "Decompiler output",
@@ -1104,9 +1108,10 @@ PARSED = {
     "local_class": (("file",), lambda rel, text, source, image: local_classes(rel, source)),
 }
 # judged over every file at once: copies of a class (`duplicates`), a header's extern "C" on a function a C++ unit
-# defines (`extern_c_functions` against the config) and parameter names (`param_names`). A header named after an
-# address (address_unit) counts only when no unit has its name, since one rename fixes both.
-TREE_CHECKS = {"duplicate_class", "header_extern_c", "param_name_split", "address_unit"}
+# defines (`extern_c_functions` against the config), parameter names (`param_names`) and members that belong to
+# another class (`misowned.misowned_members`, against the config). A header named after an address (address_unit)
+# counts only when no unit has its name, since one rename fixes both.
+TREE_CHECKS = {"duplicate_class", "header_extern_c", "param_name_split", "address_unit", "misowned_member"}
 
 
 def _parsed(pattern: Pattern) -> bool:
@@ -1280,16 +1285,20 @@ def _checks(project: Project | None, repo: str | None) -> tuple[list[Pattern], s
 
 
 def _relations(scans: dict[str, _Scan], tree: set[str], owned: list[str], config: "Config | None" = None,
-               library: dict[str, list] | None = None,
-               image: tuple[int, int] | None = None) -> dict[str, list[tuple[int, str, str]]]:
+               library: dict[str, list] | None = None, image: tuple[int, int] | None = None,
+               members: dict[str, list[tuple[int, str, str]]] | None = None) -> dict[str, list[tuple[int, str, str]]]:
     """Findings that depend on more than one file, by the file holding them: copies of a class declared in more than
     one file, a header's extern "C" on functions a C++ unit defines, placeholder parameters named on the other side
     (library: signatures() of files read only to pair them), headers named after an address of the image that no
-    unit shares a name with, and members in the wrong class (ownership)."""
+    unit shares a name with, members that belong to another class (members: `misowned_members()`) and members in
+    the wrong class (ownership)."""
     out: dict[str, list[tuple[int, str, str]]] = collections.defaultdict(list)
     if "duplicate_class" in tree:
         for rel, copies in duplicates({rel: scan.bodies for rel, scan in scans.items() if scan.bodies}).items():
             out[rel] += [(line, "duplicate_class", name) for line, name in copies]
+    if "misowned_member" in tree:
+        for rel, found in (members or {}).items():
+            out[rel] += found
     if "param_name_split" in tree:
         files = [*sorted((rel, scan.signatures) for rel, scan in scans.items()),
                  *sorted((rel, sigs) for rel, sigs in (library or {}).items() if rel not in scans)]
@@ -1352,6 +1361,7 @@ def middleware(configure: str) -> tuple[int, int] | None:
 class Config:
     linkage: dict[str, set[str]]                                   # function name -> the units defining it
     middleware: set[str] = field(default_factory=set)              # units of the prebuilt C libraries
+    pairs: list[tuple[str, str]] = field(default_factory=list)     # (symbols.txt, splits.txt) texts
 
     def cxx_linkage(self, name: str) -> bool:
         """True when a C++ unit, and no C unit, defines the function. A middleware unit is never C++: the
@@ -1390,7 +1400,7 @@ def _read(root: Path, revision: str | None, rels: list[str]) -> dict[str, str]:
 
 def read_config(root: Path, revision: str | None, dirs: list[str]) -> Config:
     """Every config.yml's symbols.txt and splits.txt under `dirs` at a revision (None: the working tree): which unit
-    defines each function, and which units start in configure.py's middleware range."""
+    defines each function, which units start in configure.py's middleware range, and the two files' texts."""
     if revision is None:
         configs = sorted(p.relative_to(root).as_posix() for d in dirs if (root / d).is_dir()
                          for p in (root / d).rglob("config.yml"))
@@ -1408,6 +1418,7 @@ def read_config(root: Path, revision: str | None, dirs: list[str]) -> Config:
     config = Config(collections.defaultdict(set))
     libraries = middleware(_read(root, revision, ["configure.py"]).get("configure.py", ""))
     for symbols_path, splits_path in sorted(set(pairs)):
+        config.pairs.append((texts.get(symbols_path, ""), texts.get(splits_path, "") if splits_path else ""))
         units = split_units(texts.get(splits_path, "")) if splits_path else []
         starts = [u[0] for u in units]
         if libraries:
@@ -1424,7 +1435,7 @@ def read_config(root: Path, revision: str | None, dirs: list[str]) -> Config:
 
 def _config(project: Project, repo: str, revision: str | None, tree: set[str]) -> Config | None:
     """The config at a revision, when a check reads it."""
-    if "header_extern_c" not in tree:
+    if not tree & {"header_extern_c", "misowned_member"}:
         return None
     return read_config(project.root(repo), revision, _config_dirs(project, repo))
 
@@ -1439,17 +1450,20 @@ def _totals(scans: dict[str, _Scan], related: dict[str, list[tuple[int, str, str
 
 
 def _library_roots(project: Project, repo: str) -> list[str]:
-    """Where the files read only to pair a prototype with its definition are (the manifest's `quality.library`,
-    else libs)."""
+    """Where the files read only to pair a prototype with its definition and to type the members misowned_member
+    judges are (the manifest's `quality.library`, else libs)."""
     return list(project.config["repositories"][repo].get("quality", {}).get("library", ["libs"]))
 
 
-def _library(root: Path, revision: str | None, roots: list[str]) -> dict[str, list]:
-    """signatures() of the source files under `roots` at a revision (None: the working tree)."""
+def _library(root: Path, revision: str | None, roots: list[str]) -> dict[str, str]:
+    """The source files under `roots` at a revision (None: the working tree), by path."""
     if not roots:
         return {}
-    files = _revision_files(root, revision, roots, []) if revision else _tree_files(root, roots, [])
-    return {rel: signatures(_Source(text)) for rel, text in files}
+    return dict(_revision_files(root, revision, roots, []) if revision else _tree_files(root, roots, []))
+
+
+def _signatures(texts: dict[str, str]) -> dict[str, list]:
+    return {rel: signatures(_Source(text)) for rel, text in texts.items()}
 
 
 def describe(key: str, catalog: Iterable[Pattern] = ()) -> dict[str, str]:
@@ -1471,12 +1485,15 @@ def audit(project: Project, repo: str, paths: list[str] | None = None, revision:
     catalog, tree, owned = _checks(project, repo)
     roots, exclude = _paths(project, repo, paths)
     root = project.root(repo)
-    files = _revision_files(root, revision, roots, exclude) if revision else _tree_files(root, roots, exclude)
+    texts = dict(_revision_files(root, revision, roots, exclude) if revision else _tree_files(root, roots, exclude))
     image = image_range(project, repo)
-    scans = {rel: _scan(rel, text, catalog, image) for rel, text in files}
+    scans = {rel: _scan(rel, text, catalog, image) for rel, text in texts.items()}
     config = _config(project, repo, revision, tree)
-    library = _library(root, revision, _library_roots(project, repo)) if "param_name_split" in tree else None
-    related = _relations(scans, tree, owned, config, library, image)
+    other = _library(root, revision, _library_roots(project, repo)) \
+        if tree & {"param_name_split", "misowned_member"} else {}
+    library = _signatures(other) if "param_name_split" in tree else None
+    members = misowned_members(texts | other, config.pairs, scans) if "misowned_member" in tree and config else None
+    related = _relations(scans, tree, owned, config, library, image, members)
     totals = _totals(scans, related)
     keys = {p.key for p in catalog}
     per_file = {}
@@ -1576,7 +1593,8 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
     only moves (between functions or files) counts as neither, and neither does a hunk that rewrites a debt line
     without adding a finding of its check (a rename on the line). Also the findings the change added on its own lines,
     and the members in the wrong class (beside the total, not in it). A header's extern "C" is judged against the
-    config at `after` on both sides, so only header edits move it."""
+    config at `after` on both sides, so only header edits move it; a member that belongs to another class against
+    each side's own."""
     catalog, tree, owned = _checks(project, repo)
     roots, exclude = _paths(project, repo, paths)
     root = project.root(repo)
@@ -1584,22 +1602,34 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
     hunks = _diff(root, before, after, roots, exclude)
     head_config = _config(project, repo, after, tree)
     changed = set(hunks)
-    files = _revision_files(root, after, roots, exclude) if after else _tree_files(root, roots, exclude)
-    head = {rel: _scan(rel, text, catalog, image, keep=rel in changed) for rel, text in files}
+    head_texts = dict(_revision_files(root, after, roots, exclude) if after else _tree_files(root, roots, exclude))
+    head = {rel: _scan(rel, text, catalog, image, keep=rel in changed) for rel, text in head_texts.items()}
     wanted = sorted(changed) if len(changed) <= 500 else roots
-    base_changed = {rel: _scan(rel, text, catalog, image, keep=True)
-                    for rel, text in (_revision_files(root, before, wanted, exclude) if changed else ())
-                    if rel in changed}
+    base_texts = {rel: text for rel, text in (_revision_files(root, before, wanted, exclude) if changed else ())
+                  if rel in changed}
+    base_changed = {rel: _scan(rel, text, catalog, image, keep=True) for rel, text in base_texts.items()}
     base = {rel: scan for rel, scan in head.items() if rel not in changed} | base_changed
-    head_library = base_library = None
-    if "param_name_split" in tree:
+    head_library = base_library = head_members = base_members = None
+    head_other: dict[str, str] = {}
+    base_other: dict[str, str] = {}
+    if tree & {"param_name_split", "misowned_member"}:
         library_roots = _library_roots(project, repo)
-        head_library = _library(root, after, library_roots)
-        moved = sorted(_diff(root, before, after, library_roots, [])) if library_roots else []
+        head_other = _library(root, after, library_roots)
+        moved = set(_diff(root, before, after, library_roots, [])) if library_roots else set()
+        moved_texts = _library(root, before, sorted(moved))
+        base_other = {rel: text for rel, text in head_other.items() if rel not in moved} | moved_texts
+    if "param_name_split" in tree:
+        head_library = _signatures(head_other)
         base_library = {rel: sigs for rel, sigs in head_library.items() if rel not in moved} | \
-            _library(root, before, moved)
-    head_related = _relations(head, tree, owned, head_config, head_library, image)
-    base_related = _relations(base, tree, owned, head_config, base_library, image)
+            _signatures(moved_texts)
+    if "misowned_member" in tree and head_config is not None:
+        # judged against each side's own config, since a rename changes symbols.txt and the source together
+        base_config = _config(project, repo, before, tree)
+        head_members = misowned_members(head_texts | head_other, head_config.pairs, head)
+        base_members = misowned_members({rel: text for rel, text in head_texts.items() if rel not in changed} |
+                                        base_texts | base_other, base_config.pairs, base)
+    head_related = _relations(head, tree, owned, head_config, head_library, image, head_members)
+    base_related = _relations(base, tree, owned, head_config, base_library, image, base_members)
     head_totals, base_totals = _totals(head, head_related), _totals(base, base_related)
 
     # Findings across files can change in files the change did not touch (a class gained a base, a class's other
