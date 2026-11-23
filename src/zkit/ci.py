@@ -96,7 +96,8 @@ def quality_summary(compared: dict[str, Any]) -> dict[str, Any]:
     the first added findings."""
     keys = ("key", "name", "example", "group", "category", "before", "after", "removed", "added")
     return {
-        "rows": [{k: row[k] for k in keys} for row in compared["rows"] + compared.get("ownership", [])],
+        "rows": [{k: row[k] for k in keys}
+                 for row in compared["rows"] + compared.get("advisory", []) + compared.get("ownership", [])],
         "total": {k: compared["total"][k] for k in ("before", "after", "removed", "added")},
         "files_changed": compared["files_changed"], "after_commit": compared.get("after_commit"),
         "new": compared["new"][:QUALITY_NEW], "new_total": len(compared["new"]),
@@ -273,14 +274,16 @@ def quality_section(quality: object, run_url: str = "") -> list[str]:
         return _code(label)
 
     rows = [r for r in _listed(quality, "rows") if _counts(r, "before", "after", "removed", "added")]
-    debt = [r for r in rows if r.get("group") != "ownership"]
+    debt = [r for r in rows if r.get("group") not in ("ownership", "advisory")]
     owned = [r for r in rows if r.get("group") == "ownership"]
+    advisory = [r for r in rows if r.get("group") == "advisory"]
     before, after, removed, added = total
     files = _int(quality.get("files_changed")) or 0
     total_row = f"| **Total debt** | **{before:,} → {after:,}** | **{removed:,}** | **{added:,}** |"
     owned_title = "**Members in the wrong class**, read from the class declarations (not in the total):"
+    advisory_title = "**Advisory checks**, signs worth a look that also fire on clean code (not in the total):"
     moved = [r for r in debt if _moved(r)]
-    if not moved and not any(_moved(r) for r in owned):
+    if not moved and not any(_moved(r) for r in owned + advisory):
         lines += ["", f"Advisory: never fails a pull request. **No change in any check**; the tree stays at "
                   f"{after:,}."]
     else:
@@ -292,11 +295,16 @@ def quality_section(quality: object, run_url: str = "") -> list[str]:
                                        categories=False) + [total_row]
     if any(_moved(r) for r in owned):
         lines += ["", owned_title, ""] + _quality_table([r for r in owned if _moved(r)], categories=False)
+    if any(_moved(r) for r in advisory):
+        lines += ["", advisory_title, ""] + _quality_table([r for r in advisory if _moved(r)], categories=False)
     if debt:   # every check with the tree's count, one click away
-        lines += ["", f"<details><summary>All {len(debt) + len(owned)} checks by category</summary>", ""]
+        lines += ["", f"<details><summary>All {len(debt) + len(owned) + len(advisory)} checks by category"
+                  "</summary>", ""]
         lines += _quality_table(debt) + [total_row]
         if owned:
             lines += ["", owned_title, ""] + _quality_table(owned, categories=False)
+        if advisory:
+            lines += ["", advisory_title, ""] + _quality_table(advisory, categories=False)
         lines.append("</details>")
 
     new = _listed(quality, "new")

@@ -1327,6 +1327,10 @@ def quality(data: dict) -> str:
     for row in sorted(data["counts"], key=lambda r: -r["count"]):
         if row["count"]:
             out.append(f"  {row['count']:>9,}  {row['label']}")
+    advisory = [row for row in data.get("advisory", []) if row["count"]]
+    if advisory:
+        out.append("advisory, also found in clean code (not in the total):")
+        out += [f"  {row['count']:>9,}  {row['label']}" for row in sorted(advisory, key=lambda r: -r["count"])]
     owned = [row for row in data.get("ownership", []) if row["count"]]
     if owned:
         out.append("members in the wrong class (not in the total):")
@@ -1353,6 +1357,9 @@ def quality_compare(data: dict, new: int = 20) -> str:
     out += changed or ["  no change in any check"]
     if len(changed) < len(data["rows"]):
         out.append(f"  ({len(data['rows']) - len(changed)} other checks unchanged)")
+    advisory = lines(data.get("advisory", []))
+    if advisory:
+        out += ["advisory, also found in clean code (not in the total):"] + advisory
     owned = lines(data.get("ownership", []))
     if owned:
         out += ["members in the wrong class (not in the total):"] + owned

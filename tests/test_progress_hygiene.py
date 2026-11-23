@@ -589,6 +589,82 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(quality.count(text, catalog, image=image)["address_comment"], 2)
         self.assertEqual(quality.count(text, catalog)["address_comment"], 0)
 
+    def test_address_comments_name_placeholders_without_the_image(self):
+        text = "// see fn_80123456\nint x; // 0x80123456 is a mask\n/* sub_8001A2B0 */\n"
+        self.assertEqual(quality.address_comments(text, None), [(1, "// see fn_80123456"), (3, "/* sub_8001A2B0 */")])
+        self.assertEqual(quality.count(text, quality.patterns())["address_comment"], 2)
+
+    def test_slipped_decompiler_shapes(self):
+        """Register-named variables (not inside asm), no-op statements, padding fields read or written and
+        hand-written size asserts are debt; the same function written plainly has none."""
+        catalog = quality.patterns()
+        text = ("void TFoo::step(int count) {\n"
+                "    s32 r31 = count;\n"
+                "    f32 f30, f31;\n"
+                "    count = count;\n"
+                "    if (1) {\n        work(r31);\n    }\n"
+                "    while (0) { }\n"
+                "    this->pad_10[2] = 1;\n"
+                "    asm { mr r3, r31 }\n"
+                "}\n"
+                "typedef char check_size[(sizeof(TFoo) == 0x40) ? 1 : -1];\n")
+        found = quality.count(text, catalog, rel="src/foo.cpp")
+        self.assertEqual((found["register_name"], found["no_op"], found["pad_access"], found["size_assert"]),
+                         (3, 3, 1, 1))
+        self.assertEqual([f for f in quality.parsed_findings(text, catalog, "src/foo.cpp") if f[1] == "no_op"],
+                         [(4, "no_op", "count = count;"), (5, "no_op", "if (1)"), (8, "no_op", "while (0)")])
+        plain = "void TFoo::step(int count) {\n    s32 total = count;\n    if (count) { work(total); }\n}\n"
+        self.assertFalse(+quality.count(plain, catalog, rel="src/foo.cpp"))
+
+    def test_advisory_checks_are_counted_beside_the_total(self):
+        """Advisory checks also fire on clean code: counted, but neither debt in the total nor a finding to fix."""
+        catalog = quality.patterns()
+        text = "void f(TFoo *p) {\n    ((TBar *)p)->update();\n    if (p != 0U) g();\n}\n"
+        found = quality.count(text, catalog, rel="src/a.cpp")
+        self.assertEqual((found["cast_call"], found["zero_u_compare"]), (1, 1))
+        self.assertLessEqual({"cast_call", "zero_u_compare", "offset_symbol"}, quality.ADVISORY)
+        self.assertEqual(quality.findings(text, catalog), [])
+
+    def test_header_extern_c_and_c_names_read_the_config(self):
+        """A header's extern "C" on a function a C++ unit defines, and a C name for a C++ unit's function, are read
+        from config.yml's symbols.txt and splits.txt; a C unit's function keeps its C linkage. Symbols named after
+        an offset or taking void * are advisory."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            files = {
+                "config/G/config.yml": "symbols: config/G/symbols.txt\nsplits: config/G/splits.txt\n",
+                "config/G/splits.txt": "src/unit.cpp:\n\t.text       start:0x80003100 end:0x80003200\n\n"
+                                       "src/os.c:\n\t.text       start:0x80003200 end:0x80003300\n",
+                "config/G/symbols.txt": "update_all = .text:0x80003100; // type:function size:0x10\n"
+                                        "field_10__5TUnitFv = .text:0x80003110; // type:function size:0x10\n"
+                                        "draw__5TUnitFPv = .text:0x80003120; // type:function size:0x10\n"
+                                        "OSReport = .text:0x80003200; // type:function size:0x10\n",
+                "include/unit.h": '#ifdef __cplusplus\nextern "C" {\n#endif\nvoid update_all(void);\n'
+                                  "void OSReport(const char *, ...);\n#ifdef __cplusplus\n}\n#endif\n",
+                "src/unit.cpp": '#include "unit.h"\nvoid update_all(void) { }\n',
+            }
+            for rel, text in files.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text, encoding="utf-8")
+            git(root, "init", "-q")
+            git(root, "add", ".")
+            git(root, "commit", "-q", "-m", "Add unit")
+            project = self.project(root)
+            for revision in (None, "HEAD"):
+                audit = quality.audit(project, "decomp", revision=revision)
+                counts = {r["key"]: r["count"] for r in audit["counts"]}
+                advisory = {r["key"]: r["count"] for r in audit["advisory"]}
+                self.assertEqual((counts["header_extern_c"], counts["c_name_in_cpp"]), (1, 1), revision)
+                self.assertEqual((advisory["offset_symbol"], advisory["void_ptr_param"]), (1, 1), revision)
+                self.assertEqual(audit["total"], sum(counts.values()))
+            (root / "include/unit.h").write_text(
+                '#ifdef __cplusplus\nextern "C" {\n#endif\nvoid OSReport(const char *, ...);\n'
+                "#ifdef __cplusplus\n}\n#endif\nvoid update_all(void);\n", encoding="utf-8")
+            delta = quality.compare(project, "decomp", "HEAD")
+            row = next(r for r in delta["rows"] if r["key"] == "header_extern_c")
+            self.assertEqual((row["before"], row["after"], row["removed"], row["added"]), (1, 0, 1, 0))
+            self.assertEqual(delta["new"], [])
+
     def test_units_and_classes_outside_their_home(self):
         """A unit named after an address is a fragment not in its real unit; a class declared in a C++ source file
         is a stand-in or a layout kept out of its header; a class with a body in two files is a copy (the header's

@@ -1679,7 +1679,8 @@ def check(project: Project, repo: str, base: str = "HEAD", paths: list[str] | No
             parsed = collections.defaultdict(list)
             labels = {p.key: p.label for p in catalog}
             for number, key, text in quality.parsed_findings(texts[rel], catalog, rel, image=image):
-                parsed[number].append({"key": key, "label": labels[key], "text": text})
+                if key not in quality.ADVISORY:   # signs that also fire on clean code are not added debt
+                    parsed[number].append({"key": key, "label": labels[key], "text": text})
             for number, line in enumerate(quality.blank_comments(texts[rel]).splitlines(), 1):
                 if added is not None and number not in added:
                     continue
