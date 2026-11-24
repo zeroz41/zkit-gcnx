@@ -51,7 +51,8 @@ _NEVER = r"(?!)"   # judged by a parser (PARSED) or over the whole tree (TREE_CH
 _HEX_OFFSET = (r"(?:0x)?(?!(?i:add|bad|bed|cab|dab|dad|ebb|fab|fad|fed|fee|ace|bee|cafe|face|fade|dead|deaf|beef|"
                r"babe|bead|cede|dace|abbe)\b)[0-9A-Fa-f]{1,4}\b")
 _BYTE_TYPE = r"(?:u8|s8|char|unsigned\s+char|signed\s+char|uint8_t|int8_t|byte|undefined1?)"
-_BYTE_CAST = r"\(\s*(?:const\s+)?" + _BYTE_TYPE + r"\s*\*\s*\)\s*(?:\(\s*[\w.\->]+\s*\)|[\w.\->]+)\s*"
+_OPERAND = r"&?\s*[\w.\->]+(?:\s*\[[^\[\]\n]*\])?"   # p, &p->x, &table[i]
+_BYTE_CAST = r"\(\s*(?:const\s+)?" + _BYTE_TYPE + r"\s*\*\s*\)\s*(?:\(\s*" + _OPERAND + r"\s*\)|" + _OPERAND + r")\s*"
 _PLUS_OFFSET = r"\+\s*(?:0x[0-9A-Fa-f]+|\d+)\b(?!\s*[\[(])"
 _THIS_INIT = (r"(?:\(\s*(?:const\s+)?(?:(?:struct|class)\s+)?[A-Za-z_][\w:]*\s*\*\s*\)"
               r"|(?:reinterpret|static)_cast\s*<[^>]*\*\s*>\s*)\(?\s*this\b")   # (T *)this, static_cast<T *>(this)
@@ -94,11 +95,12 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
     _p("raw_offset", "raw pointer + offset accesses ((u8 *)p + 0x30)",
        r"\(\s*" + _BYTE_CAST + r"\)\s*" + _PLUS_OFFSET + "|" + _BYTE_CAST + _PLUS_OFFSET, "layout"),
     _p("offset_cast", "casts of a pointer plus an offset ((Vec *)(p + 0x178))",
-       r"(?<!\*)(?<!\*\s)\(\s*(?:const\s+)?[A-Za-z_]\w*\s*\*+\s*\)\s*\(\s*[\w.\->]+\s*\+\s*0x[0-9A-Fa-f]+\s*\)",
+       r"(?<!\*)(?<!\*\s)(?<!\*\()(?<!\*\s\()(?<!\*\(\s)"
+       r"\(\s*(?:const\s+)?[A-Za-z_]\w*\s*\*+\s*\)\s*\(\s*[\w.\->]+\s*\+\s*0x[0-9A-Fa-f]+\s*\)",
        "layout"),
     _p("punned_deref", "type-punned or cast-pointer derefs (*(f32 *)&x, *(s32 *)(p + 0x18))",
-       r"\*\s*\(\s*(?:(?:const|volatile)\s+)*[A-Za-z_][\w:]*(?:\s+[A-Za-z_]\w*)*\s*\*+\s*(?:const\s*)?\)\s*"
-       r"(?:&|\(\s*[^()]*?\+\s*(?:0x[0-9A-Fa-f]+|\d+)\s*\))", "layout"),
+       r"\*\s*(?:\(\s*)?\(\s*(?:(?:const|volatile)\s+)*[A-Za-z_][\w:]*(?:\s+[A-Za-z_]\w*)*\s*\*+\s*(?:const\s*)?\)\s*"
+       r"(?:\(\s*)?(?:&|\(\s*[^()]*?\+\s*(?:0x[0-9A-Fa-f]+|\d+)\s*\))", "layout"),
     _p("offset_member", "offset-named members (unk_30, m_c, field_96, set_field_378, ->f30, ->x7A, ->b9)",
        r"\b(?:m_|unk_?|unknown_?|field_?|mbr_)" + _HEX_OFFSET +
        r"|\b[A-Za-z]\w*?_(?:field|unk|unknown)_?" + _HEX_OFFSET +
@@ -108,6 +110,11 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
        r"|(?:->|\.)\s*[bfhw][0-9A-F]\b", "layout"),   # one hex digit: byte, field, half or word at 0-F
     # a padding field a function body reads or writes has a meaning (`pad_accesses`)
     _p("pad_access", "padding fields read or written (p->pad_3E = 0)", _NEVER, "layout"),
+    _p("offsetof_access", "offsetof used as an address (bytes[offsetof(TWidget, pos)], p + offsetof(TWidget, pos))",
+       r"(?:[\w)\]]\s*\+\s*\(?\s*|\[\s*)offsetof\s*\([^()\n]*\)", "layout", needle=r"offsetof"),
+    # an object read as an array of scalars (`scalar_views`)
+    _p("scalar_view", "objects indexed as arrays of scalars (((s16 *)this)[9], ((u32 *)widget)[i])", _NEVER,
+       "layout"),
     _p("size_assert", "hand-written size asserts (typedef char check[sizeof(T) == 8 ? 1 : -1];)", _NEVER, "layout",
        blocks_port=False),
     _p("blob_type", "size-named blob types (ByteBlock_28)", r"\bByteBlock_?(?:0x)?[0-9A-Fa-f]{1,4}\b", "layout",
@@ -118,33 +125,58 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
     _p("fp_cast", "calls through function-pointer casts ((void (*)(T *))p)",
        r"\(\s*[A-Za-z_][\w:\s\*&<>,]*\(\s*\*+\s*\)\s*\([^()]*\)\s*\)\s*[\w(*&]", "types"),
     # counted on the text with its string literals kept (`string_casts`)
-    _p("string_cast", "string literals cast to integers ((saddr)\"file.gvm\")",
-       r"\(\s*" + _INT_TYPE + r"\s*\)\s*\"", "types"),
+    _p("string_cast", "string literals cast to integers or void * ((saddr)\"file.gvm\")",
+       r"\(\s*(?:" + _INT_TYPE + r"|(?:const\s+)?void\s*\*)\s*\)\s*\"", "types"),
     _p("ghidra_type", "Ghidra placeholder types (undefined4, code *)", r"\bundefined[1248]?\b", "types"),
     _p("address_type", "address-named types (Obj_800EB910 *, TUnk_804806E8::, VObj_18_...)",
        r"\b(?:struct|class|union)\s+[A-Za-z]\w*?_[0-9A-Fa-f]{8}\w*"
        r"|\b(?!(?:lbl|fn|FUN|func|sub|DAT|PTR|dat|jumptable|switch)_)[A-Za-z]\w*?_[0-9A-Fa-f]{8}\w*(?=\s*(?:[*&]|::|<))",
        "types"),
+    _p("hash_type", "hash-named types (VObj_18_4a35f9)",
+       r"\b[A-Z][A-Za-z]*_(?:[0-9A-Fa-f]{1,3}_)?(?=[0-9a-f]*\d)[0-9a-f]{6}\b", "types"),
     _p("retype_macro", "#define re-typings of globals or functions",
        r"#\s*define\s+(\w+)\s+\(\s*\*\s*\([^)]*\*\s*\)\s*&\s*\1\s*\)|#\s*define\s+(\w+)\s+\(\s*\([^)]*\(\s*\*\s*\)\s*\([^)]*\)\s*\)\s*\2\s*\)",
        "types"),
-    # a lower-case object-like macro standing in for an expression (re-typing macros are counted above)
-    _p("alias_macro", "lower-case object macros (#define obj ((T *)this))",
+    # an object-like macro standing in for a value: any lower-case one, and an upper-case one that is a cast
+    # (re-typing macros are counted above)
+    _p("alias_macro", "object macros standing in for values (#define obj ((T *)this), #define SELF ((T *)this))",
        r"(?m)^[ \t]*#[ \t]*define[ \t]+(?!_|nullptr\b)([a-z]\w*)[ \t]+"
-       r"(?!\(\s*\*\s*\([^)]*\*\s*\)\s*&\s*\1\s*\)|\(\s*\([^)]*\(\s*\*\s*\)\s*\([^)]*\)\s*\)\s*\1\s*\))\S[^\n]*",
-       "types", needle=r"define[ \t]+[a-z]"),
+       r"(?!\(\s*\*\s*\([^)]*\*\s*\)\s*&\s*\1\s*\)|\(\s*\([^)]*\(\s*\*\s*\)\s*\([^)]*\)\s*\)\s*\1\s*\))\S[^\n]*"
+       r"|^[ \t]*#[ \t]*define[ \t]+(?!NULL\b)[A-Z_][A-Z0-9_]*[ \t]+\(?\s*\(\s*(?:const\s+)?(?:(?:struct|class)\s+)?"
+       r"[A-Za-z_]\w*\s*\*+\s*\)\s*\(?\s*[A-Za-z_&][^\n]*",
+       "types", needle=r"define[ \t]+\w"),
     _p("this_alias", "aliases of this (TWidget *self = (TWidget *)this;)",
        r"\b[A-Za-z_][\w:]*\s*\*\s*(?:const\s+)?(?:\w+\s*=\s*" + _THIS_INIT + r"\s*\)?\s*;|" + _SELF_THIS + ")",
        "types", needle=r"this"),
     # an integer cast to a pointer (a round trip when the integer was a pointer), and a pointer cast to an integer
     _p("ptr_int_roundtrip", "casts between pointers and integers ((T *)(u32)p, (u32)(T *)p)",
        r"\(\s*(?:const\s+)?[A-Za-z_]\w*\s*\*+\s*\)\s*\(\s*" + _INT_TYPE + r"\s*\)"
-       r"|\(\s*" + _INT_TYPE + r"\s*\)\s*\(\s*(?:const\s+)?[A-Za-z_]\w*\s*\*+\s*\)", "types"),
+       r"|\(\s*" + _INT_TYPE + r"\s*\)\s*\(\s*(?:const\s+)?[A-Za-z_]\w*\s*\*+\s*\)"
+       # pointer arithmetic done on an integer: (T *)((u32)p + 0x10)
+       r"|\(\s*(?:const\s+)?[A-Za-z_]\w*\s*\*+\s*\)\s*\(\s*(?:\(\s*)?\(\s*" + _INT_TYPE
+       + r"\s*\)\s*[\w.\->]+(?:\s*\([^()]*\))?\s*\)?\s*[-+]", "types"),
     _p("repeat_cast", "values cast to one type again and again (((TWidget *)p)->x = ((TWidget *)p)->y;)", _NEVER,
        "types"),
+    # casts judged by the declared type of what they cast (`typed_casts`): a local, parameter or file-scope variable
+    _p("redundant_cast", "casts to the type a value already has (TWidget w; f((TWidget *)&w);)", _NEVER, "types"),
+    _p("void_value", "void * values cast back to a type (void *w = ...; ((TWidget *)w)->x)", _NEVER, "types"),
+    _p("pointer_as_int", "pointers and addresses cast to integers (f((saddr)&pos), (u32)widget)", _NEVER, "types"),
+    # judged over every file: a pointer cast to a class neither derived from nor a base of its own
+    _p("cross_cast", "pointers cast to an unrelated class (TPlayer *p; ((TWidget *)p)->f())", _NEVER, "types"),
+    _p("void_arg", "void * casts on call arguments (f((void *)widget))", _NEVER, "types", needle=r"void"),
+    _p("void_table", "tables of void pointers (void *handlers[] = {)",
+       r"\bvoid\s*\*\s*(?:const\s+)?(?!(?i:\w*(?:vt|vtable|vtbl)))\w+\s*\[[^\]\n]*\]\s*(?:\[[^\]\n]*\]\s*)*=\s*\{",
+       "types", needle=r"void"),
+    _p("byte_new", "allocations by byte count (operator new(0x1C))",
+       r"\boperator\s+new\s*\(\s*(?:0x[0-9A-Fa-f]+|\d+)[uUlL]*\s*\)", "types", needle=r"operator"),
+    _p("cast_macro", "function-like macros that cast their arguments (#define HP(p) (((TObjChara *)(p))->hp))",
+       _NEVER, "types", needle=r"define"),
+    _p("static_this", "own members called with this as an argument (TWidget::update(this, dt))", _NEVER, "types",
+       needle=r"this"),
     _p("decomp_temp", "m2c temporaries (temp_r3, var_f31)", r"\b(?:temp|var)_[rfa]\d+(?:_\d+)?\b", "decompiler"),
     _p("stack_local", "stack-slot locals (sp8, sp1C)", r"\bsp[0-9A-F]{1,3}\b", "decompiler"),
-    _p("arg_name", "argN parameters (arg0, farg1)", r"\bf?arg\d+\b", "decompiler"),
+    _p("arg_name", "numbered parameters (arg0, farg1, arg2_, param1)", r"\bf?arg_?\d+(?:_\w*)?\b|\bparam\d+\b",
+       "decompiler"),
     _p("ghidra_temp", "Ghidra temporaries (iVar1, puVar2, param_1, local_10)",
        r"\b(?:[a-z]{1,3}Var\d+|param_\d+|local_[0-9a-fA-F]+|unaff_\w+|extraout_\w+|auStack_\w+|"
        r"in_(?:[a-z]{1,4}\d+|lr|ctr|xer|fpscr|fpcr|sp|pc|nzcv|tpidr\w*|stack_[0-9a-fA-F]+|[A-Z]\w*))\b",
@@ -163,7 +195,7 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
        needle=r"goto|(?:block|loop|label|lbl|bb|lab)_?[0-9A-Fa-f]+\s*:"),
     _p("permuter_var", "permuter variables (new_var2, phi_r3)", r"\bnew_var\d*\b|\bsaved_reg_\w+|\bphi_[rf]\d+\b",
        "decompiler", needle=r"new_var|saved_reg_|phi_"),
-    _p("no_op", "no-op statements (x = x; if (1))", _NEVER, "decompiler", blocks_port=False),
+    _p("no_op", "no-op statements (x = x; if (1), extern \"C\" {})", _NEVER, "decompiler", blocks_port=False),
     _p("data_label", "address-named data (lbl_8045A010, DAT_, Class__data_)",
        r"\b(?:lbl|DAT|PTR|dat)_[0-9A-Fa-f]{6,16}\b|\b\w+__data_[0-9A-Fa-f]{6,16}\b", "names"),
     _p("function_placeholder", "address-named functions (fn_, FUN_, sub_, Class__sub_)",
@@ -171,6 +203,8 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
     _p("address_in_name", "names built around an address (call_36A90_with_1)",
        r"\b(?!(?:lbl|fn|sub|func|dat|ptr|jumptable|switch|temp|var|arg|sp|text|data|bss|rodata)_[0-9A-F])"
        r"[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_(?=[0-9A-F]*\d)[0-9A-F]{5,8}_[A-Za-z0-9]\w*\b", "names"),
+    _p("hex_name", "names holding hex numbers (set_mode_0x15)", r"\b[A-Za-z_]\w*?0x[0-9A-Fa-f]+\w*", "names",
+       needle=r"0x"),
     # any other identifier holding an address of the image (`address_idents`)
     _p("address_ident", "other address-named identifiers (Thing_80123456)", _NEVER, "names"),
     # a parameter named by a placeholder in a prototype or its definition and really named in the other
@@ -184,8 +218,9 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
     _p("filler_virtual", "filler virtuals (VA, CAT(f, __LINE__), reserved_N, slotNN)",
        r"CAT\s*\(\s*\w+\s*,\s*__LINE__\s*\)|\bvirtual\s+\w[\w\s\*&]*\b(?:reserved|virtual|slot|dummy|pad)_?\d+\s*\(",
        "vtables"),
-    _p("slot_name", "vtable-slot names (vfunc_67, vf12, Class__vt82)", r"\bvfunc_?\d+(?!\d)|\bvf\d+\b|\b[A-Za-z_]\w*?__vt\d+(?!\d)",
-       "vtables"),
+    _p("slot_name", "vtable-slot names (vfunc_67, vf12, Class__vt82, ->m4())",
+       r"\bvfunc_?\d+(?!\d)|\bvf\d+\b|\b[A-Za-z_]\w*?__vt\d+(?!\d)"
+       r"|(?:->|\.)\s*(?:(?![bfhw]\d\b)[a-z]{1,2}\d|m[0-3][0-3])\s*\(", "vtables"),
     _p("local_virtual", "virtual declarations in source files (TU-local stand-in classes)",
        r"(?m)^\s*virtual\b[^;{]*[;{]", "vtables", sources_only=True),
     # where units and classes live: a unit named after an address is a fragment not yet in its real unit (a header
@@ -218,37 +253,50 @@ DISPLAY = {   # key -> (name, example)
     "punned_deref": ("Type-punned dereferences", "*(f32 *)&x, *(s32 *)(p + 0x18)"),
     "offset_member": ("Offset-named fields", "unk_30, m_c, field_96, set_field_378, ->x7A, ->b9"),
     "pad_access": ("Padding fields read or written", "p->pad_3E = 0"),
+    "offsetof_access": ("offsetof as an address", "bytes[offsetof(TWidget, pos)], p + offsetof(TWidget, pos)"),
+    "scalar_view": ("Objects indexed as scalars", "((s16 *)this)[9], ((u32 *)widget)[i]"),
     "size_assert": ("Hand-written size asserts", "typedef char check[sizeof(T) == 8 ? 1 : -1];"),
     "blob_type": ("Size-named blob types", "ByteBlock_28"),
     "overlay_type": ("Structs only reached by casts", "struct PhaseView { u8 pad[0x28]; s32 phase; };"),
     "fp_cast": ("Function-pointer casts", "((void (*)(T *))p)(x)"),
-    "string_cast": ("Strings cast to integers", '(saddr)"file.gvm"'),
+    "string_cast": ("Strings cast to integers or void *", '(saddr)"file.gvm"'),
     "ghidra_type": ("Ghidra types", "undefined4"),
     "address_type": ("Address-named types", "TUnk_804806E8"),
+    "hash_type": ("Hash-named types", "VObj_18_4a35f9"),
     "retype_macro": ("Re-typing macros", "#define g (*(T *)&g)"),
-    "alias_macro": ("Lower-case object macros", "#define obj ((T *)this)"),
+    "alias_macro": ("Object macros for values", "#define obj ((T *)this), #define SELF ((T *)this)"),
     "this_alias": ("Aliases of this", "TWidget *self = (TWidget *)this;"),
     "ptr_int_roundtrip": ("Casts between pointers and integers", "(T *)(u32)p, (u32)(T *)p"),
     "repeat_cast": ("Values cast to one type again and again", "((TWidget *)p)->x = ((TWidget *)p)->y;"),
+    "redundant_cast": ("Casts to the type a value already has", "TWidget w; f((TWidget *)&w);"),
+    "void_value": ("void * values cast back to a type", "void *w = ...; ((TWidget *)w)->x"),
+    "pointer_as_int": ("Pointers and addresses cast to integers", "f((saddr)&pos), (u32)widget"),
+    "cross_cast": ("Pointers cast to an unrelated class", "TPlayer *p; ((TWidget *)p)->f()"),
+    "void_arg": ("void * casts on arguments", "f((void *)widget)"),
+    "void_table": ("Tables of void pointers", "void *handlers[] = {"),
+    "byte_new": ("Allocations by byte count", "operator new(0x1C)"),
+    "cast_macro": ("Function macros that cast their arguments", "#define HP(p) (((TObjChara *)(p))->hp)"),
+    "static_this": ("Own members called with this", "TWidget::update(this, dt)"),
     "decomp_temp": ("m2c temporaries", "temp_r3, var_f31"),
     "stack_local": ("Stack-slot locals", "sp1C"),
-    "arg_name": ("Numbered parameters", "arg0, farg1"),
+    "arg_name": ("Numbered parameters", "arg0, farg1, arg2_, param1"),
     "ghidra_temp": ("Ghidra temporaries", "iVar1, param_1"),
     "m2c_macro": ("m2c macros", "M2C_FIELD"),
     "address_comment": ("Address comments", "// moved from 0x8043E828, // was fn_80123456"),
     "register_name": ("Register-style names", "f32 f31; void f(s32 r3)"),
     "decomp_label": ("Decompiler labels", "goto block_12;"),
     "permuter_var": ("Permuter variables", "new_var2, phi_r3"),
-    "no_op": ("No-op statements", "x = x; if (1)"),
+    "no_op": ("No-op statements", "x = x; if (1), extern \"C\" {}"),
     "data_label": ("Address-named data", "lbl_8045A010"),
     "function_placeholder": ("Address-named functions", "fn_80123456, TEnemy__sub_80123456"),
     "address_in_name": ("Names built on an address", "call_36A90_with_1"),
+    "hex_name": ("Names holding hex numbers", "set_mode_0x15"),
     "address_ident": ("Other address-named identifiers", "Thing_80123456"),
     "param_name_split": ("Placeholder parameters named on the other side", "f(int arg0); / f(int count) {"),
     "vtable_symbol": ("Vtable symbols in source", "__vt__6TEnemy"),
     "hand_vtable": ("Hand-written vtables", "void *TEnemy_vtable[] = {"),
     "filler_virtual": ("Filler virtuals", "virtual void reserved_3();"),
-    "slot_name": ("Slot-numbered names", "vfunc_67, TEnemy__vt82"),
+    "slot_name": ("Slot-numbered names", "vfunc_67, TEnemy__vt82, ->m4()"),
     "local_virtual": ("Virtuals in source files", "virtual void draw();"),
     "address_unit": ("Units named after an address", "TEnemy_80123456.cpp"),
     "local_class": ("Classes declared in source files", "struct EnemyView : TObject {"),
@@ -284,10 +332,106 @@ def _strip_comments(text: str) -> str:
 
 
 def blank_comments(text: str) -> str:
-    """`text` with comments and string literals dropped as `_strip_comments` drops them, but every line kept in
-    place, so a line read on its own inside a block comment is not taken for code."""
-    return re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"',
-                  lambda m: "\n" * m[0].count("\n") if m[0][0] == "/" else '""', text, flags=re.S)
+    """`text` with comments and string literals dropped as `_strip_comments` drops them and C++ casts spelled as C
+    casts (`c_casts`), but every line kept in place, so a line read on its own inside a block comment is not taken
+    for code and a cast is one shape."""
+    return c_casts(re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"',
+                          lambda m: "\n" * m[0].count("\n") if m[0][0] == "/" else '""', text, flags=re.S))
+
+
+_CXX_CAST = re.compile(r"\b(?:reinterpret|static|const|dynamic)_cast\s*<")
+_POSTFIX_NEXT = re.compile(r"\s*(?:->|\.(?!\.)|\[|\(|\+\+|--)")
+
+
+def c_casts(code: str, pad: bool = False) -> str:
+    """Each `reinterpret_cast<T>(e)` (and static_, const_, dynamic_) spelled as the C cast `(T)e` would be written:
+    the operand in parentheses only when it has an operator, the whole in parentheses only when a postfix operator
+    follows. A respelled cast then reads, and is reported, the same as the C cast. Newlines are kept (after the
+    cast); with pad, spaces after it keep the length too. Innermost first: the rightmost cast has no cast inside
+    it, and a rewrite keeps every offset before it."""
+    if "_cast" not in code:
+        return code
+    for match in reversed(list(_CXX_CAST.finditer(code))):
+        depth, at = 1, match.end()
+        while at < len(code) and depth:
+            c = code[at]
+            depth += c == "<"
+            depth -= c == ">" and code[at - 1] != "-"
+            if c in ";{}":
+                break
+            at += 1
+        if depth:
+            continue
+        kind = code[match.end():at - 1]
+        while at < len(code) and code[at] in " \t\n":
+            at += 1
+        if at >= len(code) or code[at] != "(":
+            continue
+        end = _parenthesis(code, at)
+        if end is None:
+            continue
+        operand = code[at + 1:end]
+        spelled = "(" + " ".join(kind.split()) + ")" + (operand if _bare_operand(operand) else "(" + operand + ")")
+        if _POSTFIX_NEXT.match(code, end + 1) or code[:match.start()].rstrip().endswith("sizeof"):
+            spelled = "(" + spelled + ")"
+        span = code[match.start():end + 1]
+        lines = span.count("\n") - operand.count("\n")   # newlines outside the operand
+        spaces = len(span) - len(spelled) - lines if pad else 0
+        if spaces < 0:
+            continue
+        code = code[:match.start()] + spelled + "\n" * lines + " " * spaces + code[end + 1:]
+    return code
+
+
+def _bare_operand(operand: str) -> bool:
+    """Whether a cast operand needs no parentheses: unary prefixes, then a name, number or parenthesised group with
+    only member access, calls and indexing after it (no binary operator at the top level)."""
+    code = operand.strip().lstrip("&*!~- \t\n")
+    at = 0
+    if not code:
+        return False
+    while at < len(code):
+        c = code[at]
+        if c in "([":
+            close = _closing(code, at)
+            if close is None:
+                return False
+            at = close + 1
+        elif c.isalnum() or c in "_. \t\n\"":
+            at += 1
+        elif code.startswith("->", at) or code.startswith("::", at):
+            at += 2
+        else:
+            return False
+    return True
+
+
+def _closing(code: str, at: int) -> int | None:
+    """The offset of the bracket closing the `(` or `[` at `at`, or None."""
+    depth = 0
+    for index in range(at, len(code)):
+        c = code[index]
+        depth += c in "(["
+        depth -= c in ")]"
+        if not depth:
+            return index
+    return None
+
+
+def _parenthesis(code: str, at: int) -> int | None:
+    """The offset of the `)` matching the `(` at `at`, or None (unbalanced before a `;`, `{` or `}`)."""
+    depth = 0
+    for index in range(at, len(code)):
+        c = code[index]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if not depth:
+                return index
+        elif c in ";{}":
+            return None
+    return None
 
 
 _EXTERN_C = re.compile(_EXTERN_PATTERN + r"\s*")
@@ -391,12 +535,13 @@ class _Source:
         self._code = self._defs = self._bodies = self._line = self._kept = None
         self._prototypes: list = []
         self._matches: dict[tuple[str, str], list[re.Match]] = {}
+        self._typed: list | None = None   # see typed_casts()
 
     @property
     def code(self) -> str:
         if self._code is None:
             from .cxx import blank
-            self._code = blank(self.text)
+            self._code = c_casts(blank(self.text), pad=True)   # C++ casts spelled as C casts, offsets kept
         return self._code
 
     @property
@@ -803,6 +948,7 @@ def self_params(rel: str, source: _Source) -> list[tuple[int, str]]:
 
 _SCALAR = (r"(?:(?:unsigned|signed)\s+)?(?:u8|s8|u16|s16|u32|s32|u64|s64|f32|f64|uaddr|saddr|int|char|short|long|"
            r"float|double|bool|BOOL|uintptr_t|intptr_t|size_t|unsigned|signed|void|vu8|vu16|vu32|vs32)")
+_SCALAR_NAME = re.compile(_SCALAR + r"$")
 # no r0-r2: under the PowerPC EABI r0 is scratch, r1 the stack pointer and r2 the SDA2 base, never a named local
 _REGISTER = re.compile(r"\b(?:f(?:[0-9]|[12][0-9]|3[01])|r(?:[3-9]|[12][0-9]|3[01]))\b")
 _TYPE_BEFORE = re.compile(r"\b(?:" + _SCALAR + r"|const|struct|class|[A-Z]\w*|[a-z]\w*_t)\s*[\*&]*\s*$")
@@ -859,7 +1005,8 @@ _CONSTANT_TEST = re.compile(r"if\s*\(\s*(?:0|1|true|false|TRUE|FALSE)\s*\)|while
 
 
 def no_ops(source: _Source) -> list[tuple[int, str]]:
-    """(line, statement) of each no-op: `x = x;`, `if (1)`, `while (0)` (a decompiler's or permuter's shape)."""
+    """(line, statement) of each no-op: `x = x;`, `if (1)`, `while (0)` (a decompiler's or permuter's shape), and an
+    empty `extern "C" {}`."""
     code = source.code
     out = []
     for m in _SELF_ASSIGNED.finditer(code):
@@ -873,7 +1020,278 @@ def no_ops(source: _Source) -> list[tuple[int, str]]:
     for m in _CONSTANT_TEST.finditer(code):
         if not (m.start() and _word(code[m.start() - 1])):
             out.append((m.start(), _normal(m[0])))
-    return [(source.line(at), found) for at, found in sorted(out)]
+    found = [(source.line(at), text) for at, text in sorted(out)]
+    if "extern" in code:
+        kept = source.kept
+        line = _line_index(kept)
+        found += [(line(m.start()), 'extern "C" {}') for m in _EMPTY_EXTERN.finditer(kept)]
+    return found
+
+
+_EMPTY_EXTERN = re.compile(r'\bextern\s+"[^"\n]*"\s*\{\s*\}')
+
+
+_TYPE_WORDS = r"(?:(?:unsigned|signed|long|short)\s+)*[A-Za-z_][\w:]*"
+# a declaration of one variable: [qualifiers] type [*...] name, then = ; , ) or [
+_VAR_DECL = re.compile(r"(?:(?<=[;{}(,])|^)\s*(?:(?:const|volatile|static|register|struct|class|union)\s+)*"
+                       r"(" + _TYPE_WORDS + r")(\s+|\s*(?:\*\s*(?:const\b\s*)?)+)([A-Za-z_]\w*)\s*(?=[=;,)\[])", re.M)
+_NOT_TYPE = {"return", "goto", "delete", "case", "else", "new", "throw", "typedef", "using", "namespace", "sizeof",
+             "do", "if", "while", "for", "switch", "operator", "public", "private", "protected", "virtual", "inline",
+             "friend", "template", "typename", "explicit", "default", "extern", "enum", "const", "volatile"}
+# (T *)x, (T *)&x, (T)(x), (T *)&a->b.c: a cast whose whole operand is a name, its address, or a member's address
+_VAR_CAST = re.compile(r"(?<![\w)\]])\(\s*(?:(?:const|volatile)\s+)*(?:(?:struct|class|union)\s+)?(" + _TYPE_WORDS
+                       + r")\s*((?:\*\s*(?:const\b\s*)?)*)\)\s*(\()?\s*(&\s*)?(this|[A-Za-z_]\w*)"
+                       r"((?:\s*(?:->|\.)\s*[A-Za-z_]\w*|\s*\[[^\[\]]*\])*)\s*(?(3)\))"
+                       r"(?!\s*(?:\(|\[|->|\.(?!\.)|::|\+\+|--))")
+# a binary + - * / % & | ^ << >> next to an operand (not -> -- ++ && || or a unary & * after an operator)
+_ARITH_AFTER = re.compile(r"\s*(?:[+*/%^]|-(?![->])|&(?!&)|\|(?!\|)|<<|>>)(?!=)")
+_ARITH_BEFORE = re.compile(r"(?:[\w)\]]\s*(?:[+*/%^]|-|&|\|)|<<|>>)\s*\(?\s*$")
+_INDEXED = re.compile(r"\s*\)\s*\[")
+_INT_NAMES = {"saddr", "uaddr", "u32", "s32", "uintptr_t", "intptr_t", "int", "long", "unsigned", "unsigned int",
+              "unsigned long", "signed int", "signed long"}
+_BYTE_TYPES = {"void", "u8", "s8", "char", "unsigned char", "signed char", "uint8_t", "int8_t", "byte"}
+
+
+@dataclass(frozen=True)
+class TypedCast:
+    offset: int        # of the cast in blank(text)
+    cast: str          # the type cast to, less qualifiers and its pointers: TWidget
+    depth: int         # its pointer depth
+    address: bool      # the operand is &name...
+    name: str          # the operand's variable (this for this)
+    member: bool       # the operand goes on to a member or element (&a->b)
+    declared: str      # the variable's declared type ("" when unknown)
+    declared_depth: int
+    declared_at: int   # offset of the variable's declaration (-1 when unknown)
+    text: str
+    array: bool = False   # the variable is an array of declared_depth pointers
+    arithmetic: bool = False   # the cast is an operand of + - * / % & | ^ << >>
+    indexed: bool = False      # ((T *)x)[i]
+
+
+_FOR_OPEN = re.compile(r"\bfor\s*\($")
+
+
+def _declarations(code: str, start: int, end: int, lists: tuple = ()) -> dict[str, tuple[str, int, int, bool]]:
+    """name -> (type, pointer depth, offset, array) of the variables declared between start and end: statements, and
+    after a ( or , only in a parameter list (lists: their parenthesis offsets) or a for. A name declared as two types
+    is dropped."""
+    out: dict[str, tuple[str, int, int, bool] | None] = {}
+    chunk = code[start:end]
+    for match in _VAR_DECL.finditer(chunk):
+        kind = " ".join(match[1].split())
+        if kind in _NOT_TYPE or kind.split()[0] in _NOT_TYPE or match[3] in _NOT_TYPE:
+            continue
+        at = start + match.start()
+        lead = code[at - 1] if at else ";"
+        if lead in "(," and not any(a < at <= b for a, b in lists) \
+                and not _FOR_OPEN.search(code, max(0, at - 8), at):
+            continue
+        array = chunk[match.end():match.end() + 1] == "["
+        found = (kind, match[2].count("*"), start + match.start(3), array)
+        if match[3] in out and (out[match[3]] is None or out[match[3]][:2] != found[:2]
+                                or out[match[3]][3] != array):
+            out[match[3]] = None
+        elif match[3] not in out:
+            out[match[3]] = found
+    return {name: found for name, found in out.items() if found}
+
+
+def _global_decls(code: str) -> dict[str, tuple[str, int, int, bool]]:
+    """Variables declared at file scope (outside every body and brace), as _declarations()."""
+    depth, outside, at = 0, [], 0
+    for index, c in enumerate(code):
+        if c == "{":
+            if depth == 0:
+                outside.append((at, index))
+            depth += 1
+        elif c == "}":
+            depth = max(depth - 1, 0)
+            if depth == 0:
+                at = index + 1
+    outside.append((at, len(code)))
+    out: dict[str, tuple[str, int, int, bool] | None] = {}
+    for start, end in outside:
+        for name, found in _declarations(code, start, end).items():
+            if name in out and (out[name] is None or out[name][:2] != found[:2] or out[name][3] != found[3]):
+                out[name] = None
+            elif name not in out:
+                out[name] = found
+    return {name: found for name, found in out.items() if found}
+
+
+def typed_casts(source: _Source) -> list[TypedCast]:
+    """Each cast in a function body whose operand is a variable (or its address, or a member's address), with the
+    variable's declared type: its parameter or local declaration, else the file's. Found once per file."""
+    if source._typed is not None:
+        return source._typed
+    code, out = source.code, []
+    defs = [d for d in source.defs if d.span[1] > d.span[0]]
+    if defs and "(" in code:
+        globals_ = _global_decls(code)
+        lists = tuple(d.parens for d in defs if d.parens[1] > d.parens[0])
+        for start, stop in _outermost((d.parens[0], d.span[1]) for d in defs if d.parens[1] > d.parens[0]):
+            local = _declarations(code, start, stop, lists)
+            for match in _VAR_CAST.finditer(code, start, stop):
+                before = code[max(start, match.start() - 8):match.start()]
+                if re.search(r"\b(?:if|while|for|switch|return|sizeof)\s*$", before):
+                    continue
+                cast = re.sub(r"^(?:struct|class|union)\s+", "", " ".join(match[1].split()))
+                if cast in _NOT_TYPE:
+                    continue
+                name = match[5]
+                kind, depth, at, array = local.get(name) or globals_.get(name) or ("", 0, -1, False)
+                arithmetic = bool(_ARITH_AFTER.match(code, match.end()) or _ARITH_BEFORE.search(code, start, match.start()))
+                indexed = bool(_INDEXED.match(code, match.end())) and code[:match.start()].rstrip().endswith("(")
+                out.append(TypedCast(match.start(), cast, match[2].count("*"), bool(match[4]), name,
+                                     bool(match[6].strip()), kind, depth, at, _normal(match[0]), array, arithmetic,
+                                     indexed))
+    source._typed = out
+    return out
+
+
+def redundant_casts(source: _Source) -> list[tuple[int, str]]:
+    """(line, cast) of each cast of a variable, or of its address, to the type it already has: `(T *)&t` for `T t`,
+    `(T)t` for `T t`. A cast that changes nothing is left from a decompiler or from a retyping."""
+    return [(source.line(c.offset), c.text) for c in typed_casts(source)
+            if c.declared and not c.member and c.name != "this" and c.cast == c.declared
+            and (c.depth == c.declared_depth + c.address or (c.array and c.depth == c.declared_depth + 1))]
+
+
+_CONST_VOID = re.compile(r"\bconst\s+void\s*\*\s*(?:const\s+)?$")   # a read-only buffer of any type
+
+
+def void_values(source: _Source) -> list[tuple[int, str]]:
+    """(line, declaration) of each `void *` parameter or local, once, that its function casts to a pointer to some
+    other type (not a byte or void pointer): the variable has that type. `const void *` stays, a read-only buffer of
+    any type."""
+    seen, code, callbacks = {}, source.code, None
+    for c in typed_casts(source):
+        if c.declared == "void" and c.declared_depth == 1 and not c.address and not c.member and c.depth \
+                and c.cast not in _BYTE_TYPES and c.declared_at >= 0 and c.declared_at not in seen \
+                and not _CONST_VOID.search(code, max(0, c.declared_at - 40), c.declared_at):
+            if callbacks is None:
+                values = _values(code)
+                callbacks = [d.parens for d in source.defs if d.span[1] > d.span[0] and _passed_as_value(d.name, values)]
+            if not any(start < c.declared_at < stop for start, stop in callbacks):
+                seen[c.declared_at] = f"void *{c.name}"
+    return [(source.line(at), text) for at, text in sorted(seen.items())]
+
+
+_VALUE_NAME = re.compile(r"(?<![\w.>~])(?:\w+::)*([A-Za-z_]\w*)\b(?!\s*[(*&\w])")
+
+
+def _values(code: str) -> set[str]:
+    """Names used as values in code, other than right after a cast: `qsort(.., compare)`, `= handler;`. A
+    function so used is a callback, whose signature its caller fixes; `(void *)f` in a table fixes nothing."""
+    out = set()
+    for match in _VALUE_NAME.finditer(code):
+        at = match.start() - 1
+        while at >= 0 and code[at] in " \t\n":
+            at -= 1
+        if at < 0 or code[at] != ")":
+            out.add(match[1])
+    return out
+
+
+def _passed_as_value(name: str, values: set[str]) -> bool:
+    """Whether the function `name` (not a constructor, destructor or operator) is used as a value (_values)."""
+    parts = name.split("::")
+    bare = parts[-1]
+    return not (bare.startswith(("~", "operator")) or len(parts) > 1 and parts[-2] == bare) and bare in values
+
+
+def pointers_as_int(source: _Source) -> list[tuple[int, str]]:
+    """(line, cast) of each address, pointer variable or this cast to an integer: `(saddr)&pos`, `(u32)widget`."""
+    return [(source.line(c.offset), c.text) for c in typed_casts(source)
+            if not c.depth and c.cast in _INT_NAMES and not c.arithmetic
+            and (c.address or ((c.name == "this" or c.declared_depth or c.array) and not c.member))]
+
+
+def scalar_views(source: _Source) -> list[tuple[int, str]]:
+    """(line, cast) of each object read as an array of scalars: `((s16 *)this)[9]`, `((u32 *)widget)[i]` for a
+    pointer to a class or struct."""
+    return [(source.line(c.offset), c.text) for c in typed_casts(source)
+            if c.indexed and c.depth == 1 and _SCALAR_NAME.match(c.cast) and not c.member and not c.address
+            and (c.name == "this" or (c.declared_depth == 1 and not c.array and c.declared
+                                      and not _SCALAR_NAME.match(c.declared)))]
+
+
+_VOID_CAST = re.compile(r"\(\s*(?:const\s+)?void\s*\*\s*\)\s*(?!\s|0\b|NULL\b|\)|,)")
+_NOT_CALL = {"if", "while", "switch", "return", "sizeof", "for", "do", "else", "case"}
+
+
+def void_args(source: _Source) -> list[tuple[int, str]]:
+    """(line, argument) of each `(void *)` cast on a call's argument, other than of 0 or NULL: a pointer converts to
+    void * by itself, so the cast either does nothing or turns an integer into a pointer."""
+    code, out = source.code, []
+    for match in _VOID_CAST.finditer(code):
+        depth, at = 0, match.start() - 1
+        while at >= 0:
+            c = code[at]
+            if c in ")]}":
+                depth += 1
+            elif c in "([{":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif c == ";" and depth == 0:
+                at = -1
+                break
+            at -= 1
+        if at < 0 or code[at] != "(":
+            continue
+        callee = re.search(r"([A-Za-z_]\w*)\s*$", code[max(0, at - 80):at])
+        if not callee or callee[1] in _NOT_CALL:
+            continue
+        end, depth = match.end(), 0
+        while end < len(code):
+            c = code[end]
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif c == "," and depth == 0 or c == ";":
+                break
+            end += 1
+        out.append((source.line(match.start()), _normal(code[match.start():end])))
+    return out
+
+
+_MACRO = re.compile(r"(?m)^[ \t]*#[ \t]*define[ \t]+(\w+)\(([^)\n]*)\)((?:[^\n]*\\\n)*[^\n]*)")
+
+
+def cast_macros(source: _Source) -> list[tuple[int, str]]:
+    """(line, `#define NAME`) of each function-like macro whose body casts one of its parameters to a pointer to some
+    type other than void or a byte: each use re-types an argument out of sight."""
+    kept, out = source.kept, []
+    if "define" not in kept:
+        return out
+    line = _line_index(kept)
+    for match in _MACRO.finditer(kept):
+        for param in (p.strip() for p in match[2].split(",")):
+            if param and param != "..." and re.search(
+                    r"\(\s*(?:const\s+)?(?:(?:struct|class|union)\s+)?(?!(?:void|" + _BYTE_TYPE + r")\s*\*)[A-Za-z_][\w:]*\s*\*+\s*(?:const\s*)?\)"
+                    r"\s*\(?\s*" + re.escape(param) + r"\b", match[3]):
+                out.append((line(match.start()), f"#define {match[1]}"))
+                break
+    return out
+
+
+def static_this_calls(source: _Source) -> list[tuple[int, str]]:
+    """(line, call) of each `C::f(this, ...)` in a member of C: a member written as a static that takes its object."""
+    code, out = source.code, []
+    for d in source.defs:
+        owner = d.owner
+        if not owner or d.span[1] <= d.span[0]:
+            continue
+        for match in re.finditer(r"(?<![\w:])" + re.escape(owner) + r"::(~?\w+)\s*\(\s*(?:\(\s*[\w:]+\s*\*\s*\)\s*)?"
+                                 r"this\s*[,)]", code[d.span[0]:d.span[1]]):
+            if match[1] not in (owner, "~" + owner):
+                out.append((source.line(d.span[0] + match.start()), _normal(match[0])))
+    return out
 
 
 _BLOCK_EXTERN = re.compile(r"(?m)^[ \t]+extern[ \t]+[^;{}]*;")
@@ -955,6 +1373,7 @@ class ClassFacts:
     aliases: dict[str, str]
     this_casts: list[tuple[str, str, int]]     # (owner class, cast type, line)
     subobject_calls: list[tuple[str, int]]     # (call text, line)
+    var_casts: list[tuple[str, str, str, int]] = field(default_factory=list)   # see var_casts()
 
 
 def class_facts(rel: str, source: _Source) -> ClassFacts:
@@ -1037,6 +1456,23 @@ class ClassMap:
         if owner not in self.bases or target not in self.bases or owner == target:
             return False
         return target not in self.ancestors(owner) and owner not in self.ancestors(target)
+
+
+def var_casts(source: _Source) -> list[tuple[str, str, str, int]]:
+    """(declared class, cast class, cast, line) of each pointer variable cast to a pointer to another type: judged
+    against every file's classes (cross_cast)."""
+    if "*)" not in source.text and "_cast" not in source.text:
+        return []
+    return [(c.declared, c.cast, c.text, source.line(c.offset)) for c in typed_casts(source)
+            if c.depth == 1 and c.declared_depth == 1 and not c.address and not c.member and c.name != "this"
+            and c.declared and c.declared != c.cast]
+
+
+def cross_casts(facts: ClassFacts, classes: ClassMap) -> list[tuple[int, str, str]]:
+    """(line, "cross_cast", cast) of each pointer variable cast to a class neither derived from nor a base of the
+    one it is declared as."""
+    return [(line, "cross_cast", text) for declared, cast, text, line in facts.var_casts
+            if classes.unrelated(declared, cast)]
 
 
 def ownership(facts: ClassFacts, classes: ClassMap) -> list[tuple[int, str, str]]:
@@ -1140,15 +1576,25 @@ PARSED = {
     "address_unit": (("file", "image"), lambda rel, text, source, image:
                      [] if Path(rel).suffix.lower() in HEADER_SUFFIXES else address_unit(rel, image)),
     "local_class": (("file",), lambda rel, text, source, image: local_classes(rel, source)),
-    "repeat_cast": ((), lambda rel, text, source, image: repeat_casts(source) if "*)" in text else []),
+    "repeat_cast": ((), lambda rel, text, source, image: repeat_casts(source) if "*)" in text or "_cast" in text
+                    else []),
+    "redundant_cast": ((), lambda rel, text, source, image: redundant_casts(source)),
+    "void_value": ((), lambda rel, text, source, image: void_values(source) if "void" in text else []),
+    "pointer_as_int": ((), lambda rel, text, source, image: pointers_as_int(source)),
+    "scalar_view": ((), lambda rel, text, source, image: scalar_views(source) if "*)" in text or "_cast" in text
+                    else []),
+    "void_arg": ((), lambda rel, text, source, image: void_args(source) if "void" in text else []),
+    "cast_macro": ((), lambda rel, text, source, image: cast_macros(source) if "define" in text else []),
+    "static_this": ((), lambda rel, text, source, image: static_this_calls(source) if "this" in text and "::" in text
+                    else []),
 }
 # judged over every file at once: copies of a class (`duplicates`), a header's extern "C" on a function a C++ unit
 # defines (`extern_c_functions` against the config), parameter names (`param_names`) and members that belong to
 # another class (`misowned.misowned_members`, against the config) and structs only reached by casts
-# (`overlay_types`). A header named after an address (address_unit) counts only when no unit has its name, since one
-# rename fixes both.
+# (`overlay_types`), and pointers cast to a class unrelated to their declared one (cross_cast, `var_casts`). A header
+# named after an address (address_unit) counts only when no unit has its name, since one rename fixes both.
 TREE_CHECKS = {"duplicate_class", "header_extern_c", "param_name_split", "address_unit", "misowned_member",
-               "overlay_type"}
+               "overlay_type", "cross_cast"}
 
 
 def _parsed(pattern: Pattern) -> bool:
@@ -1310,7 +1756,10 @@ def _scan(rel: str, text: str, catalog: list[Pattern], image: tuple[int, int] | 
     header = Path(rel).suffix.lower() in HEADER_SUFFIXES
     c_functions = extern_c_functions(text, source) if header and "extern" in text else []
     tree = {p.key for p in catalog if _elsewhere(p)}
-    return _Scan(collections.Counter(key for _, key, _ in found), bodies, class_facts(rel, source),
+    facts = class_facts(rel, source)
+    if "cross_cast" in tree:
+        facts.var_casts = var_casts(source)
+    return _Scan(collections.Counter(key for _, key, _ in found), bodies, facts,
                  found if keep else None, c_functions, signatures(source) if "param_name_split" in tree else [],
                  *plain_structs(source))
 
@@ -1470,10 +1919,12 @@ def _relations(scans: dict[str, _Scan], tree: set[str], owned: list[str], config
                 found = [(line, "address_unit", name) for line, name in address_unit(rel, image)]
                 if found:
                     out[rel] += found
-    if owned:
+    if owned or "cross_cast" in tree:
         classes = ClassMap(scan.classes for scan in scans.values())
         for rel, scan in scans.items():
-            found = [f for f in ownership(scan.classes, classes) if f[1] in owned]
+            found = [f for f in ownership(scan.classes, classes) if f[1] in owned] if owned else []
+            if "cross_cast" in tree:
+                found += cross_casts(scan.classes, classes)
             if found:
                 out[rel] += found
     if config is not None and "header_extern_c" in tree:

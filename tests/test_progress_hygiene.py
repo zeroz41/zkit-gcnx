@@ -649,6 +649,84 @@ class QualityTests(unittest.TestCase):
                          [(2, "repeat_cast", "(TWidget *)p"), (3, "repeat_cast", "(TWidget *)p"),
                           (4, "repeat_cast", "(TPad *)box->pad"), (4, "repeat_cast", "(TPad *)box->pad")])
 
+    def test_image_range_from_a_worktree(self):
+        """A git worktree holds only the tracked tree: the original executable is read from the configured checkout,
+        so the address checks judge the same image from either."""
+        from test_bridge import build_dol
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / "game"
+            (root / "orig").mkdir(parents=True)
+            (root / "orig/main.dol").write_bytes(build_dol())
+            (root / "project.json").write_text(json.dumps({
+                "schema_version": 1, "id": "image", "repositories": {"decomp": {"root": ".", "role": "decomp"}},
+                "targets": {"t": {"repository": "decomp", "module": "main", "original": "orig/main.dol"}}}),
+                encoding="utf-8")
+            (Path(folder) / "wt/orig").mkdir(parents=True)
+            project = Project.load(root / "project.json")
+            image = quality.image_range(project, "decomp")
+            self.assertIsNotNone(image)
+            self.assertEqual(quality.image_range(project.with_overlay("decomp", Path(folder) / "wt"), "decomp"), image)
+
+    def test_casts_judged_by_declared_type(self):
+        """A cast is judged by its variable's declared type (local, parameter, else file scope): to the type it has
+        is redundant_cast; a `void *` (not `const void *`) cast back to a type is void_value, once; a pointer or an
+        address cast to an integer outside arithmetic is pointer_as_int; an object indexed as scalars is
+        scalar_view. C++ casts are read as C casts."""
+        catalog = quality.patterns()
+        text = ("TWidget g_widget;\nvoid step(TWidget *w, void *p, const void *buf, TBox *box) {\n"
+                "    TWidget local;\n    use((TWidget *)&local);\n    use((TWidget *)w);\n    ((TPad *)p)->a = 1;\n"
+                "    ((u8 *)buf)[0] = ((TPad *)buf)->b;\n    send((saddr)&local, (u32)w, (u32)w + 4);\n"
+                "    total += ((s16 *)box)[9] + ((s16 *)this)[2];\n    use((TWidget *)&g_widget);\n"
+                "    reinterpret_cast<TPad *>(p)->a = 2;\n}\n")
+        keys = {"redundant_cast", "void_value", "pointer_as_int", "scalar_view", "repeat_cast"}
+        self.assertEqual(sorted(f for f in quality.parsed_findings(text, catalog, "src/box.cpp") if f[1] in keys),
+                         [(2, "void_value", "void *p"), (4, "redundant_cast", "(TWidget *)&local"),
+                          (5, "redundant_cast", "(TWidget *)w"), (6, "repeat_cast", "(TPad *)p"),
+                          (8, "pointer_as_int", "(saddr)&local"), (8, "pointer_as_int", "(u32)w"),
+                          (9, "scalar_view", "(s16 *)box"), (9, "scalar_view", "(s16 *)this"),
+                          (10, "redundant_cast", "(TWidget *)&g_widget"), (11, "repeat_cast", "(TPad *)p")])
+
+    def test_cross_casts_between_unrelated_classes(self):
+        """A pointer variable cast to a class neither derived from nor a base of its declared class is cross_cast,
+        judged over every file's classes; casts up or down a hierarchy and to undeclared types are not."""
+        catalog = quality.patterns()
+        texts = {"include/obj.h": "class TObj {};\nclass TPlayer : public TObj {};\nclass TWidget {};\n",
+                 "src/a.cpp": "void f(TPlayer *p, TObj *o) {\n    ((TWidget *)p)->x = 1;\n    ((TPlayer *)o)->y = 2;\n"
+                              "    ((TUnknown *)p)->z = 3;\n}\n"}
+        scans = {rel: quality._scan(rel, text, catalog, None) for rel, text in texts.items()}
+        found = quality._relations(scans, {"cross_cast"}, [])
+        self.assertEqual(found, {"src/a.cpp": [(2, "cross_cast", "(TWidget *)p")]})
+
+    def test_hidden_retyping_shapes(self):
+        """void * casts on call arguments (not of 0 or NULL), callbacks' void * parameters left alone, members called
+        as statics with this, macros that cast their arguments to a typed pointer, empty extern "C" blocks, void *
+        tables, byte-count allocations and the name shapes (hex numbers, hashes, numbered and slot names)."""
+        catalog = quality.patterns()
+        text = ("static int cmp(void *a, void *b) {\n    return ((TItem *)a)->id - ((TItem *)b)->id;\n}\n"
+                "void sort(TItem *items, int n) {\n    qsort(items, n, cmp);\n}\n"
+                "void TWidget::draw(void *ctx) {\n    ((TCtx *)ctx)->begin();\n"
+                "    TWidget::update(this, 1);\n    TWidget::update((TWidget *)this);\n    TOther::update(this);\n"
+                "    send((void *)this, (void *)0, (void *)NULL);\n    if ((void *)ctx) {}\n"
+                "    copy(dst, (void *)0x2E4, (const void *)src->buf);\n}\n"
+                "#define HP(p) (((TObjChara *)(p))->hp)\n#define BYTES(p) ((u8 *)(p))\n#define OBJ(p) ((void *)(p))\n"
+                'extern "C" {\n}\n'
+                "void *handlers[] = {0};\nvoid *vtable_x[] = {0};\nvoid *buf = operator new(0x1C);\n"
+                "#define SELF ((TWidget *)this)\nint set_mode_0x15;\nVObj_18_4a35f9 *v;\nvoid f(int arg2_, int param1);\n"
+                "void g(T *p) { p->m4(); p->b9(); p->update(); x[offsetof(T, a)] = (u8 *)p + offsetof(T, b); }\n"
+                "void *s = (void *)\"name\";\n")
+        keys = {"void_value", "static_this", "void_arg", "cast_macro", "no_op", "void_table", "byte_new",
+                "alias_macro", "hex_name", "hash_type", "arg_name", "slot_name", "offsetof_access", "string_cast"}
+        self.assertEqual(sorted(f for f in quality.located(text, catalog, rel="src/w.cpp") if f[1] in keys),
+                         [(7, "void_value", "void *ctx"), (9, "static_this", "TWidget::update(this,"),
+                          (10, "static_this", "TWidget::update((TWidget *)this)"), (12, "void_arg", "(void *)this"),
+                          (14, "void_arg", "(const void *)src->buf"), (14, "void_arg", "(void *)0x2E4"),
+                          (16, "cast_macro", "#define HP"), (19, "no_op", 'extern "C" {}'),
+                          (21, "void_table", "void *handlers[] = {"), (23, "byte_new", "operator new(0x1C)"),
+                          (24, "alias_macro", "#define SELF ((TWidget *)this)"), (25, "hex_name", "set_mode_0x15"),
+                          (26, "hash_type", "VObj_18_4a35f9"), (27, "arg_name", "arg2_"), (27, "arg_name", "param1"),
+                          (28, "offsetof_access", "[offsetof(T, a)"), (28, "offsetof_access", "p + offsetof(T, b)"),
+                          (28, "slot_name", "->m4("), (29, "string_cast", '(void *)"name"')])
+
     def test_overlay_structs_and_renamed_blobs(self):
         """A plain struct that starts with padding or is one array, which files cast to but never use as a type, is
         overlay_type; one used as a type anywhere is not. A struct of bytes a change adds in place of a ByteBlock of
