@@ -1553,9 +1553,18 @@ def param_names(files: Iterable[tuple[str, list]], counted: Container[str]) -> d
     return dict(out)
 
 
-def identity(key: str, text: str) -> tuple[str, str]:
-    """What a finding is matched by between revisions: (key, text), less a partner's line (other edits move it)."""
-    return (key, _PARTNER_LINE.sub(")", text)) if key == "param_name_split" else (key, text)
+def identity(key: str, text: str, context: str = "") -> tuple[str, str, str]:
+    """What a finding is matched by between revisions: (key, text, the line it is on), less a partner's line (other
+    edits move it). The line makes a moved finding cancel and a new one count: `(saddr)this` reads the same on every
+    line that has it."""
+    return key, _PARTNER_LINE.sub(")", text) if key == "param_name_split" else text, context
+
+
+def _in_context(found: Iterable[tuple[int, str, str]], text: str) -> list[tuple[int, str, str, str]]:
+    """found, each with the source line it is on, whitespace collapsed."""
+    lines = text.split("\n")
+    return [(line, key, found_text, " ".join(lines[line - 1].split()) if 0 < line <= len(lines) else "")
+            for line, key, found_text in found]
 
 
 # Checks a parser judges, with what it needs: "file" a whole file and its path, "image" the image's address range.
@@ -2186,13 +2195,13 @@ def _diff_path(field: str) -> str | None:
     return field[2:]
 
 
-def _placed(counts: collections.Counter, found: list[tuple[str, tuple[int, str, str]]]) \
-        -> list[tuple[str, tuple[int, str, str]]]:
+def _placed(counts: collections.Counter, found: list[tuple[str, tuple[int, str, str, str]]]) \
+        -> list[tuple[str, tuple[int, str, str, str]]]:
     """The findings in `found` (taken in path and line order) that account for `counts`, a multiset of identities."""
     left, out = collections.Counter(counts), []
     for rel, f in sorted(found, key=lambda item: (item[0], item[1][0])):
-        if left[identity(f[1], f[2])] > 0:
-            left[identity(f[1], f[2])] -= 1
+        if left[identity(*f[1:])] > 0:
+            left[identity(*f[1:])] -= 1
             out.append((rel, f))
     return out
 
@@ -2207,9 +2216,10 @@ def _hunk(hunks: dict[str, list[Hunk]], rel: str, line: int, side: int) -> int |
 def compare(project: Project, repo: str, before: str, after: str | None = None,
             paths: list[str] | None = None) -> dict[str, Any]:
     """Debt at `before` (a revision) and `after` (a revision, or the working tree), check by check: the tree's count
-    at each, and what the change between them removed and added. Findings are matched by their text, so code that
-    only moves (between functions or files) counts as neither, and neither does a hunk that rewrites a debt line
-    without adding a finding of its check (a rename on the line). Also the findings the change added on its own lines,
+    at each, and what the change between them removed and added. Findings are matched by their text and the line they
+    are on, so code that only moves (between functions or files) counts as neither, and neither does a hunk that
+    rewrites a debt line without adding a finding of its check (a rename on the line), while debt on a new line
+    counts even when it reads the same as debt removed elsewhere. Also the findings the change added on its own lines,
     and the members in the wrong class (beside the total, not in it). A header's extern "C" is judged against the
     config at `after` on both sides, so only header edits move it; a member that belongs to another class against
     each side's own."""
@@ -2257,17 +2267,20 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
 
     # Findings across files can change in files the change did not touch (a class gained a base, a class's other
     # copy went away), so they are matched over the whole tree.
-    rise: collections.Counter = collections.Counter(
-        (key, text) for rel in changed if rel in head for _, key, text in head[rel].found)
-    fall: collections.Counter = collections.Counter(
-        (key, text) for scan in base_changed.values() for _, key, text in scan.found)
-    rise.update(identity(key, text) for found in head_related.values() for _, key, text in found)
-    fall.update(identity(key, text) for found in base_related.values() for _, key, text in found)
+    base_text = lambda rel: base_texts[rel] if rel in base_texts else head_texts.get(rel, "")
+    head_found = {rel: _in_context(head[rel].found, head_texts[rel]) for rel in changed if rel in head}
+    base_found = {rel: _in_context(scan.found, base_texts[rel]) for rel, scan in base_changed.items()}
+    head_own = {rel: _in_context(found, head_texts.get(rel, "")) for rel, found in head_related.items()}
+    base_own = {rel: _in_context(found, base_text(rel)) for rel, found in base_related.items()}
+    rise = collections.Counter(identity(*f[1:]) for side in (head_found, head_own) for found in side.values()
+                               for f in found)
+    fall = collections.Counter(identity(*f[1:]) for side in (base_found, base_own) for found in side.values()
+                               for f in found)
     rise, fall = rise - fall, fall - rise
     added, removed = collections.Counter(), collections.Counter()
-    for (key, _), n in rise.items():
+    for (key, *_), n in rise.items():
         added[key] += n
-    for (key, _), n in fall.items():
+    for (key, *_), n in fall.items():
         removed[key] += n
 
     # Where they are: the rise on lines the change added (and in files a cross-file finding moved in), the fall on
@@ -2276,19 +2289,19 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
     risen, fallen = [], []
     for rel in sorted(changed & head.keys()):
         lines = {n for _, add in hunks[rel] for n in add}
-        risen += [(rel, f) for f in head[rel].found + head_related.get(rel, []) if f[0] in lines]
-    risen += [(rel, f) for rel, found in head_related.items() if rel not in changed for f in found]
-    for rel, scan in base_changed.items():
+        risen += [(rel, f) for f in head_found[rel] + head_own.get(rel, []) if f[0] in lines]
+    risen += [(rel, f) for rel, found in head_own.items() if rel not in changed for f in found]
+    for rel in base_changed:
         lines = {n for gone, _ in hunks[rel] for n in gone}
-        fallen += [(rel, f) for f in scan.found + base_related.get(rel, []) if f[0] in lines]
+        fallen += [(rel, f) for f in base_found[rel] + base_own.get(rel, []) if f[0] in lines]
     replaced = collections.Counter((rel, _hunk(hunks, rel, f[0], 0), f[1]) for rel, f in _placed(fall, fallen))
     placed = _placed(rise, risen)
     # A cross-file finding can appear on a line the change kept (its partner changed): list it there.
-    rest = rise - collections.Counter(identity(f[1], f[2]) for _, f in placed)
+    rest = rise - collections.Counter(identity(*f[1:]) for _, f in placed)
     listed = {id(f) for _, f in placed}
-    kept = [(rel, f) for rel in sorted(changed & head.keys()) for f in head_related.get(rel, []) if id(f) not in listed]
+    kept = [(rel, f) for rel in sorted(changed & head.keys()) for f in head_own.get(rel, []) if id(f) not in listed]
     new = []
-    for rel, (line, key, text) in placed + _placed(rest, kept):
+    for rel, (line, key, text, _) in placed + _placed(rest, kept):
         at = (rel, _hunk(hunks, rel, line, 1), key)
         if at[1] is not None and replaced[at] > 0:
             replaced[at] -= 1

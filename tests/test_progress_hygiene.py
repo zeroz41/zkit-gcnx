@@ -458,6 +458,30 @@ class QualityTests(unittest.TestCase):
             self.assertEqual(committed["new"], delta["new"])
             self.assertRegex(committed["after_commit"], r"^[0-9a-f]{40}$")
 
+    def test_debt_that_reads_the_same_elsewhere_is_new(self):
+        """A finding is matched with the line it is on: removing one and writing the same text on a new line elsewhere
+        is removed and added debt, while a hunk that rewrites or renames on its line is neither."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src").mkdir()
+            (root / "src/a.cpp").write_text("void f() {\n    fn_80012345();\n}\n", encoding="utf-8")
+            (root / "src/b.cpp").write_text("void g() {\n}\n", encoding="utf-8")
+            (root / "src/c.cpp").write_text("void h(int p) {\n    fn_80011111((void *)p);\n    fn_80022222(p);\n}\n",
+                                            encoding="utf-8")
+            git(root, "init", "-q")
+            git(root, "add", ".")
+            git(root, "commit", "-q", "-m", "Add")
+            project = self.project(root)
+            (root / "src/a.cpp").write_text("void f() {\n}\n", encoding="utf-8")
+            (root / "src/b.cpp").write_text("void g() {\n    if (fn_80012345()) g();\n}\n", encoding="utf-8")
+            (root / "src/c.cpp").write_text("void h(int p) {\n    fn_80011111(p, 0);\n    fn_80033333(p);\n}\n",
+                                            encoding="utf-8")   # kept through an edit; renamed
+            delta = quality.compare(project, "decomp", "HEAD")
+            row = next(r for r in delta["rows"] if r["key"] == "function_placeholder")
+            self.assertEqual((row["before"], row["after"], row["removed"], row["added"]), (3, 3, 1, 1))
+            self.assertEqual(delta["new"], [{"key": "function_placeholder", "path": "src/b.cpp", "line": 2,
+                                             "text": "fn_80012345"}])
+
     def test_members_in_the_wrong_class_are_counted_beside_the_total(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
