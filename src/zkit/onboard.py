@@ -196,6 +196,10 @@ def manifest_for(decomp: Path, version: str | None = None, native: Path | None =
     return manifest, notes
 
 
+# Target fields naming files in the decomp, detected again by a refresh once the file is gone.
+_TARGET_FILES = ("original", "splits")
+
+
 def init(decomp: Path, version: str | None = None, native: Path | None = None, name: str | None = None,
          write: bool = True) -> dict[str, Any]:
     manifest, notes = manifest_for(decomp, version, native, name)
@@ -209,7 +213,20 @@ def init(decomp: Path, version: str | None = None, native: Path | None = None, n
                 kept = old.get("repositories", {}).get(key, {})
                 manifest["repositories"][key] = {**kept, **{k: v for k, v in repo.items()
                                                             if k not in ("rules", "start", "finish") or k not in kept}}
-            targets = {k: {**old.get("targets", {}).get(k, {}), **t} for k, t in manifest["targets"].items()}
+            # A target whose symbols file still exists keeps what it was configured with (a project may build
+            # another config than config/<version>/config.yml, or read another executable); a file it names that is
+            # gone is detected again. Targets init does not detect stay as they are.
+            root = path.parent / manifest["repositories"]["decomp"]["root"]
+            targets = dict(old.get("targets", {}))
+            for key, detected in manifest["targets"].items():
+                kept = targets.get(key, {})
+                if kept.get("symbols") and (root / kept["symbols"]).is_file():
+                    merged = {**detected, **kept}
+                    merged.update({f: detected[f] for f in _TARGET_FILES
+                                   if detected.get(f) and merged.get(f) and not (root / merged[f]).exists()})
+                else:
+                    merged = {**kept, **detected}
+                targets[key] = merged
             manifest = {**old, **{k: v for k, v in manifest.items() if k not in ("repositories", "targets")},
                         "repositories": manifest["repositories"], "targets": targets}
         path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

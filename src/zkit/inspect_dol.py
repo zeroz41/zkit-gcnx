@@ -7,6 +7,7 @@ are evidence about the game, never about the current build.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import shutil
 import struct
@@ -40,6 +41,9 @@ def _dol(project: Project, target: str):
     if not config.get("original"):
         raise ValueError(f"Target {target} has no original executable configured")
     path = project.file(config["repository"], config["original"])
+    if not path.is_file() and project.worktree(config["repository"]):
+        # A git worktree holds the tracked tree; the original is an untracked disc file in the configured checkout.
+        path = dataclasses.replace(project, overlays=()).file(config["repository"], config["original"])
     if not path.is_file():
         raise ValueError(f"Original executable is missing: {path}")
     info = path.stat()

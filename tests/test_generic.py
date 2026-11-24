@@ -163,6 +163,29 @@ class FreshProject(unittest.TestCase):
         self.assertEqual(again["repositories"]["decomp"]["rules"], ["Commit as me"])
         self.assertEqual(again["targets"]["game01"]["sda_bases"], {"r2": "0x80003100"})
 
+    def test_init_keeps_a_configured_target(self):
+        """A target pointed at another config (one the build makes by default) survives a refresh while its files
+        exist; once they are gone detection takes over again. Targets init does not detect are kept."""
+        self.cli("init")
+        path = next((Path(os.environ["XDG_CONFIG_HOME"]) / "zkit/projects").glob("*.json"))
+        (self.repo / "config/GAME01/game").mkdir()
+        (self.repo / "config/GAME01/game/symbols.txt").write_text(
+            (self.repo / "config/GAME01/symbols.txt").read_text(encoding="utf-8"), encoding="utf-8")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["targets"]["game01"].update(symbols="config/GAME01/game/symbols.txt", module="game")
+        data["targets"]["other"] = {"repository": "decomp", "module": "other"}
+        path.write_text(json.dumps(data), encoding="utf-8")
+        self.cli("init")
+        again = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual((again["targets"]["game01"]["symbols"], again["targets"]["game01"]["module"]),
+                         ("config/GAME01/game/symbols.txt", "game"))
+        self.assertEqual(again["targets"]["other"], {"repository": "decomp", "module": "other"})
+        (self.repo / "config/GAME01/game/symbols.txt").unlink()
+        self.cli("init")
+        again = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual((again["targets"]["game01"]["symbols"], again["targets"]["game01"]["module"]),
+                         ("config/GAME01/symbols.txt", "framework"))
+
     def test_definitions_outside_the_unit_source(self):
         """Mature C++ decomps define many functions in headers or in .inc fragments the unit includes."""
         (self.repo / "include").mkdir()
