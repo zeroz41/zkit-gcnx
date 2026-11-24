@@ -12,6 +12,7 @@ from __future__ import annotations
 import bisect
 import collections
 import itertools
+import math
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -98,18 +99,22 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
     _p("punned_deref", "type-punned or cast-pointer derefs (*(f32 *)&x, *(s32 *)(p + 0x18))",
        r"\*\s*\(\s*(?:(?:const|volatile)\s+)*[A-Za-z_][\w:]*(?:\s+[A-Za-z_]\w*)*\s*\*+\s*(?:const\s*)?\)\s*"
        r"(?:&|\(\s*[^()]*?\+\s*(?:0x[0-9A-Fa-f]+|\d+)\s*\))", "layout"),
-    _p("offset_member", "offset-named members (unk_30, m_c, field_96, set_field_378, ->f30, ->x7A)",
+    _p("offset_member", "offset-named members (unk_30, m_c, field_96, set_field_378, ->f30, ->x7A, ->b9)",
        r"\b(?:m_|unk_?|unknown_?|field_?|mbr_)" + _HEX_OFFSET +
        r"|\b[A-Za-z]\w*?_(?:field|unk|unknown)_?" + _HEX_OFFSET +
        r"|(?:->|\.)\s*f(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{2,4}\b|\b[a-z]\w*Field_?(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{1,4}\b"
        r"|(?:->|\.)\s*(?!f[0-9A-Fa-f]{2,4}\b)(?![usf](?:8|16|32|64)\b)(?!m[0-3][0-3]\b)(?!ip\d+\b)(?!sp[0-9A-F])"
-       r"[a-z]{1,2}(?=[0-9A-F])(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{2,4}\b", "layout"),
+       r"[a-z]{1,2}(?=[0-9A-F])(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{2,4}\b"
+       r"|(?:->|\.)\s*[bfhw][0-9A-F]\b", "layout"),   # one hex digit: byte, field, half or word at 0-F
     # a padding field a function body reads or writes has a meaning (`pad_accesses`)
     _p("pad_access", "padding fields read or written (p->pad_3E = 0)", _NEVER, "layout"),
     _p("size_assert", "hand-written size asserts (typedef char check[sizeof(T) == 8 ? 1 : -1];)", _NEVER, "layout",
        blocks_port=False),
     _p("blob_type", "size-named blob types (ByteBlock_28)", r"\bByteBlock_?(?:0x)?[0-9A-Fa-f]{1,4}\b", "layout",
        needle=r"ByteBlock"),
+    # judged over every file (`overlay_types`)
+    _p("overlay_type", "structs only reached by casts (struct PhaseView { u8 pad[0x28]; s32 phase; };)", _NEVER,
+       "layout"),
     _p("fp_cast", "calls through function-pointer casts ((void (*)(T *))p)",
        r"\(\s*[A-Za-z_][\w:\s\*&<>,]*\(\s*\*+\s*\)\s*\([^()]*\)\s*\)\s*[\w(*&]", "types"),
     # counted on the text with its string literals kept (`string_casts`)
@@ -135,6 +140,8 @@ DEFAULT_PATTERNS: tuple[Pattern, ...] = (
     _p("ptr_int_roundtrip", "casts between pointers and integers ((T *)(u32)p, (u32)(T *)p)",
        r"\(\s*(?:const\s+)?[A-Za-z_]\w*\s*\*+\s*\)\s*\(\s*" + _INT_TYPE + r"\s*\)"
        r"|\(\s*" + _INT_TYPE + r"\s*\)\s*\(\s*(?:const\s+)?[A-Za-z_]\w*\s*\*+\s*\)", "types"),
+    _p("repeat_cast", "values cast to one type again and again (((TWidget *)p)->x = ((TWidget *)p)->y;)", _NEVER,
+       "types"),
     _p("decomp_temp", "m2c temporaries (temp_r3, var_f31)", r"\b(?:temp|var)_[rfa]\d+(?:_\d+)?\b", "decompiler"),
     _p("stack_local", "stack-slot locals (sp8, sp1C)", r"\bsp[0-9A-F]{1,3}\b", "decompiler"),
     _p("arg_name", "argN parameters (arg0, farg1)", r"\bf?arg\d+\b", "decompiler"),
@@ -209,10 +216,11 @@ DISPLAY = {   # key -> (name, example)
     "raw_offset": ("Byte-pointer offsets", "(u8 *)p + 0x30"),
     "offset_cast": ("Casts of pointer plus offset", "(Vec *)(p + 0x178)"),
     "punned_deref": ("Type-punned dereferences", "*(f32 *)&x, *(s32 *)(p + 0x18)"),
-    "offset_member": ("Offset-named fields", "unk_30, m_c, field_96, set_field_378, ->x7A"),
+    "offset_member": ("Offset-named fields", "unk_30, m_c, field_96, set_field_378, ->x7A, ->b9"),
     "pad_access": ("Padding fields read or written", "p->pad_3E = 0"),
     "size_assert": ("Hand-written size asserts", "typedef char check[sizeof(T) == 8 ? 1 : -1];"),
     "blob_type": ("Size-named blob types", "ByteBlock_28"),
+    "overlay_type": ("Structs only reached by casts", "struct PhaseView { u8 pad[0x28]; s32 phase; };"),
     "fp_cast": ("Function-pointer casts", "((void (*)(T *))p)(x)"),
     "string_cast": ("Strings cast to integers", '(saddr)"file.gvm"'),
     "ghidra_type": ("Ghidra types", "undefined4"),
@@ -221,6 +229,7 @@ DISPLAY = {   # key -> (name, example)
     "alias_macro": ("Lower-case object macros", "#define obj ((T *)this)"),
     "this_alias": ("Aliases of this", "TWidget *self = (TWidget *)this;"),
     "ptr_int_roundtrip": ("Casts between pointers and integers", "(T *)(u32)p, (u32)(T *)p"),
+    "repeat_cast": ("Values cast to one type again and again", "((TWidget *)p)->x = ((TWidget *)p)->y;"),
     "decomp_temp": ("m2c temporaries", "temp_r3, var_f31"),
     "stack_local": ("Stack-slot locals", "sp1C"),
     "arg_name": ("Numbered parameters", "arg0, farg1"),
@@ -755,6 +764,31 @@ _SELF_PARAM = re.compile(r"[(,]\s*(?:const\s+)?[A-Za-z_][\w:]*\s*\*\s*(?:const\s
                          r"|\b[A-Za-z_][\w:]*\s*\*\s*(?!" + _SELF_THIS + r")self\s*=(?!\s*" + _THIS_INIT + r")")
 
 
+# (T *)value: a name or a member chain, bare or in parentheses, that is the whole operand (not called, indexed,
+# followed by -> or ., or by pointer arithmetic)
+_CAST_OF = re.compile(r"\(\s*(?:const\s+)?((?:(?:struct|class|union)\s+)?[A-Za-z_][\w:]*)\s*(\*+)\s*(?:const\s*)?\)\s*"
+                      r"(\(\s*)?(?<![\w.>])((?>[A-Za-z_]\w*(?:\s*(?:->|\.)\s*[A-Za-z_]\w*)*))(?(3)\s*\))"
+                      r"(?!\s*(?:[\w(\[.:]|->|[-+](?![-+=>])))")
+_BYTE_POINTEE = {"void", "u8", "s8", "char", "uint8_t", "int8_t", "byte"}
+
+
+def repeat_casts(source: _Source) -> list[tuple[int, str]]:
+    """(line, cast) of each cast of one name or member chain to one pointer type that a function body makes more
+    than once: the value is declared as one type and used as another. Casts of this (this_cast), to byte and void
+    pointers (raw_offset and offset_cast count their arithmetic) and of call results are left out."""
+    code = source.code
+    out = []
+    for start, stop in _outermost(d.span for d in source.defs if d.span[1] > d.span[0]):
+        seen = collections.defaultdict(list)
+        for match in _CAST_OF.finditer(code, start, stop):
+            pointee = re.sub(r"\b(?:struct|class|union)\s+", "", match[1])
+            value = re.sub(r"\s+", "", match[4])
+            if pointee not in _BYTE_POINTEE and not re.match(r"(?:this|NULL|nullptr)\b", value):
+                seen[f"({pointee} {match[2]}){value}"].append(match.start())
+        out += [(source.line(at), cast) for cast, offsets in seen.items() if len(offsets) > 1 for at in offsets]
+    return sorted(out)
+
+
 def self_params(rel: str, source: _Source) -> list[tuple[int, str]]:
     """(line, declaration) of each `self` receiver in a C++ file: a member written as a C function."""
     if Path(rel).suffix.lower() not in CXX_FILES or "self" not in source.text:
@@ -1106,12 +1140,15 @@ PARSED = {
     "address_unit": (("file", "image"), lambda rel, text, source, image:
                      [] if Path(rel).suffix.lower() in HEADER_SUFFIXES else address_unit(rel, image)),
     "local_class": (("file",), lambda rel, text, source, image: local_classes(rel, source)),
+    "repeat_cast": ((), lambda rel, text, source, image: repeat_casts(source) if "*)" in text else []),
 }
 # judged over every file at once: copies of a class (`duplicates`), a header's extern "C" on a function a C++ unit
 # defines (`extern_c_functions` against the config), parameter names (`param_names`) and members that belong to
-# another class (`misowned.misowned_members`, against the config). A header named after an address (address_unit)
-# counts only when no unit has its name, since one rename fixes both.
-TREE_CHECKS = {"duplicate_class", "header_extern_c", "param_name_split", "address_unit", "misowned_member"}
+# another class (`misowned.misowned_members`, against the config) and structs only reached by casts
+# (`overlay_types`). A header named after an address (address_unit) counts only when no unit has its name, since one
+# rename fixes both.
+TREE_CHECKS = {"duplicate_class", "header_extern_c", "param_name_split", "address_unit", "misowned_member",
+               "overlay_type"}
 
 
 def _parsed(pattern: Pattern) -> bool:
@@ -1260,6 +1297,8 @@ class _Scan:
     found: list[tuple[int, str, str]] | None      # every finding (line, key, text), kept for changed files only
     c_functions: list[tuple[int, str]]            # a header's functions under extern "C": (line, name)
     signatures: list = field(default_factory=list)    # see signatures()
+    overlays: list = field(default_factory=list)      # see plain_structs()
+    blobs: dict = field(default_factory=dict)         # struct of byte arrays declared here -> its size
 
 
 def _scan(rel: str, text: str, catalog: list[Pattern], image: tuple[int, int] | None, keep: bool = False) -> _Scan:
@@ -1272,7 +1311,8 @@ def _scan(rel: str, text: str, catalog: list[Pattern], image: tuple[int, int] | 
     c_functions = extern_c_functions(text, source) if header and "extern" in text else []
     tree = {p.key for p in catalog if _elsewhere(p)}
     return _Scan(collections.Counter(key for _, key, _ in found), bodies, class_facts(rel, source),
-                 found if keep else None, c_functions, signatures(source) if "param_name_split" in tree else [])
+                 found if keep else None, c_functions, signatures(source) if "param_name_split" in tree else [],
+                 *plain_structs(source))
 
 
 def _checks(project: Project | None, repo: str | None) -> tuple[list[Pattern], set[str], list[str]]:
@@ -1284,21 +1324,140 @@ def _checks(project: Project | None, repo: str | None) -> tuple[list[Pattern], s
     return catalog, tree, [k for k in OWNERSHIP if k not in set(config.get("disable", []))]
 
 
+_PAD_FIRST = re.compile(r"\s*(?:(?:unsigned|signed|const|volatile)\s+)*[A-Za-z_]\w*\s+"
+                        r"(?:pad|unk|padding|gap|reserved|_)\w*\s*\[")
+_BYTE_ARRAY = re.compile(r"\s*(?:const\s+)?(?:u8|s8|char|(?:un)?signed\s+char|u?int8_t)\s+\w+\s*((?:\[[^\]]+\]\s*)+)$")
+
+
+def plain_structs(source: _Source) -> tuple[list[tuple[str, int, str]], dict[str, int]]:
+    """Class bodies of plain fields (no member functions or nested bodies). Overlays: (name, line, `struct Name`) of
+    those that start with padding or are a single array, the shapes of a view over part of something else and of a
+    blob for copying bytes. Blobs: name -> size of those made only of byte arrays with literal sizes."""
+    from .cxx import _matching
+    out, blobs = [], {}
+    code = source.code
+    for offset, keyword, name in source.bodies:
+        brace = code.index("{", offset)
+        inner = re.sub(r"\b(?:public|private|protected)\s*:(?!:)", "", code[brace + 1:_matching(code, brace)])
+        if re.search(r"[(){]", inner):
+            continue
+        fields = [part for part in inner.split(";") if part.strip()]
+        if len(fields) == 1 and fields[0].rstrip().endswith("]") or len(fields) > 1 and _PAD_FIRST.match(fields[0]):
+            out.append((name, source.line(offset), f"{keyword} {name}"))
+        arrays = [_BYTE_ARRAY.match(part) for part in fields]
+        if fields and all(arrays):
+            try:
+                blobs[name] = sum(math.prod(int(n, 0) for n in re.findall(r"\[\s*(\w+)\s*\]", a[1])) for a in arrays)
+            except ValueError:
+                pass
+    return out, blobs
+
+
+_BLOB_SIZE = re.compile(r"ByteBlock_?(?:0x)?([0-9A-Fa-f]{1,4})")
+
+
+def renamed_blobs(before: Iterable[_Scan], after: dict[str, _Scan],
+                  texts: dict[str, str]) -> dict[str, list[tuple[int, str, str]]]:
+    """blob_type findings at each mention of a struct of byte arrays a change added in place of a size-named blob it
+    removed: `struct ByteBlock_78 { u8 bytes[0x78]; };` renamed `struct BodyCopy { u8 data[0x78]; };` is still a
+    blob. Only a change shows the rename, so these count in comparisons only."""
+    from .cxx import blank
+    before = list(before)
+    sizes = lambda scans: {int(size[1], 16) for scan in scans for _, key, text in scan.found
+                           if key == "blob_type" and (size := _BLOB_SIZE.search(text))}
+    gone = sizes(before) - sizes(after[rel] for rel in texts)
+    old = {name for scan in before for name in scan.bodies}
+    names = {name for rel in texts for name, size in after[rel].blobs.items() if size in gone and name not in old}
+    if not names:
+        return {}
+    mention = re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(names))) + r")\b")
+    out = {}
+    for rel, text in texts.items():
+        if mention.search(text):
+            code = blank(text)
+            line = _line_index(code)
+            out[rel] = [(line(m.start()), "blob_type", m[0]) for m in mention.finditer(code)]
+    return out
+
+
+_TAG = r"(?:(?:const|volatile|struct|class|union)\s+)*"
+
+
+def _type_use(code: str, start: int, end: int, name: str) -> str:
+    """How one mention of a class name uses it: "declaration" (its body, a forward declaration, a typedef), "size",
+    "cast" (a pointer cast to it, or a local holding one), or "typed" (anything else: a variable, member, parameter
+    or return type, a base, a scope)."""
+    before, after = code[max(0, start - 80):start], code[end:end + 160]
+    if (re.search(r"\b(?:class|struct|union)\s*$", before) and re.match(r"\s*(?:final\s*)?[:{;]", after)
+            or re.search(r"}\s*$", before) and re.match(r"\s*[;,]", after)
+            or re.search(r"\btypedef\s+(?:struct|class|union)\s+(?:\w+\s*)?$", before) and re.match(r"\s*\w*\s*;", after)):
+        return "declaration"
+    if re.search(r"\b(?:sizeof|alignof)\s*\(\s*" + _TAG + "$", before):
+        return "size"
+    if (re.search(r"\(\s*" + _TAG + "$", before) and re.match(r"\s*\*+\s*(?:const\s*)?\)", after)
+            or re.search(r"\b(?:static|reinterpret|const)_cast\s*<\s*" + _TAG + "$", before)):
+        return "cast"
+    if re.match(r"\s*\*\s*(?:const\s+)?\w+\s*=\s*(?:\(\s*" + _TAG + re.escape(name) + r"\s*\*|"
+                r"(?:static|reinterpret)_cast\s*<\s*" + _TAG + re.escape(name) + r"\b)", after):
+        return "cast"
+    return "typed"
+
+
+_CAST_TO = re.compile(r"(?:\(|_cast\s*<)\s*" + _TAG + r"([A-Za-z_]\w*)\s*\*")
+_IDENT = re.compile(r"[A-Za-z_]\w*")
+
+
+def overlay_types(texts: dict[str, str], scans: dict[str, _Scan]) -> dict[str, list[tuple[int, str, str]]]:
+    """overlay_type findings by file: the overlays (plain_structs()) of the files in scans that no file of the
+    revision (texts) uses as a type, only casts other pointers to."""
+    from .cxx import blank
+    names = {name for scan in scans.values() for name, _, _ in scan.overlays}
+    if names:   # only a name some text casts to can be an overlay
+        names &= {match[1] for text in texts.values() if "*" in text for match in _CAST_TO.finditer(text)}
+    cast, typed = set(), set()
+    for text in texts.values():
+        found = set(_IDENT.findall(text)) & names if names else None
+        if not found:
+            continue
+        code = blank(text)
+        for match in re.finditer(r"\b(?:" + "|".join(map(re.escape, sorted(found))) + r")\b", code):
+            if match[0] not in typed:
+                use = _type_use(code, match.start(), match.end(), match[0])
+                (cast if use == "cast" else typed if use == "typed" else set()).add(match[0])
+    out = collections.defaultdict(list)
+    for rel, scan in scans.items():
+        out[rel] += [(line, "overlay_type", text) for name, line, text in scan.overlays
+                     if name in cast and name not in typed]
+    return {rel: found for rel, found in out.items() if found}
+
+
+def text_relations(texts: dict[str, str], config: "Config | None", scans: dict[str, _Scan],
+                   tree: set[str]) -> dict[str, list[tuple[int, str, str]]]:
+    """Cross-file findings read again from the revision's texts, for the files in scans: members that belong to
+    another class (`misowned_members()`, against the config) and structs only reached by casts (`overlay_types()`)."""
+    out = collections.defaultdict(list)
+    parts = [misowned_members(texts, config.pairs, scans) if "misowned_member" in tree and config else {},
+             overlay_types(texts, scans) if "overlay_type" in tree else {}]
+    for found in parts:
+        for rel, items in found.items():
+            out[rel] += items
+    return dict(out)
+
+
 def _relations(scans: dict[str, _Scan], tree: set[str], owned: list[str], config: "Config | None" = None,
                library: dict[str, list] | None = None, image: tuple[int, int] | None = None,
                members: dict[str, list[tuple[int, str, str]]] | None = None) -> dict[str, list[tuple[int, str, str]]]:
     """Findings that depend on more than one file, by the file holding them: copies of a class declared in more than
     one file, a header's extern "C" on functions a C++ unit defines, placeholder parameters named on the other side
     (library: signatures() of files read only to pair them), headers named after an address of the image that no
-    unit shares a name with, members that belong to another class (members: `misowned_members()`) and members in
+    unit shares a name with, the findings read again from the texts (members: `text_relations()`) and members in
     the wrong class (ownership)."""
     out: dict[str, list[tuple[int, str, str]]] = collections.defaultdict(list)
     if "duplicate_class" in tree:
         for rel, copies in duplicates({rel: scan.bodies for rel, scan in scans.items() if scan.bodies}).items():
             out[rel] += [(line, "duplicate_class", name) for line, name in copies]
-    if "misowned_member" in tree:
-        for rel, found in (members or {}).items():
-            out[rel] += found
+    for rel, found in (members or {}).items():
+        out[rel] += found
     if "param_name_split" in tree:
         files = [*sorted((rel, scan.signatures) for rel, scan in scans.items()),
                  *sorted((rel, sigs) for rel, sigs in (library or {}).items() if rel not in scans)]
@@ -1490,9 +1649,9 @@ def audit(project: Project, repo: str, paths: list[str] | None = None, revision:
     scans = {rel: _scan(rel, text, catalog, image) for rel, text in texts.items()}
     config = _config(project, repo, revision, tree)
     other = _library(root, revision, _library_roots(project, repo)) \
-        if tree & {"param_name_split", "misowned_member"} else {}
+        if tree & {"param_name_split", "misowned_member", "overlay_type"} else {}
     library = _signatures(other) if "param_name_split" in tree else None
-    members = misowned_members(texts | other, config.pairs, scans) if "misowned_member" in tree and config else None
+    members = text_relations(texts | other, config, scans, tree)
     related = _relations(scans, tree, owned, config, library, image, members)
     totals = _totals(scans, related)
     keys = {p.key for p in catalog}
@@ -1612,7 +1771,7 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
     head_library = base_library = head_members = base_members = None
     head_other: dict[str, str] = {}
     base_other: dict[str, str] = {}
-    if tree & {"param_name_split", "misowned_member"}:
+    if tree & {"param_name_split", "misowned_member", "overlay_type"}:
         library_roots = _library_roots(project, repo)
         head_other = _library(root, after, library_roots)
         moved = set(_diff(root, before, after, library_roots, [])) if library_roots else set()
@@ -1622,13 +1781,18 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
         head_library = _signatures(head_other)
         base_library = {rel: sigs for rel, sigs in head_library.items() if rel not in moved} | \
             _signatures(moved_texts)
-    if "misowned_member" in tree and head_config is not None:
-        # judged against each side's own config, since a rename changes symbols.txt and the source together
-        base_config = _config(project, repo, before, tree)
-        head_members = misowned_members(head_texts | head_other, head_config.pairs, head)
-        base_members = misowned_members({rel: text for rel, text in head_texts.items() if rel not in changed} |
-                                        base_texts | base_other, base_config.pairs, base)
+    if tree & {"misowned_member", "overlay_type"}:
+        # a member's class is judged against each side's own config, since a rename changes symbols.txt and the
+        # source together
+        base_config = _config(project, repo, before, tree) if head_config is not None else None
+        head_members = text_relations(head_texts | head_other, head_config, head, tree)
+        base_members = text_relations({rel: text for rel, text in head_texts.items() if rel not in changed} |
+                                      base_texts | base_other, base_config, base, tree)
     head_related = _relations(head, tree, owned, head_config, head_library, image, head_members)
+    if "blob_type" in {p.key for p in catalog}:
+        for rel, found in renamed_blobs(base_changed.values(), head,
+                                        {rel: head_texts[rel] for rel in changed if rel in head}).items():
+            head_related[rel] = head_related.get(rel, []) + found
     base_related = _relations(base, tree, owned, head_config, base_library, image, base_members)
     head_totals, base_totals = _totals(head, head_related), _totals(base, base_related)
 

@@ -636,6 +636,40 @@ class QualityTests(unittest.TestCase):
         found = quality.count(text, catalog, rel="src/box.cpp")
         self.assertEqual((found["this_alias"], found["self_param"]), (2, 2))
 
+    def test_repeated_casts_of_one_value(self):
+        """One name or member chain cast to one pointer type twice in a function is repeat_cast, at each cast; casts
+        of this, to byte pointers, of a call result or with pointer arithmetic are not, nor casts in two functions."""
+        catalog = quality.patterns()
+        text = ("void step(void *p, TBox *box) {\n    ((TWidget *)p)->x = 1;\n    ((TWidget *)p)->y = 2;\n"
+                "    ((TPad *)box->pad)->a = ((TPad *)box -> pad)->b;\n    ((u8 *)p)[0] = ((u8 *)p)[1];\n"
+                "    ((TBox *)this)->w = ((TBox *)this)->h;\n    ((TBox *)get(p))->w = ((TBox *)get(p))->h;\n"
+                "    use((TWidget *)p + 1);\n}\nvoid other(void *p) {\n    ((TBox *)p)->w = 0;\n}\n"
+                "void last(void *p) {\n    ((TBox *)p)->h = 0;\n}\n")
+        self.assertEqual([f for f in quality.parsed_findings(text, catalog, "src/box.cpp") if f[1] == "repeat_cast"],
+                         [(2, "repeat_cast", "(TWidget *)p"), (3, "repeat_cast", "(TWidget *)p"),
+                          (4, "repeat_cast", "(TPad *)box->pad"), (4, "repeat_cast", "(TPad *)box->pad")])
+
+    def test_overlay_structs_and_renamed_blobs(self):
+        """A plain struct that starts with padding or is one array, which files cast to but never use as a type, is
+        overlay_type; one used as a type anywhere is not. A struct of bytes a change adds in place of a ByteBlock of
+        the same size it removes is still blob_type, at each mention."""
+        catalog = quality.patterns()
+        header = ("struct PhaseView {\n    u8 pad[0x28];\n    s32 phase;\n};\nstruct Kept {\n    u8 pad[4];\n"
+                  "    s32 value;\n};\nstruct Words {\n    u32 words[4];\n};\n")
+        texts = {"include/view.h": header,
+                 "src/a.cpp": "void f(void *p, Kept *k) {\n    ((PhaseView *)p)->phase = 1;\n"
+                              "    Words *w = (Words *)p;\n    ((Kept *)p)->value = 0;\n}\n"}
+        scans = {rel: quality._scan(rel, text, catalog, None) for rel, text in texts.items()}
+        self.assertEqual(quality.overlay_types(texts, scans),
+                         {"include/view.h": [(1, "overlay_type", "struct PhaseView"),
+                                             (9, "overlay_type", "struct Words")]})
+        before = {"include/blob.h": "struct ByteBlock_8 {\n    u8 bytes[8];\n};\nByteBlock_8 copy;\n"}
+        after = {"include/blob.h": "struct BodyCopy {\n    u8 data[2][4];\n};\nBodyCopy copy;\n"}
+        scan = lambda texts: {rel: quality._scan(rel, text, catalog, None, keep=True) for rel, text in texts.items()}
+        self.assertEqual(quality.renamed_blobs(scan(before).values(), scan(after), after),
+                         {"include/blob.h": [(1, "blob_type", "BodyCopy"), (4, "blob_type", "BodyCopy")]})
+        self.assertEqual(quality.renamed_blobs(scan(after).values(), scan(after), after), {})
+
     def test_block_declarations_of_the_files_own_names(self):
         """A prototype or extern inside a function body counts only for a name the file does not define."""
         catalog = quality.patterns()
