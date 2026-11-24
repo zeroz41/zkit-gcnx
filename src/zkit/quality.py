@@ -2065,6 +2065,13 @@ def _library_roots(project: Project, repo: str) -> list[str]:
     return list(project.config["repositories"][repo].get("quality", {}).get("library", ["libs"]))
 
 
+def _context_roots(project: Project, repo: str, paths: list[str] | None) -> list[str]:
+    """The library roots, and when the count is limited to some paths, the rest of the quality scope too: a class,
+    its bases and its definitions live outside the counted folder, and the cross-file checks need them."""
+    roots = _library_roots(project, repo)
+    return roots + [r for r in _paths(project, repo, None)[0] if r not in roots] if paths else roots
+
+
 def _library(root: Path, revision: str | None, roots: list[str]) -> dict[str, str]:
     """The source files under `roots` at a revision (None: the working tree), by path."""
     if not roots:
@@ -2099,8 +2106,9 @@ def audit(project: Project, repo: str, paths: list[str] | None = None, revision:
     image = image_range(project, repo)
     scans = {rel: _scan(rel, text, catalog, image) for rel, text in texts.items()}
     config = _config(project, repo, revision, tree)
-    other = _library(root, revision, _library_roots(project, repo)) \
+    other = _library(root, revision, _context_roots(project, repo, paths)) \
         if tree & {"param_name_split", "misowned_member", "overlay_type"} else {}
+    other = {rel: text for rel, text in other.items() if rel not in texts}
     library = _signatures(other) if "param_name_split" in tree else None
     members = text_relations(texts | other, config, scans, tree)
     related = _relations(scans, tree, owned, config, library, image, members)
@@ -2223,9 +2231,9 @@ def compare(project: Project, repo: str, before: str, after: str | None = None,
     head_other: dict[str, str] = {}
     base_other: dict[str, str] = {}
     if tree & {"param_name_split", "misowned_member", "overlay_type"}:
-        library_roots = _library_roots(project, repo)
-        head_other = _library(root, after, library_roots)
-        moved = set(_diff(root, before, after, library_roots, [])) if library_roots else set()
+        library_roots = _context_roots(project, repo, paths)
+        head_other = {rel: text for rel, text in _library(root, after, library_roots).items() if rel not in head_texts}
+        moved = set(_diff(root, before, after, library_roots, [])) - set(head_texts) - changed if library_roots else set()
         moved_texts = _library(root, before, sorted(moved))
         base_other = {rel: text for rel, text in head_other.items() if rel not in moved} | moved_texts
     if "param_name_split" in tree:

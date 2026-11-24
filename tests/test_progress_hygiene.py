@@ -849,6 +849,38 @@ class QualityTests(unittest.TestCase):
             self.assertEqual((row["before"], row["after"], row["removed"], row["added"]), (1, 0, 1, 0))
             self.assertEqual(delta["new"], [])
 
+    def test_a_scoped_count_still_reads_classes_outside_its_paths(self):
+        """Limiting the count to one folder keeps the rest of the tree as context: a packet struct only forward-declared in
+        the counted folder, whose member is defined there and writes its base's fields, is not misowned."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            files = {
+                "config/G/config.yml": "symbols: config/G/symbols.txt\nsplits: config/G/splits.txt\n",
+                "config/G/splits.txt": "npc/TNpc.cpp:\n\t.text       start:0x80003100 end:0x80003200\n",
+                "config/G/symbols.txt": "update__4TNpcFv = .text:0x80003100; // type:function size:0x10\n"
+                                        "init__11G_Move_6x40Fv = .text:0x80003110; // type:function size:0x10\n",
+                "include/net/packet.h": "struct G_MoveBase {\n    int x;\n};\nstruct G_Move_6x40 : G_MoveBase {\n"
+                                        "    void init();\n};\n",
+                "include/npc/TNpc.h": "struct G_Move_6x40;\nclass TNpc {\npublic:\n    int mode;\n    void update();\n};\n",
+                "src/npc/TNpc.cpp": '#include "npc/TNpc.h"\n#include "net/packet.h"\n'
+                                    "void TNpc::update() {\n    mode = 1;\n}\n"
+                                    "void G_Move_6x40::init() {\n    x = 0;\n}\n",
+            }
+            for rel, text in files.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text, encoding="utf-8")
+            git(root, "init", "-q")
+            git(root, "add", ".")
+            git(root, "commit", "-q", "-m", "Add npc")
+            project = self.project(root)
+            for paths in (None, ["src/npc", "include/npc"]):
+                counts = {r["key"]: r["count"] for r in quality.audit(project, "decomp", paths=paths)["counts"]}
+                self.assertEqual(counts["misowned_member"], 0, paths)
+            (root / "src/npc/TNpc.cpp").write_text(files["src/npc/TNpc.cpp"].replace("x = 0;", "x = 1;"),
+                                                    encoding="utf-8")
+            delta = quality.compare(project, "decomp", "HEAD", paths=["src/npc", "include/npc"])
+            self.assertEqual(delta["new"], [])
+
     def test_parameter_names_pair_prototypes_with_definitions(self):
         """A prototype pairs with the one definition of its name and parameter count, also one under libs/ (read to
         pair, never counted). A placeholder on one side and a real name on the other is debt on the placeholder's
