@@ -1,8 +1,8 @@
-"""misowned_member: member functions that belong to another class (a check of `quality`).
+"""misowned_member: member functions that belong to another class.
 
 A fact scanner for C/C++ with no compiler, then a rule over its facts and the config's symbols.txt and splits.txt.
-The same code as the decomp's tools/source_quality.py, which CI runs with the standard library alone, so the two
-report the same findings.
+Standard library only. This file is both the decomp's tools/misowned.py (run by tools/source_quality.py, also in CI)
+and zkit's zkit/misowned.py (run by `zkit quality`); keep the two copies identical.
 """
 
 from __future__ import annotations
