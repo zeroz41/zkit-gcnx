@@ -820,6 +820,39 @@ class QualityTests(unittest.TestCase):
             self.assertEqual((row["before"], row["after"], row["removed"], row["added"]), (1, 0, 1, 0))
             self.assertEqual(delta["new"], [])
 
+    def test_header_extern_c_trusts_a_library_definition_under_extern_c(self):
+        """A library C++ unit that defines a function under `extern "C"` (a block or a prefix) gives it C linkage,
+        so the header's extern "C" on it is no debt; a definition taking C linkage only from the header, and a game
+        unit's definition under `extern "C"`, stay findings."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            files = {
+                "config/G/config.yml": "symbols: config/G/symbols.txt\nsplits: config/G/splits.txt\n",
+                "config/G/splits.txt": "src/game.cpp:\n\t.text       start:0x80003100 end:0x80003200\n\n"
+                                       "rt/runtime.cpp:\n\t.text       start:0x80003200 end:0x80003300\n",
+                "config/G/symbols.txt": "game_tick = .text:0x80003100; // type:function size:0x10\n"
+                                        "rt_exit = .text:0x80003200; // type:function size:0x10\n"
+                                        "rt_init = .text:0x80003210; // type:function size:0x10\n"
+                                        "rt_header = .text:0x80003220; // type:function size:0x10\n",
+                "include/runtime.h": '#ifdef __cplusplus\nextern "C" {\n#endif\nvoid game_tick(void);\n'
+                                     "void rt_exit(void);\nvoid rt_init(void);\nvoid rt_header(void);\n"
+                                     "#ifdef __cplusplus\n}\n#endif\n",
+                "src/game.cpp": '#include "runtime.h"\nextern "C" void game_tick(void) { }\n',
+                "libs/rt/runtime.cpp": '#include "runtime.h"\nextern "C" void rt_exit(void) { }\n'
+                                       'extern "C" {\nvoid rt_init(void) { }\n}\nvoid rt_header(void) { }\n',
+            }
+            for rel, text in files.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text, encoding="utf-8")
+            git(root, "init", "-q")
+            git(root, "add", ".")
+            git(root, "commit", "-q", "-m", "Add units")
+            project = self.project(root)
+            for revision in (None, "HEAD"):
+                audit = quality.audit(project, "decomp", revision=revision)
+                counts = {r["key"]: r["count"] for r in audit["counts"]}
+                self.assertEqual(counts["header_extern_c"], 2, revision)
+
     def test_a_member_using_only_another_class_is_misowned(self):
         """A member whose body touches nothing of its class's hierarchy, in a unit not named after its class, is debt
         on its definition line (misowned_member); one using its class's fields is not. Each side of a change is

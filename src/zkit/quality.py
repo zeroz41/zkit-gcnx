@@ -661,6 +661,21 @@ def extern_c_functions(text: str, source: _Source) -> list[tuple[int, str]]:
     return out
 
 
+def extern_c_definitions(text: str) -> set[str]:
+    """Names of the functions a source file defines under `extern "C"` (a body after `extern "C"`, or inside an
+    `extern "C" { }` block): the definition itself gives them C linkage, whatever the file is called. A definition
+    that only takes C linkage from an earlier `extern "C"` prototype (a header) is not one of them."""
+    if "extern" not in text:
+        return set()
+    source = _Source(text)
+    out = set()
+    for _, head, body, _ in _extern_c_heads(text, source.code):
+        found = _declared(head) if body else None
+        if found and found[1]:
+            out.add(found[0])
+    return out
+
+
 _MACRO_NAME = re.compile(r"[A-Z][A-Z0-9_]*")   # MACRO(...) at file scope is an invocation, not a prototype
 
 
@@ -1981,13 +1996,46 @@ class Config:
     linkage: dict[str, set[str]]                                   # function name -> the units defining it
     middleware: set[str] = field(default_factory=set)              # units of the prebuilt C libraries
     pairs: list[tuple[str, str]] = field(default_factory=list)     # (symbols.txt, splits.txt) texts
+    root: Path | None = None                                       # where the units' sources are read
+    revision: str | None = None                                    # None: the working tree
+    c_defined: dict[str, set[str]] = field(default_factory=dict)   # unit -> its extern "C" definitions (read lazily)
+    sources: list[str] | None = None                               # the C++ source files of the tree (read lazily)
+    library: list[str] = field(default_factory=list)               # roots of library sources (quality.library)
+
+    def c_definitions(self, unit: str) -> set[str]:
+        """The functions the unit's source (the C++ file under a library root whose path ends with the unit's name)
+        defines under `extern "C"`. Only a library's own source is read: the game's C++ has no C entry points, and an
+        `extern "C"` around one of its definitions is the same debt as the header's."""
+        if unit not in self.c_defined:
+            if self.root is None:
+                self.c_defined[unit] = set()
+                return self.c_defined[unit]
+            if self.sources is None:
+                self.sources = _source_files(self.root, self.revision)
+            rels = [rel for rel in self.sources if (rel == unit or rel.endswith("/" + unit))
+                    and any(rel.startswith(root.rstrip("/") + "/") for root in self.library)]
+            texts = _read(self.root, self.revision, rels)
+            self.c_defined[unit] = set().union(*(extern_c_definitions(text) for text in texts.values()))
+        return self.c_defined[unit]
 
     def cxx_linkage(self, name: str) -> bool:
-        """True when a C++ unit, and no C unit, defines the function. A middleware unit is never C++: the
-        libraries are C, whatever the unit's file is called."""
+        """True when a C++ unit, and no C unit, defines the function with C++ linkage. A middleware unit is never
+        C++: the libraries are C, whatever the unit's file is called. A definition under `extern "C"` in the
+        library unit's own source has C linkage (the runtime's and the SDK's .cpp files define their C entry points
+        so); one that only takes it from a header's prototype, or a game unit's, does not."""
         units = self.linkage.get(name, ())
-        return any(Path(u).suffix.lower() in CPP_SUFFIXES and u not in self.middleware for u in units) and \
+        return any(Path(u).suffix.lower() in CPP_SUFFIXES and u not in self.middleware
+                   and name not in self.c_definitions(u) for u in units) and \
             not any(Path(u).suffix.lower() == ".c" for u in units)
+
+
+def _source_files(root: Path, revision: str | None) -> list[str]:
+    """The C++ source files git knows at a revision (None: the working tree, tracked and untracked)."""
+    command = ["ls-tree", "-r", "-z", "--name-only", revision] if revision else \
+        ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]
+    result = subprocess.run(["git", "-C", str(root), *command], capture_output=True, check=False)
+    return sorted({rel for rel in result.stdout.decode("utf-8", "surrogateescape").split("\0")
+                   if Path(rel).suffix.lower() in CPP_SUFFIXES})
 
 
 def _config_dirs(project: Project, repo: str) -> list[str]:
@@ -2034,7 +2082,7 @@ def read_config(root: Path, revision: str | None, dirs: list[str]) -> Config:
         if "symbols" in paths:
             pairs.append((paths["symbols"], paths.get("splits")))
     texts = _read(root, revision, sorted({p for pair in pairs for p in pair if p}))
-    config = Config(collections.defaultdict(set))
+    config = Config(collections.defaultdict(set), root=root, revision=revision)
     libraries = middleware(_read(root, revision, ["configure.py"]).get("configure.py", ""))
     for symbols_path, splits_path in sorted(set(pairs)):
         config.pairs.append((texts.get(symbols_path, ""), texts.get(splits_path, "") if splits_path else ""))
@@ -2056,7 +2104,9 @@ def _config(project: Project, repo: str, revision: str | None, tree: set[str]) -
     """The config at a revision, when a check reads it."""
     if not tree & {"header_extern_c", "misowned_member"}:
         return None
-    return read_config(project.root(repo), revision, _config_dirs(project, repo))
+    config = read_config(project.root(repo), revision, _config_dirs(project, repo))
+    config.library = _library_roots(project, repo)
+    return config
 
 
 def _totals(scans: dict[str, _Scan], related: dict[str, list[tuple[int, str, str]]]) -> collections.Counter:
