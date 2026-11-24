@@ -710,6 +710,16 @@ class QualityTests(unittest.TestCase):
                           (9, "scalar_view", "(s16 *)box"), (9, "scalar_view", "(s16 *)this"),
                           (10, "redundant_cast", "(TWidget *)&g_widget"), (11, "repeat_cast", "(TPad *)p")])
 
+    def test_qualifier_dropping_casts_are_not_redundant(self):
+        """A cast that drops the const or volatile of what a variable points to (`(char *)s` for `const char *s`,
+        `(TWidget *)&w` for `const TWidget w`) changes the type and is not redundant_cast; one that keeps it is."""
+        catalog = quality.patterns()
+        text = ("void step(const char *s, char *t, const TWidget *cw) {\n    const TWidget w;\n"
+                "    use((char *)s, (char *)t, (TWidget *)&w);\n    use((const char *)s, (TWidget *)cw);\n}\n")
+        self.assertEqual(sorted(f for f in quality.parsed_findings(text, catalog, "src/box.cpp")
+                                if f[1] == "redundant_cast"),
+                         [(3, "redundant_cast", "(char *)t"), (4, "redundant_cast", "(const char *)s")])
+
     def test_cross_casts_between_unrelated_classes(self):
         """A pointer variable cast to a class neither derived from nor a base of its declared class is cross_cast,
         judged over every file's classes; casts up or down a hierarchy and to undeclared types are not."""
